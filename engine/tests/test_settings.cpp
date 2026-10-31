@@ -37,6 +37,8 @@ int main() {
     assert(s.graphics_local_shadow_resolution == 0);
     assert(s.graphics_motion_blur_quality == 0);
     assert(!s.graphics_auto_exposure);
+    assert(!s.graphics_native_sss);
+    s.graphics_native_sss = true;
     s.graphics_auto_exposure = true;
     assert(s.graphics_lightshaft_tilt == 0.0f);
     s.graphics_lightshaft_tilt = 20.0f;
@@ -60,6 +62,7 @@ int main() {
     assert(saved.find("graphics_local_shadow_resolution=1\n") != std::string::npos);
     assert(saved.find("graphics_motion_blur_quality=1\n") != std::string::npos);
     assert(saved.find("graphics_auto_exposure=1\n") != std::string::npos);
+    assert(saved.find("graphics_native_sss=1\n") != std::string::npos);
     assert(saved.find("graphics_lightshaft_tilt=20.00\n") != std::string::npos);
     assert(saved.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     assert(saved.find("graphics_ssr_intensity=2.25\n") != std::string::npos);
@@ -76,6 +79,7 @@ int main() {
     s.graphics_local_shadow_resolution = 0;
     s.graphics_motion_blur_quality = 0;
     s.graphics_auto_exposure = false;
+    s.graphics_native_sss = false;
     s.graphics_lightshaft_tilt = 0.0f;
     BbSettings::Load();
     assert(s.graphics_ssr_intensity == 2.25f);
@@ -83,6 +87,7 @@ int main() {
     assert(s.graphics_local_shadow_resolution == 1);
     assert(s.graphics_motion_blur_quality == 1);
     assert(s.graphics_auto_exposure);
+    assert(s.graphics_native_sss);
     assert(s.startup_motion_blur_quality == 1);
     assert(s.graphics_lightshaft_tilt == 20.0f);
     assert(s.graphics_dof_intensity == 1.75f);

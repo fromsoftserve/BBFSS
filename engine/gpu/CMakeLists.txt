@@ -319,6 +319,10 @@ target_compile_options(exposure-policy-test PRIVATE -UNDEBUG -Wall -Wextra -Werr
 target_include_directories(exposure-policy-test PRIVATE ..)
 add_executable(native-exposure-test EXCLUDE_FROM_ALL ../tests/test_native_exposure.cpp
     shim/engine/auto_exposure.cpp)
+add_executable(native-sss-test EXCLUDE_FROM_ALL ../tests/test_native_sss.cpp
+    shim/engine/native_sss.cpp)
+target_include_directories(native-sss-test PRIVATE shim)
+target_compile_options(native-sss-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(native-exposure-test PRIVATE shim)
 target_compile_options(native-exposure-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(pipeline-cache-blob-test EXCLUDE_FROM_ALL ../tests/test_pipeline_cache_blob.cpp)
@@ -485,7 +489,7 @@ add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
 target_include_directories(widescreen-test PRIVATE shim)
 target_compile_options(widescreen-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(native-local-shadows-test EXCLUDE_FROM_ALL ../tests/test_native_local_shadows.cpp
-    shim/engine/graphics.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp shim/bbport_menu_i18n.cpp)
+    shim/engine/graphics.cpp shim/engine/native_sss.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp shim/bbport_menu_i18n.cpp)
 target_include_directories(native-local-shadows-test PRIVATE shim)
 target_compile_options(native-local-shadows-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(directional-shadow-test EXCLUDE_FROM_ALL ../tests/test_directional_shadows.cpp)

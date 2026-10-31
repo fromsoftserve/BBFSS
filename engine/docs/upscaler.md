@@ -170,6 +170,39 @@ to 3.0. The user-approved half-stop response is a starting tune, not evidence
 that area transitions, arbitrary camera cuts, different frame rates, performance
 or HDR/upscaler combinations have all been validated.
 
+### Optional native skin subsurface scattering
+
+`graphics_native_sss=1` enables the game's native material-profile SSS in allocated
+deferred views. It is off by default and independent of Picture tuning. Both
+launcher frontends expose it under Picture; Insert > Picture toggles it live and
+shows its status. "Game's own picture" turns it off.
+
+The verified 1.09 renderer has two gates: the global force-disable switch and the
+view's Enable SSS switch. Enabling only the former does not schedule the blur.
+The integration checks the render-entry fingerprint, view vtable, SSS feature
+mask and required resources before changing either switch. It shares Picture
+tuning's existing render-view hook rather than patching that entry twice. It preserves the
+original switch values, checks resource identity before restoration, and never
+accesses a displaced view's old resources. Views without native SSS allocation
+are left unchanged. Unsupported code/state is reported rather than guessed.
+
+A controlled player-face capture verified the native horizontal/vertical shaders
+`2eacb983` and `8c13b984`, a separate diffuse-lighting target, and subsequent
+composition with separate specular lighting. Each axis uses 17 color samples and
+depth-aware rejection. Authored RGB strengths, widths and kernel profiles remain
+unchanged; there is no fullscreen skin-color heuristic or hardcoded material ID.
+The captured face used G-buffer profile tag 31, but these tags are runtime
+registrations, not universal asset identifiers.
+
+An installed-build comparison through the actual Insert setting confirmed both
+blur passes appear when enabled and disappear again when disabled. Both setting
+values were saved to the INI; the comparison ended with SSS off.
+
+This is experimental activation, not a replacement scattering model. Other
+characters, same-depth hair/clothing boundaries and GPU frametime costs still
+need scene coverage before recommending it as a default. Auto exposure and DOF
+are unaffected.
+
 ### Experimental persistent native auto exposure
 
 `graphics_auto_exposure=0` is the default. **Auto exposure (experimental)** in

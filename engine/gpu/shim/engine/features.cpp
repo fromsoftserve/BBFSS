@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "engine_hooks.h"
 #include "auto_exposure.h"
+#include "native_sss.h"
 #include "camera.h"
 #include "change_appearance.h"
 #include "cheats.h"
@@ -47,6 +48,7 @@ std::int64_t __attribute__((sysv_abi)) OnStep(std::uint64_t, const std::uint64_t
 
 std::int64_t __attribute__((sysv_abi)) OnFrame(std::uint64_t, const std::uint64_t* saved) {
     Loading::Tick(saved[5]);
+    Sss::Tick();
     ChangeAppearance::Tick();
     Rebirth::Tick();
     Options::Tick();

@@ -18,6 +18,7 @@
 #include "engine/cheats.h"
 #include "engine/graphics.h"
 #include "engine/auto_exposure.h"
+#include "engine/native_sss.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -530,6 +531,22 @@ void HdrSection() {
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
+    if (const char* label = Item("Native skin SSS (experimental)", "Нативное SSS кожи (экспериментальное)")) {
+        Checkbox(label, s.graphics_native_sss);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Enables the game's native material-profile scattering without "
+            "changing authored strengths or specular lighting. Independent of Picture tuning. "
+            "Disable to restore original switches. Requires an allocated native SSS view.",
+            "По умолчанию выключено. Нативное рассеивание по профилям материалов без изменения "
+            "параметров и бликов. Независимо от настройки изображения. Нужны нативные ресурсы SSS."));
+        using BbEngine::Sss::Status;
+        const auto status = BbEngine::Sss::CurrentStatus();
+        const char* text = status == Status::Active ? BbSettings::MenuText("Active", "Активно") :
+                           status == Status::Off ? BbSettings::MenuText("Off", "Выключено") :
+                           status == Status::Waiting ? BbSettings::MenuText("Waiting for native SSS resources", "Ожидание ресурсов SSS") :
+                           BbSettings::MenuText("Native SSS unavailable", "Нативное SSS недоступно");
+        ImGui::TextDisabled("%s", text);
+    }
     if (const char* label = Item("Auto exposure (experimental)", "Автоэкспозиция (экспериментальная)")) {
         Checkbox(label, s.graphics_auto_exposure);
         Hint(BbSettings::MenuText(
@@ -674,6 +691,7 @@ void PictureSection() {
     if (const char* label = Item("Game's own picture", "Как в игре")) {
         if (ImGui::Button(label)) {
             Store(s.graphics_auto_exposure, false, true);
+            Store(s.graphics_native_sss, false, true);
             Store(s.graphics_brightness, 1.0f, true);
             Store(s.graphics_contrast, 1.0f, true);
             Store(s.graphics_saturation, 1.0f, true);
