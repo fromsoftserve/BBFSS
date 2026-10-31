@@ -37,6 +37,9 @@ SkySeam::SkySeam(const Instance& instance_, Scheduler& scheduler_)
         instance, 0, 4098 * 4, VideoCore::MemoryType::DeviceLocal, "Verified Dream sky UVs");
 }
 SkySeam::~SkySeam() = default;
+vk::DescriptorBufferInfo SkySeam::VerificationBuffer() const {
+    return {output->Handle(), 0, (capture_count + 2) * 4};
+}
 
 vk::Buffer SkySeam::Correct(vk::DescriptorBufferInfo positions, vk::DescriptorBufferInfo uv,
                           u32 position_stride, u32 uv_stride, u32 count) {

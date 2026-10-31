@@ -194,6 +194,9 @@ add_host_shader(volumetric_light.comp volumetric_light_tint_comp TINT=1)
 add_host_shader(volumetric_light.comp volumetric_light_composite_comp COMPOSITE=1)
 add_host_shader(volumetric_light.comp volumetric_light_celestial_comp CELESTIAL=1)
 add_host_shader(sky_seam.comp sky_seam_comp)
+add_host_shader(sky_zenith.comp sky_zenith_validate_comp VALIDATE=1)
+add_host_shader(sky_zenith.comp sky_zenith_horizontal_comp HORIZONTAL=1)
+add_host_shader(sky_zenith.comp sky_zenith_vertical_comp)
 add_host_shader(ssgi.comp ssgi_prep_comp PREP=1)
 add_host_shader(ssgi.comp ssgi_gather_comp GATHER=1)
 add_host_shader(ssgi.comp ssgi_denoise_comp DENOISE=1)
@@ -391,6 +394,14 @@ target_include_directories(sky-seam-test PRIVATE ${SHADER_INCLUDE})
 target_compile_options(sky-seam-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
     -Wno-missing-field-initializers)
 target_link_libraries(sky-seam-test PRIVATE Vulkan::Vulkan)
+add_executable(sky-zenith-test EXCLUDE_FROM_ALL ../tests/test_sky_zenith.cpp
+    ${SHADER_DIR}/sky_zenith_validate_comp.h ${SHADER_DIR}/sky_zenith_horizontal_comp.h
+    ${SHADER_DIR}/sky_zenith_vertical_comp.h)
+target_include_directories(sky-zenith-test PRIVATE ${SHADER_INCLUDE})
+target_compile_features(sky-zenith-test PRIVATE cxx_std_20)
+target_compile_options(sky-zenith-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(sky-zenith-test PRIVATE Vulkan::Vulkan)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)

@@ -92,6 +92,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     volumetric_light = std::make_unique<VolumetricLight>(instance, scheduler, texture_cache,
                                                        runtime, *scene_targets);
     sky_seam = std::make_unique<SkySeam>(instance, scheduler);
+    sky_zenith = std::make_unique<SkyZenith>(instance, scheduler);
     depth_of_field = std::make_unique<DepthOfField>(instance, scheduler, texture_cache,
                                                  runtime, *scene_targets);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
@@ -2037,6 +2038,41 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     {v.host_buffers[pi], v.host_offsets[pi], 484 * 24 + 12},
                     {v.host_buffers[ui], v.host_offsets[ui], (count - 1) * 24 + 4}, 24, 24, count);
                 if (result) {
+                    if (sky_zenith->Enabled()) {
+                        u32 first_image = 0;
+                        for (const auto* stage : pipeline->GetStages()) {
+                            if (stage == sky_ps) break;
+                            if (stage) first_image += u32(stage->images.size());
+                        }
+                        for (u32 i = 0; i < sky_ps->images.size(); ++i) {
+                            const auto sharp = sky_ps->images[i].GetSharp(*sky_ps);
+                            const u32 index = first_image + i;
+                            if (sharp.base_level != 0 || sharp.last_level != 11 ||
+                                index >= image_infos.size()) continue;
+                            const auto image = std::ranges::find_if(bound_images,
+                                [&](VideoCore::ImageId id) {
+                                    if (!id) return false;
+                                    const auto& info = texture_cache.GetImage(id).info;
+                                    return info.guest_address == sharp.Address() &&
+                                        info.pixel_format == vk::Format::eBc1RgbaSrgbBlock &&
+                                        info.size.width == 2048 && info.size.height == 512 &&
+                                        info.resources.layers == 1 && info.resources.levels == 12;
+                                });
+                            if (image == bound_images.end()) continue;
+                            runtime.FlushBarriers();
+                            if (const auto view = sky_zenith->Filter(image_infos[index],
+                                    sky_seam->VerificationBuffer(), count)) {
+                                image_infos[index].imageView = view;
+                                image_infos[index].imageLayout = vk::ImageLayout::eGeneral;
+                                if (FrameCapture::Active()) {
+                                    const auto note = fmt::format("\n  sky zenith GPU verified {}",
+                                        sky_zenith->CaptureVerification());
+                                    FrameCapture::Note(note.c_str());
+                                }
+                            }
+                            break;
+                        }
+                    }
                     if (FrameCapture::Active()) {
                         const auto note = fmt::format("\n  sky seam GPU verified {}",
                             sky_seam->CaptureVerification());
@@ -2315,6 +2351,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.endQuery(query.pool, query.index);
         }
     });
+    if (sky_candidate && FrameCapture::Active() && cb_descs[0].first) {
+        const auto& sky = texture_cache.GetImage(cb_descs[0].first);
+        if (sky.info.pixel_format == vk::Format::eR16G16B16A16Sfloat) {
+            if (const char* dir = std::getenv("BB_CAPTURE_DIR")) {
+                // Read the rendered dome, not a cleared target or post-tonemap upscaler input.
+                scheduler.EndRendering();
+                texture_cache.DumpImagesAt(sky.info.guest_address, dir);
+                FrameCapture::Note("\n  captured sky HDR immediately after dome draw");
+            }
+        }
+    }
     if (ps_info && cb_descs[0].first &&
         (ps_info->pgm_hash == 0xf55643de || ps_info->pgm_hash == 0xfbe7c4b6 ||
          ps_info->pgm_hash == 0xe80526cc || ps_info->pgm_hash == 0x9e1cb278)) {

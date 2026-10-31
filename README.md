@@ -122,6 +122,42 @@ Implementation: [`sky_seam.comp`](engine/gpu/shadps4/video_core/host_shaders/sky
 The `sky-seam-test` GPU test accepts a local 485-record, 24-byte position/UV fixture;
 no game geometry or texture fixtures are included in this repository.
 
+The separate **experimental zenith debanding prototype** is off by default.
+Set `BB_SKY_ZENITH_FIX=1` before launch to try it with the seam correction enabled.
+It additionally checks the panorama's size, format, 12-mip layout and 16 measured
+base-mip color samples. The initial wrap-aware local bilateral filter (base-mip
+rows 0-96) did not noticeably improve the radial streaks in the live comparison.
+A stronger diagnostic mode reconstructs a zenith gradient from each row's average
+linear-light color and smooths it vertically. A partial blend fades continuously
+over base-mip rows 0-224 using a curve with zero first and second derivatives at
+both ends, without a brightness-dependent boundary. Its default diagnostic
+strength is 40%, so at least 60% of the original panorama contribution is retained
+even at the pole. This reduces rather than eliminates authored horizontal
+variation; it cannot recover lost source detail. Full-strength reconstruction
+looked too flat and exposed a transition cutoff; the user confirmed the
+reduced-strength balance in a same-camera original/reconstructed comparison.
+
+Each native mip is processed independently into an owned RGBA16F image; alpha
+and the lower panorama are copied rather than filtered. The original sky sampler,
+moon, separate cloud draws and game files are unchanged. This prototype rebuilds
+the filtered mip chain per supported draw; its rendering cost has not been
+benchmarked.
+
+For diagnostic launches only, `BB_SKY_ZENITH_MODE_FILE` can name a text file
+containing `0` (original), `1` (local filter), `2` (deliberately flat-color texture
+isolation) or `3` (gradient reconstruction), optionally followed by gradient
+strength from 0 to 1 (for example, `3 0.4`). The mode is polled every 30 supported
+draws, allowing stationary comparisons without restarts. Without that file,
+`BB_SKY_ZENITH_FIX=1` selects the initial local filter;
+`BB_SKY_ZENITH_ISOLATE=1` additionally selects flat-color isolation. Neither the
+mode file nor these experimental flags are set by a normal launcher run.
+
+`sky-zenith-test` accepts a local decoded 2048x512 RGBA8 panorama fixture and checks
+GPU smoothing, wrap-boundary behavior, lower-region/alpha preservation, mismatch
+passthrough, row-average reconstruction, gradual partial blending against a
+numerical reference, retained texture variation, flat-color isolation and repeated use.
+Fixtures remain local and are not distributed.
+
 ### Renderer optimizations
 
 Renderer optimizations are permanently enabled, with no menu toggle.
