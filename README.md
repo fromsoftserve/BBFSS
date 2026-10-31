@@ -106,6 +106,22 @@ Set `BB_DIRECTIONAL_SHADOWS=0` before launch to restore the previous native blur
 path and disable added cascade overlap. The existing PCSS and contact-shadow
 toggles still apply; disable those as well for the original directional filtering.
 
+### Hunter's Dream sky seam
+
+A default-on GPU UV correction closes the inset horizontal gap in the verified
+Hunter's Dream sky dome. It leaves the panorama texture, vertical UVs, clouds and
+moon unchanged; it does not address zenith texture banding.
+
+The correction requires the known shader pair, draw counts and vertex-stream
+layout, plus a GPU fingerprint of the first 485 position/UV records. Nonmatching
+streams retain their original UVs, and devices without dynamic vertex input keep
+the original rendering path. Set `BB_SKY_SEAM_FIX=0` before launch to disable it
+for comparison. Normal rendering performs no CPU readback or GPU wait.
+
+Implementation: [`sky_seam.comp`](engine/gpu/shadps4/video_core/host_shaders/sky_seam.comp).
+The `sky-seam-test` GPU test accepts a local 485-record, 24-byte position/UV fixture;
+no game geometry or texture fixtures are included in this repository.
+
 ### Renderer optimizations
 
 Renderer optimizations are permanently enabled, with no menu toggle.

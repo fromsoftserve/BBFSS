@@ -91,6 +91,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                                                  *camera_motion);
     volumetric_light = std::make_unique<VolumetricLight>(instance, scheduler, texture_cache,
                                                        runtime, *scene_targets);
+    sky_seam = std::make_unique<SkySeam>(instance, scheduler);
     depth_of_field = std::make_unique<DepthOfField>(instance, scheduler, texture_cache,
                                                  runtime, *scene_targets);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
@@ -1990,6 +1991,67 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (!bound) {
         return;
     }
+    const auto* sky_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    bool sky_candidate = sky_seam->Enabled() && sky_ps && sky_ps->pgm_hash == 0xdda49e89 &&
+        pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash == 0xb28f5a56 &&
+        is_indexed && regs.num_indices == 1920 && regs.num_instances.NumInstances() == 1 &&
+        instance.IsVertexInputDynamicState();
+    if (sky_candidate) {
+        const auto [vertex, instance_index] = GetDrawOffsets(
+            regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
+        sky_candidate = vertex == 0 && instance_index == 0;
+    }
+    if (sky_candidate) {
+        if (!inputs_resolved) {
+            ResolveVertexBuffers(pipeline, draw_prepared);
+            ResolveIndexBuffer(index_offset);
+        }
+        auto& v = vertex_binds;
+        if (FrameCapture::Active()) {
+            for (const auto& attr : v.attributes) {
+                const auto binding = attr.binding;
+                if (binding >= v.num_buffers) continue;
+                const auto note = fmt::format(
+                    "\n  sky vertex location {} format {} stride {} size {} offset {}",
+                    attr.location, vk::to_string(attr.format), v.host_strides[binding],
+                    v.host_sizes[binding], attr.offset);
+                FrameCapture::Note(note.c_str());
+            }
+        }
+        const auto position = std::ranges::find(v.attributes, 0u,
+            &vk::VertexInputAttributeDescription2EXT::location);
+        const auto uv = std::ranges::find(v.attributes, 3u,
+            &vk::VertexInputAttributeDescription2EXT::location);
+        if (position != v.attributes.end() && uv != v.attributes.end() &&
+            position->format == vk::Format::eR32G32B32Sfloat &&
+            uv->format == vk::Format::eR16G16Sint &&
+            position->offset == 0 && uv->offset == 0 &&
+            position->binding < v.num_buffers && uv->binding < v.num_buffers) {
+            const auto pi = position->binding, ui = uv->binding;
+            if (v.host_strides[pi] == 24 && v.host_strides[ui] == 24 &&
+                v.host_sizes[pi] == v.host_sizes[ui] && v.host_sizes[pi] % 24 == 0 &&
+                v.host_sizes[pi] == 1824 * 24 &&
+                v.host_buffers[pi] && v.host_buffers[ui]) {
+                const u32 count = u32(v.host_sizes[pi] / 24);
+                const auto result = sky_seam->Correct(
+                    {v.host_buffers[pi], v.host_offsets[pi], 484 * 24 + 12},
+                    {v.host_buffers[ui], v.host_offsets[ui], (count - 1) * 24 + 4}, 24, 24, count);
+                if (result) {
+                    if (FrameCapture::Active()) {
+                        const auto note = fmt::format("\n  sky seam GPU verified {}",
+                            sky_seam->CaptureVerification());
+                        FrameCapture::Note(note.c_str());
+                    }
+                    v.host_buffers[ui] = result;
+                    v.host_offsets[ui] = 0;
+                    v.host_sizes[ui] = count * 4;
+                    v.host_strides[ui] = 4;
+                    for (auto& binding : v.bindings)
+                        if (binding.binding == ui) binding.stride = 4;
+                }
+            }
+        }
+    }
     const auto state = BeginRendering(pipeline);
     if (ProxyTraceOn()) {
         const auto target = cb_descs[0].first ? cb_descs[0].first : db_desc.first;
@@ -1997,7 +2059,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                         target ? &texture_cache.GetImage(target) : nullptr);
     }
 
-    if (!inputs_resolved) {
+    if (!inputs_resolved && !sky_candidate) {
         ResolveVertexBuffers(pipeline, draw_prepared);
         if (is_indexed) {
             ResolveIndexBuffer(index_offset);

@@ -193,6 +193,7 @@ add_host_shader(volumetric_light.comp volumetric_light_repair_comp REPAIR=1)
 add_host_shader(volumetric_light.comp volumetric_light_tint_comp TINT=1)
 add_host_shader(volumetric_light.comp volumetric_light_composite_comp COMPOSITE=1)
 add_host_shader(volumetric_light.comp volumetric_light_celestial_comp CELESTIAL=1)
+add_host_shader(sky_seam.comp sky_seam_comp)
 add_host_shader(ssgi.comp ssgi_prep_comp PREP=1)
 add_host_shader(ssgi.comp ssgi_gather_comp GATHER=1)
 add_host_shader(ssgi.comp ssgi_denoise_comp DENOISE=1)
@@ -384,6 +385,12 @@ add_executable(volumetric-tilt-test EXCLUDE_FROM_ALL ../tests/test_volumetric_ti
 target_include_directories(volumetric-tilt-test PRIVATE ${SHADER_INCLUDE})
 target_compile_options(volumetric-tilt-test PRIVATE -UNDEBUG)
 target_link_libraries(volumetric-tilt-test PRIVATE Vulkan::Vulkan)
+add_executable(sky-seam-test EXCLUDE_FROM_ALL ../tests/test_sky_seam.cpp
+    ${SHADER_DIR}/sky_seam_comp.h)
+target_include_directories(sky-seam-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(sky-seam-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(sky-seam-test PRIVATE Vulkan::Vulkan)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
