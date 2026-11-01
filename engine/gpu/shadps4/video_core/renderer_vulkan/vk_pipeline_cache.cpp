@@ -1110,6 +1110,10 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
     auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+    auto selected = is_patched ? std::span<const u32>(*patch) : std::span<const u32>(spv);
+    const auto ggx = DirectionalGgxModule(info.pgm_hash,
+                                         info.hw_stage == Shader::HwStage::Fragment, selected);
+    if (!ggx.empty()) selected = ggx;
     // The game's ScreenSpaceAO2_WithNormal pixel shader, replaced by ground-truth AO.
     if (IsGtaoReplacement(info.pgm_hash, info.hw_stage)) {
         LOG_WARNING(Render_Vulkan, "SSAO shader {:#x} replaced with GTAO", info.pgm_hash);
@@ -1123,17 +1127,21 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(blur, instance.GetDevice());
     } else if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
-        module = CompileSPV(*patch, instance.GetDevice());
+        CaptureSpecularModule(info.pgm_hash, perm_idx, selected);
+        module = CompileSPV(selected, instance.GetDevice());
     } else {
-        module = CompileSPV(spv, instance.GetDevice());
+        CaptureSpecularModule(info.pgm_hash, perm_idx, selected);
+        module = CompileSPV(selected, instance.GetDevice());
     }
 
+    // Persist native directional bytes; restart-only GGX selection is reapplied on warmup.
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
-        DebugState.CollectShader(name, info.sw_stage, module, spv, code,
+        DebugState.CollectShader(name, info.sw_stage, module,
+                                 ggx.empty() ? std::span<const u32>(spv) : std::span<const u32>(ggx), code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
     return module;

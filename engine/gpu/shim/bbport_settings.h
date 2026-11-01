@@ -166,6 +166,7 @@ struct Values {
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
     std::atomic<bool> graphics_auto_exposure{false};
     std::atomic<bool> graphics_native_sss{false};
+    std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_ao_strength{1},graphics_gi_strength{6},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_volumetric_intensity{1};
     std::atomic<float> graphics_lightshaft_tilt{0};
@@ -215,6 +216,7 @@ struct Values {
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 0;
+    bool startup_directional_ggx = false;
     bool startup_effects[EffectCount]{};
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;

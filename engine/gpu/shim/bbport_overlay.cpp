@@ -715,6 +715,20 @@ void PictureSection() {
 void EffectsSection() {
     auto& s = BbSettings::Get();
     Section("Game effects (restart required)", "Эффекты игры (после перезапуска)");
+    if (const char* label = Item("Directional GGX (native-anchored, experimental)",
+                                "Направленный GGX (нативная калибровка, экспериментальный)")) {
+        Checkbox(label, s.graphics_directional_ggx);
+        Hint(BbSettings::MenuText(
+            "Off by default. Native-anchored GGX for the four directional specular lobes only. "
+            "Softer highlight tails can brighten rough or grazing surfaces. Diffuse, local lights "
+            "and environment/SSR remain native. Requires restarting Bloodborne; unsupported shader "
+            "variants retain native specular and report a warning. Not a full PBR conversion.",
+            "По умолчанию выключено. GGX с нативной калибровкой для четырёх направленных бликов. "
+            "Мягкие края могут осветлять шероховатые поверхности и скользящие углы. Диффузное "
+            "освещение, локальные источники и окружение/SSR не меняются. Требуется перезапуск "
+            "Bloodborne. Неподдерживаемые шейдеры сохраняют нативные блики с предупреждением. "
+            "Не является полной PBR-конверсией."));
+    }
     if (const char* label = Item("Motion blur quality", "Качество размытия в движении")) {
         const char* levels[] = {BbSettings::MenuText("Default", "По умолчанию"),
                                 BbSettings::MenuText("High", "Высокое")};
@@ -1858,6 +1872,7 @@ void Menu() {
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+        s.graphics_directional_ggx != s.startup_directional_ggx ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= e != BbSettings::EffectGi && e != BbSettings::EffectContactShadows &&

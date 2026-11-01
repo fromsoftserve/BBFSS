@@ -197,6 +197,9 @@ add_host_shader(sky_seam.comp sky_seam_comp)
 add_host_shader(sky_zenith.comp sky_zenith_validate_comp VALIDATE=1)
 add_host_shader(sky_zenith.comp sky_zenith_horizontal_comp HORIZONTAL=1)
 add_host_shader(sky_zenith.comp sky_zenith_vertical_comp)
+add_host_shader(billboard_probe.vert billboard_probe_vertex)
+add_host_shader(billboard_probe.vert billboard_probe_instanced INSTANCED=1)
+add_host_shader(billboard_probe.frag billboard_probe_fragment)
 add_host_shader(ssgi.comp ssgi_prep_comp PREP=1)
 add_host_shader(ssgi.comp ssgi_gather_comp GATHER=1)
 add_host_shader(ssgi.comp ssgi_denoise_comp DENOISE=1)
@@ -388,6 +391,14 @@ add_executable(volumetric-tilt-test EXCLUDE_FROM_ALL ../tests/test_volumetric_ti
 target_include_directories(volumetric-tilt-test PRIVATE ${SHADER_INCLUDE})
 target_compile_options(volumetric-tilt-test PRIVATE -UNDEBUG)
 target_link_libraries(volumetric-tilt-test PRIVATE Vulkan::Vulkan)
+add_executable(billboard-probe-test EXCLUDE_FROM_ALL ../tests/test_billboard_probe.cpp
+    ${SHADER_DIR}/billboard_probe_vertex.h ${SHADER_DIR}/billboard_probe_instanced.h
+    ${SHADER_DIR}/billboard_probe_fragment.h)
+target_include_directories(billboard-probe-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(billboard-probe-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(billboard-probe-test PRIVATE Vulkan::Vulkan)
+
 add_executable(sky-seam-test EXCLUDE_FROM_ALL ../tests/test_sky_seam.cpp
     ${SHADER_DIR}/sky_seam_comp.h)
 target_include_directories(sky-seam-test PRIVATE ${SHADER_INCLUDE})
@@ -470,6 +481,15 @@ target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan:
 add_executable(engine-hooks-test EXCLUDE_FROM_ALL ../tests/test_engine_hooks.cpp shim/engine/engine_hooks.cpp)
 target_compile_options(engine-hooks-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(engine-hooks-test PRIVATE ..)
+add_executable(pom-patch-test EXCLUDE_FROM_ALL ../tests/test_pom_patch.cpp)
+target_include_directories(pom-patch-test PRIVATE shadps4)
+target_compile_options(pom-patch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(ggx-directional-test EXCLUDE_FROM_ALL ../tests/test_ggx_directional.cpp)
+add_executable(ggx-patch-test EXCLUDE_FROM_ALL ../tests/test_ggx_patch.cpp)
+target_compile_options(ggx-patch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_compile_options(ggx-directional-test PRIVATE -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(ggx-directional-test PRIVATE Vulkan::Vulkan)
 # Local game-derived native menu assets. No game data is embedded in this tool.
 find_package(ZLIB REQUIRED)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS

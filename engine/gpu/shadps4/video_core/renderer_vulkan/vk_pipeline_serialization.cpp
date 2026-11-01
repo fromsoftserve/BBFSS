@@ -30,11 +30,23 @@ namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
 static constexpr u32 MotionShaderBinaryVersion = 8u; // runtime address descriptor, set 1
+static constexpr u32 PomShaderBinaryVersion = 9u; // valid upper bracket for dithered first hit
 static constexpr u32 ShaderMetaVersion = 8u; // bbport: HwFragmentRuntimeInfo::depth_first
 static constexpr u32 PipelineKeyVersion = 6u; // pointer-free pipeline state + generated fragment
 } // namespace Serialization
 
 namespace Vulkan {
+
+static u32 ShaderBinaryVersion(const Shader::Info& info,
+                              const Shader::StageSpecialization& spec) {
+    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        return Serialization::MotionShaderBinaryVersion;
+    }
+    if (info.hw_stage == Shader::HwStage::Fragment && Pom::IsSupportedShader(info.pgm_hash)) {
+        return Serialization::PomShaderBinaryVersion;
+    }
+    return Serialization::ShaderBinaryVersion;
+}
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
@@ -80,10 +92,7 @@ std::vector<u8> SerializeShaderMeta(const Shader::Info& info, const Shader::Stag
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
-                               spec.runtime_info.hw.vs.motion_vectors;
-    meta.Write(vertex_motion ? Serialization::MotionShaderBinaryVersion
-                             : Serialization::ShaderBinaryVersion);
+    meta.Write(ShaderBinaryVersion(info, spec));
     meta.Write(perm_hash);
     meta.Write(perm_idx);
     spec.Serialize(ar);
@@ -118,10 +127,7 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
-                               spec.runtime_info.hw.vs.motion_vectors;
-    meta.Write(vertex_motion ? Serialization::MotionShaderBinaryVersion
-                             : Serialization::ShaderBinaryVersion);
+    meta.Write(ShaderBinaryVersion(info, spec));
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -157,7 +163,8 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     u32 binary_version{};
     meta.Read(binary_version);
     if (binary_version != Serialization::ShaderBinaryVersion &&
-        binary_version != Serialization::MotionShaderBinaryVersion) {
+        binary_version != Serialization::MotionShaderBinaryVersion &&
+        binary_version != Serialization::PomShaderBinaryVersion) {
         return false;
     }
 
@@ -173,12 +180,8 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
         return false;
     }
 
-    // Only old motion vertex binaries embed process-local addresses. Other v7 shaders remain
-    // reusable; v8 motion binaries load the current addresses from a renderer-owned descriptor.
-    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
-                               spec.runtime_info.hw.vs.motion_vectors;
-    if (binary_version != (vertex_motion ? Serialization::MotionShaderBinaryVersion
-                                        : Serialization::ShaderBinaryVersion)) {
+    // Retain unrelated v7/v8 binaries; supported POM fragments must rebuild old patched binaries.
+    if (binary_version != ShaderBinaryVersion(info, spec)) {
         return false;
     }
 
@@ -434,6 +437,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     if (fragment) {
         PatchSsrComposite(program->info.pgm_hash, Shader::HwStage::Fragment, spv);
         Pom::PatchPom(program->info.pgm_hash, true, spv);
+        auto ggx = DirectionalGgxModule(program->info.pgm_hash, true, spv);
+        if (!ggx.empty()) spv = std::move(ggx);
     }
     const bool gtao_stage = fragment &&
                             IsGtaoReplacement(program->info.pgm_hash, Shader::HwStage::Fragment);
@@ -459,6 +464,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
             LOG_WARNING(Render_Vulkan, "Motion blur {:#x}: high-quality native filtering (cached)",
                         program->info.pgm_hash);
         }
+        CaptureSpecularModule(program->info.pgm_hash, perm_idx, spv);
         const auto [result, compiled] = instance.GetDevice().createShaderModule(
             gtao_stage
                 ? vk::ShaderModuleCreateInfo{.codeSize = sizeof(GTAO_FRAG),
