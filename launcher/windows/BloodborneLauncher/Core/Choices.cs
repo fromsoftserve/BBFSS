@@ -8,6 +8,12 @@
     /// <summary>Every list the launcher offers, in English, with the values bbport expects.</summary>
     public static class Choices
     {
+        public static readonly Choice[] AoQualities =
+        {
+            new(L.T("Regular GTAO"), "0"),
+            new(L.T("High (full-res bitmask GTAO, denoised, experimental)"), "1"),
+        };
+
         public static readonly Choice[] Upscalers =
         {
             new("FSR 4", "fsr4"),

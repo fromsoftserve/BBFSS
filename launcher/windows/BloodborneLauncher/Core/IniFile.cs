@@ -26,6 +26,7 @@ namespace BloodborneLauncher.Core
             ("frame_gen", "off"),
             ("graphics_auto_exposure", "0"),
             ("graphics_native_sss", "0"),
+            ("graphics_ao_quality", "0"),
             ("frame_gen_cap", "1"),
             ("dlss_preset", "k"),
             ("fps_position", "0"),

@@ -19,7 +19,6 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
-#include "video_core/host_shaders/gtao_frag.h"
 #include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -467,8 +466,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
         CaptureSpecularModule(program->info.pgm_hash, perm_idx, spv);
         const auto [result, compiled] = instance.GetDevice().createShaderModule(
             gtao_stage
-                ? vk::ShaderModuleCreateInfo{.codeSize = sizeof(GTAO_FRAG),
-                                             .pCode = GTAO_FRAG}
+                ? vk::ShaderModuleCreateInfo{.codeSize = GtaoFragmentShader().size_bytes(),
+                                             .pCode = GtaoFragmentShader().data()}
             : !blur.empty()
                 ? vk::ShaderModuleCreateInfo{.codeSize = blur.size_bytes(), .pCode = blur.data()}
             : ssr_stage

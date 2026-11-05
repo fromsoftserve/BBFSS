@@ -23,7 +23,6 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
-#include "video_core/host_shaders/gtao_frag.h"
 #include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
 #include "bbport_settings.h"
@@ -1117,7 +1116,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     // The game's ScreenSpaceAO2_WithNormal pixel shader, replaced by ground-truth AO.
     if (IsGtaoReplacement(info.pgm_hash, info.hw_stage)) {
         LOG_WARNING(Render_Vulkan, "SSAO shader {:#x} replaced with GTAO", info.pgm_hash);
-        module = CompileSPV(GTAO_FRAG, instance.GetDevice());
+        module = CompileSPV(GtaoFragmentShader(), instance.GetDevice());
     } else if (IsSsrReplacement(info.pgm_hash, info.hw_stage)) {
         LOG_WARNING(Render_Vulkan, "SSR shader {:#x} replaced", info.pgm_hash);
         module = CompileSPV(SSR_FRAG, instance.GetDevice());

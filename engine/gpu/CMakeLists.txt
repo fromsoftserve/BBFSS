@@ -148,6 +148,10 @@ function(add_host_shader FILENAME SHADER_NAME)
     set(DEFINES ${ARGN})
     list(TRANSFORM DEFINES PREPEND "-D")
     set(INCLUDES "")
+    set(STAGE "")
+    if (FILENAME MATCHES "\\.frag$" AND SHADER_NAME MATCHES "_comp$")
+        set(STAGE -S comp)
+    endif()
     if (FILENAME MATCHES "^native_motion_blur")
         list(APPEND INCLUDES ${SHADER_SRC}/native_motion_blur.glsl)
     endif()
@@ -156,7 +160,7 @@ function(add_host_shader FILENAME SHADER_NAME)
     endif()
     add_custom_command(OUTPUT ${OUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DIR}
-        COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${DEFINES} ${SHADER_SRC}/${FILENAME}
+        COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${STAGE} ${DEFINES} ${SHADER_SRC}/${FILENAME}
         COMMAND ${CMAKE_COMMAND} "-DHEADER_FILE=${OUT}" -P ${SHADER_SRC}/AddShaderHeaderInclude.cmake
         DEPENDS ${SHADER_SRC}/${FILENAME} ${INCLUDES} VERBATIM)
     set(SHADER_HEADERS ${SHADER_HEADERS} ${OUT} PARENT_SCOPE)
@@ -170,6 +174,14 @@ add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
 add_host_shader(gtao.frag gtao_frag)
+add_host_shader(gtao.frag gtao_hq_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=3 GTAO_STEPS=6)
+add_host_shader(gtao.frag gtao_single_hq_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=1 GTAO_STEPS=6)
+add_host_shader(gtao.frag gtao_reference_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=16 GTAO_STEPS=32)
+add_host_shader(gtao.frag gtao_full_comp GTAO_COMPUTE=1 GTAO_SPATIAL_HQ=1 GTAO_SLICES=3 GTAO_STEPS=6)
+add_host_shader(gtao_denoise.comp gtao_denoise_comp)
+add_host_shader(gtao_denoise.comp gtao_denoise_full_comp FULLRES=1)
+add_host_shader(gtao_denoise.comp gtao_copy_comp COPY=1)
+add_host_shader(gtao_denoise.comp gtao_debug_comp DEBUG_VIEW=1)
 add_host_shader(ssr.frag ssr_frag)
 add_host_shader(ssr_temporal.comp ssr_temporal_resolve_comp RESOLVE=1)
 add_host_shader(ssr_trace.comp ssr_trace_comp)
@@ -384,6 +396,15 @@ add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bb
     shim/bbport_menu_i18n.cpp)
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
+
+add_executable(gtao-test EXCLUDE_FROM_ALL ../tests/test_gtao.cpp
+    ${SHADER_DIR}/gtao_frag.h ${SHADER_DIR}/gtao_hq_frag.h ${SHADER_DIR}/gtao_reference_frag.h
+    ${SHADER_DIR}/gtao_single_hq_frag.h
+    ${SHADER_DIR}/gtao_denoise_comp.h ${SHADER_DIR}/gtao_copy_comp.h ${SHADER_DIR}/fs_tri_vert.h)
+target_include_directories(gtao-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(gtao-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(gtao-test PRIVATE Vulkan::Vulkan)
 
 add_host_shader(volumetric_tilt_test.comp volumetric_tilt_test_comp)
 add_executable(volumetric-tilt-test EXCLUDE_FROM_ALL ../tests/test_volumetric_tilt.cpp

@@ -111,6 +111,9 @@ namespace BloodborneLauncher.Views
 
             Group(L.T("Game effects"));
             Body.Children.Add(Text(L.T("Patches to the game, applied when it starts."), "Faint"));
+            IniCombo(SymbolRegular.Color24, L.T("Ambient occlusion quality"),
+                L.T("Regular GTAO is unchanged. High traces three visibility-bitmask GTAO directions at the full internal render resolution (follows DLSS/FSR scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU cost; Ambient occlusion must also be enabled. Requires restarting Bloodborne."),
+                Choices.AoQualities, "graphics_ao_quality");
             IniCombo(SymbolRegular.Cube24, L.T("Model detail"), null, Choices.ModelLod, "model_lod");
             IniCombo(SymbolRegular.Camera24, L.T("Follow camera"), L.T("Original keeps the game's camera distance, angle and follow speed at 60 FPS and above"), Choices.CameraTuning, "camera_tuning");
             foreach (var effect in Choices.Effects)

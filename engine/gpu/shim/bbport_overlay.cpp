@@ -715,6 +715,30 @@ void PictureSection() {
 void EffectsSection() {
     auto& s = BbSettings::Get();
     Section("Game effects (restart required)", "Эффекты игры (после перезапуска)");
+    if (const char* label = Item("Ambient occlusion quality", "Качество затенения (AO)")) {
+        const char* levels[] = {
+            BbSettings::MenuText("Regular GTAO", "Обычный GTAO"),
+            BbSettings::MenuText("High (full-res bitmask GTAO, denoised, experimental)",
+                                 "Высокое (битмаск GTAO в полном разрешении, с шумоподавлением, "
+                                 "экспериментальное)")};
+        int quality = std::clamp(s.graphics_ao_quality.load(), 0, 1);
+        if (ImGui::Combo(label, &quality, levels, 2))
+            Store(s.graphics_ao_quality, quality, true);
+        Hint(BbSettings::MenuText(
+            "Regular GTAO is unchanged and selected by default. High traces three visibility-"
+            "bitmask GTAO directions at the full internal render resolution (it follows DLSS/FSR "
+            "scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact "
+            "shadows. Higher GPU cost;             Ambient occlusion must also be enabled. Both modes are "
+                        "computed fresh each frame from a fixed sampling pattern, so they stay stable in motion "
+                        "with no ghosting or trailing. Requires restarting Bloodborne.",
+            "Обычный GTAO не меняется и выбран по умолчанию. Высокое трассирует три направления "
+            "битмаск GTAO в полном внутреннем разрешении рендера (следует масштабированию DLSS/FSR) "
+            "и применяет фильтр шумоподавления с учётом глубины и нормалей для более чётких и "
+            "стабильных контактных теней. Повышает нагрузку на GPU; затенение должно быть включено. "
+            "Оба режима рассчитываются заново каждый кадр по фиксированному шаблону выборки, "
+            "поэтому остаются стабильными в движении без шлейфов и ореолов. "
+            "Требуется перезапуск Bloodborne."));
+    }
     if (const char* label = Item("Directional GGX (native-anchored, experimental)",
                                 "Направленный GGX (нативная калибровка, экспериментальный)")) {
         Checkbox(label, s.graphics_directional_ggx);
@@ -1873,6 +1897,7 @@ void Menu() {
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
         s.graphics_directional_ggx != s.startup_directional_ggx ||
+        s.graphics_ao_quality != s.startup_ao_quality ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= e != BbSettings::EffectGi && e != BbSettings::EffectContactShadows &&

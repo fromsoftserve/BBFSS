@@ -40,7 +40,58 @@ The original SSAO shader is replaced by a GTAO-style screen-space occlusion impl
 
 The replacement preserves the original shader's resource interface and depth-packed output, allowing the existing bilateral upscale to remain in place. The result strengthens small-scale grounding and crevice shading without changing direct illumination. As with other screen-space effects, occlusion is limited by the visible depth buffer.
 
-Implementation: [`gtao.frag`](engine/gpu/shadps4/video_core/host_shaders/gtao.frag).
+**Ambient occlusion quality** offers **Regular GTAO** (the unchanged, default shader) and
+**High (full-res bitmask GTAO, denoised, experimental)**, which traces three visibility-bitmask
+directions at the full internal render resolution (following DLSS/FSR scaling) and applies a
+depth/normal-aware denoiser. Set `graphics_ao_quality=1` in `lantern.ini`, or use
+either launcher's Graphics page or the in-game Game effects menu, then restart
+Bloodborne. Ambient occlusion must also be enabled. Cold compilation and cache
+warmup use the same startup-frozen selection; the live AO strength slider still
+applies independently.
+
+High samples three distinct directions with six steps on each side, then uses a
+5x5 depth/normal-aware spatial filter. Its slice-weight normalization leaves an
+unobstructed hemisphere open, and its minimum sample footprint preserves the slice
+direction instead of introducing near-sample self-occlusion. These corrections are
+HQ-only: High can be lighter than Standard on unobstructed surfaces, rather than
+simply darkening the image. It rejects off-screen gather samples and retains the
+existing thickness, world reach, strength mapping and native bilateral upscale.
+
+The filter preserves each center pixel's packed-depth bytes and updates the same
+AO target consumed by the native upscale and SSGI; it does not composite a second
+AO layer. It uses the gather's actual constants for normal UVs, including reduced
+scene proxies and padded targets. Unsupported targets/views warn once and retain
+unfiltered HQ AO. Standard allocates no HQ GPU resources and dispatches no filter.
+
+This is a spatial-only prototype at the game's AO-pass resolution, **not** a
+full-resolution or temporally accumulated AO mode. It adds GPU work. Synthetic
+GPU comparisons against a 16-direction, 32-step-per-side screen-space reference
+cover planes, corners, curved surfaces, thin rails, perforated foliage and a moved
+surface. A corrected single-direction control separates the coverage/filter gain
+from the brightness corrections. These checks do not establish in-game appearance,
+stability during camera motion, or whole-game FPS; those still need a live A/B
+evaluation before a release.
+
+Build/run the standalone shader regression with
+`cmake --build engine\out\gpu --target gtao-test settings-test`, then
+`engine\out\gpu\gtao-test.exe` and `engine\out\gpu\settings-test.exe`.
+The GPU test checks reference-error thresholds, open-plane visibility, AO-off
+identity, byte-exact packed depth, repeatability without history, noise reduction,
+depth/normal edges, odd sizes, partial regions and padded/proxy UV mapping.
+`gtao-test.exe engine\out\ao-hq-analysis\gpu --benchmark` additionally writes
+synthetic packed outputs and measures paired, warmed GPU intervals around the
+Standard pass and HQ gather plus both filter passes. Disable Vulkan validation
+layers for timing and check for competing GPU work; uploads/readbacks and pipeline
+compilation are outside the timestamp intervals. Reference/control shaders and the
+test executable are not part of the runtime package.
+Use `--benchmark-native` instead for a 960x540 synthetic AO target. Neither timing
+mode measures a complete frame or includes a new in-game comparison.
+`gtao-test.exe engine\out\ao-hq-analysis\native --native` runs the same correctness
+checks at 960x540 without timestamps, suitable for synchronization validation.
+
+Implementation: [`gtao.frag`](engine/gpu/shadps4/video_core/host_shaders/gtao.frag),
+[`gtao_denoise.comp`](engine/gpu/shadps4/video_core/host_shaders/gtao_denoise.comp) and
+[`vk_ao_spatial.cpp`](engine/gpu/shadps4/video_core/renderer_vulkan/vk_ao_spatial.cpp).
 
 ### Volumetric lighting
 
