@@ -172,6 +172,8 @@ struct Values {
     std::atomic<float> graphics_volumetric_intensity{1};
     std::atomic<float> graphics_lightshaft_tilt{0};
     std::atomic<float> graphics_point_fog_intensity{1};
+    std::atomic<bool> graphics_point_fog{true};               // Live on/off.
+    std::atomic<float> graphics_point_fog_glow_size{0.08f};    // Inverse-square core / radius, 0.03-0.20.
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ssr_intensity{1};
     std::atomic<int> graphics_shadow_resolution{1}; // High / Very high / Ultra; restart required.

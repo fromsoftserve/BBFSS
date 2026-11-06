@@ -97,9 +97,10 @@ Implementation: [`gtao.frag`](engine/gpu/shadps4/video_core/host_shaders/gtao.fr
 
 Directional volumetrics integrate scattering along camera rays through a three-dimensional fog volume, using the game's shadow information to form lightshafts. Celestial-direction alignment, moderated light-color saturation and depth-aware reconstruction help the fog follow the scene's lighting without excessive color tint or gaps around thin foliage.
 
-Point lights also contribute genuine volumetric scattering: camera rays are intersected with each light's spherical influence and scattering is integrated within that volume. These are not screen-space glow sprites. Point-light fog is deliberately unshadowed; scene depth stops the viewing ray, but walls do not block light traveling into the volume, so light leakage remains possible.
+Point lights also contribute genuine volumetric scattering: camera rays are intersected with each light's spherical influence and scattering is integrated within that volume, using inverse-square falloff (smoothly windowed to zero at the light's radius) so fog is densest around the source and fades physically outward. These are not screen-space glow sprites. Point-light fog is deliberately unshadowed; scene depth stops the viewing ray, but walls do not block light traveling into the volume, so light leakage remains possible.
 
 Separate saved sliders control directional and point-light volumetric intensity.
+Point-light fog has a live on/off toggle in the Picture section, with live Glow size (how tight or wide the inverse-square glow is) and intensity sliders.
 Point-light integration respects each native light-grid quad and scissor, so a light
 listed in multiple tiles is not added repeatedly across the whole screen.
 

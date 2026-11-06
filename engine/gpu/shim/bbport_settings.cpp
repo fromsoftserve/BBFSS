@@ -289,6 +289,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_lightshaft_tilt=Clamp(std::isfinite(f)?f:0.0f,0.0f,30.0f);
     } else if (key == "graphics_point_fog_intensity") {
         v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+    } else if (key == "graphics_point_fog") {
+        v.graphics_point_fog=i!=0;
+    } else if (key == "graphics_point_fog_glow_size") {
+        v.graphics_point_fog_glow_size=Clamp(std::isfinite(f)?f:0.08f,0.03f,0.20f);
     } else if (key == "graphics_dof_intensity") {
         v.graphics_dof_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_ssr_intensity") {
@@ -658,6 +662,8 @@ void Save() {
     put("graphics_volumetric_intensity",fixed(v.graphics_volumetric_intensity,2));
     put("graphics_lightshaft_tilt",fixed(v.graphics_lightshaft_tilt,2));
     put("graphics_point_fog_intensity",fixed(v.graphics_point_fog_intensity,2));
+    put("graphics_point_fog",flag(v.graphics_point_fog));
+    put("graphics_point_fog_glow_size",fixed(v.graphics_point_fog_glow_size,3));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
     put("graphics_shadow_scale",fixed(v.graphics_shadow_scale,2));

@@ -80,7 +80,11 @@ void main() {
     float limit = depth == 1.0 ? 100.0 : min(distance_to_surface, 100.0);
     uint light_base = ((offsets >> 8) & 255u) >> 2;
     vec3 scattering = vec3(0.0);
-    for (uint k = 0u; k < count; ++k) {
+    uint light_count = count & 255u;
+    // Glow size (inverse-square core / radius) in 1/10000ths; 0 means the default 0.08.
+    uint glow_bits = (count >> 8) & 0xFFFFu;
+    float glow_size = glow_bits == 0u ? 0.08 : clamp(float(glow_bits) * 1e-4, 0.03, 0.2);
+    for (uint k = 0u; k < light_count; ++k) {
         uint at = light_base + k * 16u;
         vec3 centre = uintBitsToFloat(uvec3(lights.d[at], lights.d[at + 1u], lights.d[at + 2u]));
         float inverse_radius_squared = uintBitsToFloat(lights.d[at + 3u]);
@@ -103,13 +107,29 @@ void main() {
         float end = min(limit, along + half_chord);
         if (!(end > begin)) continue;
         // Integrate only the ray/sphere intersection, not a screen-space light halo.
-        // Fixed midpoint samples avoid temporal noise and an on-screen source requirement.
+        // Inverse-square falloff core^2 / (d^2 + core^2) with core = glow_size * radius
+        // (default 0.08; source intensity scales with radius^2); a smooth window reaches
+        // zero at the radius. kEnergy fixes the peak at 2.5x the previous (1 - d/r)^2
+        // profile's, so glow size changes the shape, not the peak: at the default, total
+        // scattered power is about 29% of the old profile's, a tight glow at the source.
+        // The 1/d^2 term is integrated exactly per segment (atan), so the bright core
+        // cannot fall between fixed samples and flicker as the camera moves.
+        const float kEnergy = 2.5;
+        float core = max(glow_size * radius, 0.05);
+        float closest_squared = dot(perpendicular, perpendicular) + core * core;
+        float q = sqrt(closest_squared);
         float ds = (end - begin) / 12.0;
         float energy = 0.0;
+        float previous_angle = atan((begin - along) / q);
         for (uint i = 0u; i < 12u; ++i) {
-            float t = begin + (float(i) + 0.5) * ds;
-            float falloff = max(0.0, 1.0 - length(ray * t - centre) / radius);
-            energy += falloff * falloff * exp(-0.025 * t) * 0.025 * ds;
+            float t0 = begin + float(i) * ds;
+            float t = t0 + 0.5 * ds;
+            float x = length(ray * t - centre) / radius;
+            float angle = atan((t0 + ds - along) / q);
+            float inverse_square = core * core / q * (angle - previous_angle);
+            previous_angle = angle;
+            float window = clamp(1.0 - x * x * x * x, 0.0, 1.0);
+            energy += kEnergy * inverse_square * window * window * exp(-0.025 * t) * 0.025;
         }
         scattering += rgb * energy;
     }

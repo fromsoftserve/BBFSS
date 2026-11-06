@@ -672,6 +672,27 @@ void PictureSection() {
             "выборок исходной карты теней может искажать лучи и нарушать совпадение с тенями "
             "поверхностей. Не меняет туман точечных источников или освещение поверхностей."));
     }
+    if (const char* label = Item("Point-light fog", "Туман точечных источников")) {
+        Checkbox(label, s.graphics_point_fog);
+        Hint(BbSettings::MenuText(
+            "Live on/off for unshadowed volumetric scattering inside point-light radii "
+            "(lamps, lanterns, torches). Applies immediately; no restart needed.",
+            "Включает или выключает объёмное рассеяние в радиусах точечных источников "
+            "(лампы, фонари, факелы). Применяется сразу, без перезапуска."));
+    }
+    ImGui::BeginDisabled(!s.graphics_point_fog);
+    if (const char* label = Item("Glow size", "Размер свечения")) {
+        Slider(label, s.graphics_point_fog_glow_size, 0.03f, 0.20f, "%.3f",
+               ImGuiSliderFlags_AlwaysClamp);
+        Hint(BbSettings::MenuText(
+            "Size of the point-light fog's bright centre (inverse-square falloff), as a fraction of "
+            "the light's radius. Smaller: a tight, sharp glow around the flame. Larger: a wider, "
+            "softer haze. Peak brightness stays the same; 0.080 is the default. Applies immediately.",
+            "Размер яркого центра тумана точечных источников (обратно-квадратичное затухание) как "
+            "доля радиуса источника. Меньше: плотное, чёткое свечение у пламени. Больше: более "
+            "широкая и мягкая дымка. Пиковая яркость не меняется; по умолчанию 0.080. Применяется "
+            "сразу."));
+    }
     if (const char* label = Item("Point-light fog intensity", "Интенсивность тумана точечных источников")) {
         Slider(label, s.graphics_point_fog_intensity, 0.0f, 3.0f, "%.2fx",
                ImGuiSliderFlags_AlwaysClamp);
@@ -683,6 +704,7 @@ void PictureSection() {
             "Не зависит от направленного объёмного света, точечных теней и настройки изображения. "
             "Стены ограничивают луч камеры, но не отбрасывают тени в объёме тумана."));
     }
+    ImGui::EndDisabled();
     slider("Indirect lighting strength", "Сила непрямого освещения (GI)", s.graphics_gi_strength, 0.0f, 12.0f);
     slider("Shadow distance", "Дальность теней", s.graphics_shadow_scale, 0.5f, 4.0f);
     if (moved && !s.graphics_controls) {
@@ -704,6 +726,8 @@ void PictureSection() {
             Store(s.graphics_volumetric_intensity, 1.0f, true);
             Store(s.graphics_lightshaft_tilt, 0.0f, true);
             Store(s.graphics_point_fog_intensity, 1.0f, true);
+            Store(s.graphics_point_fog, true, true);
+            Store(s.graphics_point_fog_glow_size, 0.08f, true);
             Store(s.graphics_dof_intensity, 1.0f, true);
             Store(s.graphics_ssr_intensity, 1.0f, true);
             Store(s.graphics_shadow_scale, 1.0f, true);

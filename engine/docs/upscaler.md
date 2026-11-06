@@ -628,7 +628,10 @@ above affect only the directional layer.
 
 ### Unshadowed point-light volumetric fog
 
-The Picture section's **Point-light fog intensity** slider independently controls
+The Picture section's **Point-light fog** checkbox turns this layer on or off live
+(`graphics_point_fog`, default on), and **Glow size** (`graphics_point_fog_glow_size`,
+0.03-0.20, default 0.08) sets the inverse-square profile's core below, live.
+The **Point-light fog intensity** slider independently controls
 an additive 3D scattering layer: 0 disables it, 1 is the default, and 3 triples its
 strength. It works with directional volumetrics, point shadows and Picture tuning
 disabled. The value is persisted as `graphics_point_fog_intensity` in `lantern.ini`;
@@ -639,9 +642,21 @@ consumes that draw's current view-space light positions, radii, diffuse RGB and
 inverse projection. Sixteen-word light records store inverse radius **squared**
 at word 3, not inverse radius. The shader intersects each camera ray with each
 light sphere, clips to opaque scene depth (at most 100 m, also used for sky), and
-integrates 12 midpoint samples over the surviving segment. It uses the original
-radial attenuation `(1 - distance / radius)^2`, homogeneous density 0.025 and
-view-ray transmittance. RGB is bounded to peak 4 and uses 75% saturation.
+integrates 12 segments over the surviving segment. Attenuation is inverse-square,
+`core^2 / (distance^2 + core^2)` with `core = glow_size * radius` (glow size 0.03-0.20,
+default 0.08; peak 1 at the centre,
+so source intensity scales with radius squared), multiplied by the smooth window
+`saturate(1 - (distance / radius)^4)^2` so it reaches zero at the light's radius.
+The inverse-square term is integrated analytically per segment (`atan`), so the
+bright core cannot slip between fixed samples. A constant 2.5 puts the peak at
+2.5x the earlier `(1 - distance / radius)^2` profile's while total scattered power
+over each sphere is about 29% of it at the default glow size: a tight glow at the
+source that falls off quickly, rather than brighter surrounding air. Glow size
+changes the shape at a fixed peak (larger is a wider, softer haze); it travels in
+bits 8-23 of the push-constant light count, in 1/10000ths. (Matching total power instead needs
+a 5.86x peak, which made the fog noticeably brighter near lights.)
+Homogeneous density 0.025 and view-ray transmittance are applied per segment.
+RGB is bounded to peak 4 and uses 75% saturation.
 The accumulated RGB is added before tone mapping without changing scene alpha.
 
 This is not a screen-space halo or screen-space shadow trace. Off-screen light

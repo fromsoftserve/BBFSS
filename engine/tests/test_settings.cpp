@@ -45,6 +45,10 @@ int main() {
     s.graphics_directional_ggx = true;
     assert(!s.startup_directional_ggx);
     s.graphics_native_sss = true;
+    assert(s.graphics_point_fog);
+    assert(s.graphics_point_fog_glow_size == 0.08f);
+    s.graphics_point_fog = false;
+    s.graphics_point_fog_glow_size = 0.15f;
     s.graphics_auto_exposure = true;
     assert(s.graphics_lightshaft_tilt == 0.0f);
     s.graphics_lightshaft_tilt = 20.0f;
@@ -69,6 +73,8 @@ int main() {
     assert(saved.find("graphics_motion_blur_quality=1\n") != std::string::npos);
     assert(saved.find("graphics_auto_exposure=1\n") != std::string::npos);
     assert(saved.find("graphics_native_sss=1\n") != std::string::npos);
+    assert(saved.find("graphics_point_fog=0\n") != std::string::npos);
+    assert(saved.find("graphics_point_fog_glow_size=0.150\n") != std::string::npos);
     assert(saved.find("graphics_directional_ggx=1\n") != std::string::npos);
     assert(saved.find("graphics_ao_quality=1\n") != std::string::npos);
     assert(saved.find("graphics_lightshaft_tilt=20.00\n") != std::string::npos);
@@ -88,9 +94,13 @@ int main() {
     s.graphics_motion_blur_quality = 0;
     s.graphics_auto_exposure = false;
     s.graphics_native_sss = false;
+    s.graphics_point_fog = true;
+    s.graphics_point_fog_glow_size = 0.08f;
     s.graphics_directional_ggx = false;
     s.graphics_lightshaft_tilt = 0.0f;
     BbSettings::Load();
+    assert(!s.graphics_point_fog);
+    assert(s.graphics_point_fog_glow_size == 0.15f);
     assert(s.graphics_ssr_intensity == 2.25f);
     assert(s.graphics_shadow_resolution == 1);
     assert(s.graphics_local_shadow_resolution == 1);
