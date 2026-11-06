@@ -703,6 +703,8 @@ void PictureSection() {
     slider("Reflection strength", "Сила отражений", s.graphics_ssr_intensity, 0.0f, 3.0f);
     slider("Volumetric sunlight strength", "Сила объёмного света", s.graphics_volumetric_intensity, 0.0f, 3.0f);
     slider("Lamp fog strength", "Сила тумана ламп", s.graphics_point_fog_intensity, 0.0f, 3.0f);
+    slider("Lamp fog glow size", "Размер свечения тумана ламп", s.graphics_point_fog_glow_size, 0.03f, 0.20f,
+           "%.3f");
     if (const char* label = Item("Depth of field intensity", "Интенсивность глубины резкости")) {
         Slider(label, s.graphics_dof_intensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
         Hint(BbSettings::MenuText(
@@ -778,6 +780,7 @@ void PictureSection() {
             Store(s.graphics_ssr_intensity, 1.0f, true);
             Store(s.graphics_volumetric_intensity, 1.0f, true);
             Store(s.graphics_point_fog_intensity, 1.0f, true);
+            Store(s.graphics_point_fog_glow_size, 0.08f, true);
         }
     }
     ImGui::EndDisabled();
