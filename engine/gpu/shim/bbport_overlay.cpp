@@ -18,6 +18,7 @@
 #include "engine/cheats.h"
 #include "engine/graphics.h"
 #include "engine/auto_exposure.h"
+#include "engine/native_sss.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -530,6 +531,22 @@ void HdrSection() {
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
+    if (const char* label = Item("Native skin SSS (experimental)", "Нативное SSS кожи (экспериментальное)")) {
+        Checkbox(label, s.graphics_native_sss);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Enables the game's native material-profile scattering without "
+            "changing authored strengths or specular lighting. Independent of Picture tuning. "
+            "Disable to restore original switches. Requires an allocated native SSS view.",
+            "По умолчанию выключено. Нативное рассеивание по профилям материалов без изменения "
+            "параметров и бликов. Независимо от настройки изображения. Нужны нативные ресурсы SSS."));
+        using BbEngine::Sss::Status;
+        const auto status = BbEngine::Sss::CurrentStatus();
+        const char* text = status == Status::Active ? BbSettings::MenuText("Active", "Активно") :
+                           status == Status::Off ? BbSettings::MenuText("Off", "Выключено") :
+                           status == Status::Waiting ? BbSettings::MenuText("Waiting for native SSS resources", "Ожидание ресурсов SSS") :
+                           BbSettings::MenuText("Native SSS unavailable", "Нативное SSS недоступно");
+        ImGui::TextDisabled("%s", text);
+    }
     if (const char* label = Item("Auto exposure (experimental)", "Автоэкспозиция (экспериментальная)")) {
         Checkbox(label, s.graphics_auto_exposure);
         Hint(BbSettings::MenuText(
@@ -655,6 +672,27 @@ void PictureSection() {
             "выборок исходной карты теней может искажать лучи и нарушать совпадение с тенями "
             "поверхностей. Не меняет туман точечных источников или освещение поверхностей."));
     }
+    if (const char* label = Item("Point-light fog", "Туман точечных источников")) {
+        Checkbox(label, s.graphics_point_fog);
+        Hint(BbSettings::MenuText(
+            "Live on/off for unshadowed volumetric scattering inside point-light radii "
+            "(lamps, lanterns, torches). Applies immediately; no restart needed.",
+            "Включает или выключает объёмное рассеяние в радиусах точечных источников "
+            "(лампы, фонари, факелы). Применяется сразу, без перезапуска."));
+    }
+    ImGui::BeginDisabled(!s.graphics_point_fog);
+    if (const char* label = Item("Glow size", "Размер свечения")) {
+        Slider(label, s.graphics_point_fog_glow_size, 0.03f, 0.20f, "%.3f",
+               ImGuiSliderFlags_AlwaysClamp);
+        Hint(BbSettings::MenuText(
+            "Size of the point-light fog's bright centre (inverse-square falloff), as a fraction of "
+            "the light's radius. Smaller: a tight, sharp glow around the flame. Larger: a wider, "
+            "softer haze. Peak brightness stays the same; 0.080 is the default. Applies immediately.",
+            "Размер яркого центра тумана точечных источников (обратно-квадратичное затухание) как "
+            "доля радиуса источника. Меньше: плотное, чёткое свечение у пламени. Больше: более "
+            "широкая и мягкая дымка. Пиковая яркость не меняется; по умолчанию 0.080. Применяется "
+            "сразу."));
+    }
     if (const char* label = Item("Point-light fog intensity", "Интенсивность тумана точечных источников")) {
         Slider(label, s.graphics_point_fog_intensity, 0.0f, 3.0f, "%.2fx",
                ImGuiSliderFlags_AlwaysClamp);
@@ -666,6 +704,7 @@ void PictureSection() {
             "Не зависит от направленного объёмного света, точечных теней и настройки изображения. "
             "Стены ограничивают луч камеры, но не отбрасывают тени в объёме тумана."));
     }
+    ImGui::EndDisabled();
     slider("Indirect lighting strength", "Сила непрямого освещения (GI)", s.graphics_gi_strength, 0.0f, 12.0f);
     slider("Shadow distance", "Дальность теней", s.graphics_shadow_scale, 0.5f, 4.0f);
     if (moved && !s.graphics_controls) {
@@ -674,6 +713,7 @@ void PictureSection() {
     if (const char* label = Item("Game's own picture", "Как в игре")) {
         if (ImGui::Button(label)) {
             Store(s.graphics_auto_exposure, false, true);
+            Store(s.graphics_native_sss, false, true);
             Store(s.graphics_brightness, 1.0f, true);
             Store(s.graphics_contrast, 1.0f, true);
             Store(s.graphics_saturation, 1.0f, true);
@@ -686,6 +726,8 @@ void PictureSection() {
             Store(s.graphics_volumetric_intensity, 1.0f, true);
             Store(s.graphics_lightshaft_tilt, 0.0f, true);
             Store(s.graphics_point_fog_intensity, 1.0f, true);
+            Store(s.graphics_point_fog, true, true);
+            Store(s.graphics_point_fog_glow_size, 0.08f, true);
             Store(s.graphics_dof_intensity, 1.0f, true);
             Store(s.graphics_ssr_intensity, 1.0f, true);
             Store(s.graphics_shadow_scale, 1.0f, true);
@@ -697,6 +739,44 @@ void PictureSection() {
 void EffectsSection() {
     auto& s = BbSettings::Get();
     Section("Game effects (restart required)", "Эффекты игры (после перезапуска)");
+    if (const char* label = Item("Ambient occlusion quality", "Качество затенения (AO)")) {
+        const char* levels[] = {
+            BbSettings::MenuText("Regular GTAO", "Обычный GTAO"),
+            BbSettings::MenuText("High (full-res bitmask GTAO, denoised, experimental)",
+                                 "Высокое (битмаск GTAO в полном разрешении, с шумоподавлением, "
+                                 "экспериментальное)")};
+        int quality = std::clamp(s.graphics_ao_quality.load(), 0, 1);
+        if (ImGui::Combo(label, &quality, levels, 2))
+            Store(s.graphics_ao_quality, quality, true);
+        Hint(BbSettings::MenuText(
+            "Regular GTAO is unchanged and selected by default. High traces three visibility-"
+            "bitmask GTAO directions at the full internal render resolution (it follows DLSS/FSR "
+            "scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact "
+            "shadows. Higher GPU cost;             Ambient occlusion must also be enabled. Both modes are "
+                        "computed fresh each frame from a fixed sampling pattern, so they stay stable in motion "
+                        "with no ghosting or trailing. Requires restarting Bloodborne.",
+            "Обычный GTAO не меняется и выбран по умолчанию. Высокое трассирует три направления "
+            "битмаск GTAO в полном внутреннем разрешении рендера (следует масштабированию DLSS/FSR) "
+            "и применяет фильтр шумоподавления с учётом глубины и нормалей для более чётких и "
+            "стабильных контактных теней. Повышает нагрузку на GPU; затенение должно быть включено. "
+            "Оба режима рассчитываются заново каждый кадр по фиксированному шаблону выборки, "
+            "поэтому остаются стабильными в движении без шлейфов и ореолов. "
+            "Требуется перезапуск Bloodborne."));
+    }
+    if (const char* label = Item("Directional GGX (native-anchored, experimental)",
+                                "Направленный GGX (нативная калибровка, экспериментальный)")) {
+        Checkbox(label, s.graphics_directional_ggx);
+        Hint(BbSettings::MenuText(
+            "Off by default. Native-anchored GGX for the four directional specular lobes only. "
+            "Softer highlight tails can brighten rough or grazing surfaces. Diffuse, local lights "
+            "and environment/SSR remain native. Requires restarting Bloodborne; unsupported shader "
+            "variants retain native specular and report a warning. Not a full PBR conversion.",
+            "По умолчанию выключено. GGX с нативной калибровкой для четырёх направленных бликов. "
+            "Мягкие края могут осветлять шероховатые поверхности и скользящие углы. Диффузное "
+            "освещение, локальные источники и окружение/SSR не меняются. Требуется перезапуск "
+            "Bloodborne. Неподдерживаемые шейдеры сохраняют нативные блики с предупреждением. "
+            "Не является полной PBR-конверсией."));
+    }
     if (const char* label = Item("Motion blur quality", "Качество размытия в движении")) {
         const char* levels[] = {BbSettings::MenuText("Default", "По умолчанию"),
                                 BbSettings::MenuText("High", "Высокое")};
@@ -1840,6 +1920,8 @@ void Menu() {
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+        s.graphics_directional_ggx != s.startup_directional_ggx ||
+        s.graphics_ao_quality != s.startup_ao_quality ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= e != BbSettings::EffectGi && e != BbSettings::EffectContactShadows &&

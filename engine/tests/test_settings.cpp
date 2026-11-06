@@ -37,6 +37,18 @@ int main() {
     assert(s.graphics_local_shadow_resolution == 0);
     assert(s.graphics_motion_blur_quality == 0);
     assert(!s.graphics_auto_exposure);
+    assert(!s.graphics_native_sss);
+    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
+    assert(s.graphics_ao_quality == 0 && s.startup_ao_quality == 0);
+    s.graphics_ao_quality = 1;
+    assert(s.startup_ao_quality == 0);
+    s.graphics_directional_ggx = true;
+    assert(!s.startup_directional_ggx);
+    s.graphics_native_sss = true;
+    assert(s.graphics_point_fog);
+    assert(s.graphics_point_fog_glow_size == 0.08f);
+    s.graphics_point_fog = false;
+    s.graphics_point_fog_glow_size = 0.15f;
     s.graphics_auto_exposure = true;
     assert(s.graphics_lightshaft_tilt == 0.0f);
     s.graphics_lightshaft_tilt = 20.0f;
@@ -60,6 +72,11 @@ int main() {
     assert(saved.find("graphics_local_shadow_resolution=1\n") != std::string::npos);
     assert(saved.find("graphics_motion_blur_quality=1\n") != std::string::npos);
     assert(saved.find("graphics_auto_exposure=1\n") != std::string::npos);
+    assert(saved.find("graphics_native_sss=1\n") != std::string::npos);
+    assert(saved.find("graphics_point_fog=0\n") != std::string::npos);
+    assert(saved.find("graphics_point_fog_glow_size=0.150\n") != std::string::npos);
+    assert(saved.find("graphics_directional_ggx=1\n") != std::string::npos);
+    assert(saved.find("graphics_ao_quality=1\n") != std::string::npos);
     assert(saved.find("graphics_lightshaft_tilt=20.00\n") != std::string::npos);
     assert(saved.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     assert(saved.find("graphics_ssr_intensity=2.25\n") != std::string::npos);
@@ -76,13 +93,28 @@ int main() {
     s.graphics_local_shadow_resolution = 0;
     s.graphics_motion_blur_quality = 0;
     s.graphics_auto_exposure = false;
+    s.graphics_native_sss = false;
+    s.graphics_point_fog = true;
+    s.graphics_point_fog_glow_size = 0.08f;
+    s.graphics_directional_ggx = false;
     s.graphics_lightshaft_tilt = 0.0f;
     BbSettings::Load();
+    assert(!s.graphics_point_fog);
+    assert(s.graphics_point_fog_glow_size == 0.15f);
     assert(s.graphics_ssr_intensity == 2.25f);
     assert(s.graphics_shadow_resolution == 1);
     assert(s.graphics_local_shadow_resolution == 1);
     assert(s.graphics_motion_blur_quality == 1);
     assert(s.graphics_auto_exposure);
+    assert(s.graphics_native_sss);
+    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
+    assert(s.graphics_ao_quality == 1 && s.startup_ao_quality == 1);
+    s.graphics_ao_quality = 0;
+    assert(s.startup_ao_quality == 1);
+    s.graphics_ao_quality = 1;
+    s.graphics_directional_ggx = false;
+    assert(s.startup_directional_ggx);
+    s.graphics_directional_ggx = true;
     assert(s.startup_motion_blur_quality == 1);
     assert(s.graphics_lightshaft_tilt == 20.0f);
     assert(s.graphics_dof_intensity == 1.75f);
@@ -118,6 +150,15 @@ int main() {
     s.rebirth=false;s.graphics_bloom=1.0f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    for (const auto& [input, expected] :
+         {std::pair{"0", 0}, {"1", 1}, {"-1", 0}, {"2", 0}, {"nan", 0}, {"1bad", 0}}) {
+        { std::ofstream file(path); file << "graphics_ao_quality=" << input << "\n"; }
+        BbSettings::Load();
+        assert(s.graphics_ao_quality == expected && s.startup_ao_quality == expected);
+        BbSettings::Save();
+        assert(Read(path).find("graphics_ao_quality=" + std::to_string(expected) + "\n") !=
+               std::string::npos);
+    }
     { std::ofstream file(path); file << "graphics_dof_intensity=nan\ncamera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
     BbSettings::Load();
     assert(s.graphics_dof_intensity == 1.0f);

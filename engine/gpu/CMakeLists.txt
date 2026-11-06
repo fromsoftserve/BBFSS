@@ -148,6 +148,10 @@ function(add_host_shader FILENAME SHADER_NAME)
     set(DEFINES ${ARGN})
     list(TRANSFORM DEFINES PREPEND "-D")
     set(INCLUDES "")
+    set(STAGE "")
+    if (FILENAME MATCHES "\\.frag$" AND SHADER_NAME MATCHES "_comp$")
+        set(STAGE -S comp)
+    endif()
     if (FILENAME MATCHES "^native_motion_blur")
         list(APPEND INCLUDES ${SHADER_SRC}/native_motion_blur.glsl)
     endif()
@@ -156,7 +160,7 @@ function(add_host_shader FILENAME SHADER_NAME)
     endif()
     add_custom_command(OUTPUT ${OUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DIR}
-        COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${DEFINES} ${SHADER_SRC}/${FILENAME}
+        COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${STAGE} ${DEFINES} ${SHADER_SRC}/${FILENAME}
         COMMAND ${CMAKE_COMMAND} "-DHEADER_FILE=${OUT}" -P ${SHADER_SRC}/AddShaderHeaderInclude.cmake
         DEPENDS ${SHADER_SRC}/${FILENAME} ${INCLUDES} VERBATIM)
     set(SHADER_HEADERS ${SHADER_HEADERS} ${OUT} PARENT_SCOPE)
@@ -170,6 +174,14 @@ add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
 add_host_shader(gtao.frag gtao_frag)
+add_host_shader(gtao.frag gtao_hq_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=3 GTAO_STEPS=6)
+add_host_shader(gtao.frag gtao_single_hq_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=1 GTAO_STEPS=6)
+add_host_shader(gtao.frag gtao_reference_frag GTAO_SPATIAL_HQ=1 GTAO_SLICES=16 GTAO_STEPS=32)
+add_host_shader(gtao.frag gtao_full_comp GTAO_COMPUTE=1 GTAO_SPATIAL_HQ=1 GTAO_SLICES=3 GTAO_STEPS=6)
+add_host_shader(gtao_denoise.comp gtao_denoise_comp)
+add_host_shader(gtao_denoise.comp gtao_denoise_full_comp FULLRES=1)
+add_host_shader(gtao_denoise.comp gtao_copy_comp COPY=1)
+add_host_shader(gtao_denoise.comp gtao_debug_comp DEBUG_VIEW=1)
 add_host_shader(ssr.frag ssr_frag)
 add_host_shader(ssr_temporal.comp ssr_temporal_resolve_comp RESOLVE=1)
 add_host_shader(ssr_trace.comp ssr_trace_comp)
@@ -193,6 +205,13 @@ add_host_shader(volumetric_light.comp volumetric_light_repair_comp REPAIR=1)
 add_host_shader(volumetric_light.comp volumetric_light_tint_comp TINT=1)
 add_host_shader(volumetric_light.comp volumetric_light_composite_comp COMPOSITE=1)
 add_host_shader(volumetric_light.comp volumetric_light_celestial_comp CELESTIAL=1)
+add_host_shader(sky_seam.comp sky_seam_comp)
+add_host_shader(sky_zenith.comp sky_zenith_validate_comp VALIDATE=1)
+add_host_shader(sky_zenith.comp sky_zenith_horizontal_comp HORIZONTAL=1)
+add_host_shader(sky_zenith.comp sky_zenith_vertical_comp)
+add_host_shader(billboard_probe.vert billboard_probe_vertex)
+add_host_shader(billboard_probe.vert billboard_probe_instanced INSTANCED=1)
+add_host_shader(billboard_probe.frag billboard_probe_fragment)
 add_host_shader(ssgi.comp ssgi_prep_comp PREP=1)
 add_host_shader(ssgi.comp ssgi_gather_comp GATHER=1)
 add_host_shader(ssgi.comp ssgi_denoise_comp DENOISE=1)
@@ -319,6 +338,10 @@ target_compile_options(exposure-policy-test PRIVATE -UNDEBUG -Wall -Wextra -Werr
 target_include_directories(exposure-policy-test PRIVATE ..)
 add_executable(native-exposure-test EXCLUDE_FROM_ALL ../tests/test_native_exposure.cpp
     shim/engine/auto_exposure.cpp)
+add_executable(native-sss-test EXCLUDE_FROM_ALL ../tests/test_native_sss.cpp
+    shim/engine/native_sss.cpp)
+target_include_directories(native-sss-test PRIVATE shim)
+target_compile_options(native-sss-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(native-exposure-test PRIVATE shim)
 target_compile_options(native-exposure-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(pipeline-cache-blob-test EXCLUDE_FROM_ALL ../tests/test_pipeline_cache_blob.cpp)
@@ -374,12 +397,43 @@ add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bb
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
 
+add_executable(gtao-test EXCLUDE_FROM_ALL ../tests/test_gtao.cpp
+    ${SHADER_DIR}/gtao_frag.h ${SHADER_DIR}/gtao_hq_frag.h ${SHADER_DIR}/gtao_reference_frag.h
+    ${SHADER_DIR}/gtao_single_hq_frag.h
+    ${SHADER_DIR}/gtao_denoise_comp.h ${SHADER_DIR}/gtao_copy_comp.h ${SHADER_DIR}/fs_tri_vert.h)
+target_include_directories(gtao-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(gtao-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(gtao-test PRIVATE Vulkan::Vulkan)
+
 add_host_shader(volumetric_tilt_test.comp volumetric_tilt_test_comp)
 add_executable(volumetric-tilt-test EXCLUDE_FROM_ALL ../tests/test_volumetric_tilt.cpp
     ${SHADER_DIR}/volumetric_tilt_test_comp.h)
 target_include_directories(volumetric-tilt-test PRIVATE ${SHADER_INCLUDE})
 target_compile_options(volumetric-tilt-test PRIVATE -UNDEBUG)
 target_link_libraries(volumetric-tilt-test PRIVATE Vulkan::Vulkan)
+add_executable(billboard-probe-test EXCLUDE_FROM_ALL ../tests/test_billboard_probe.cpp
+    ${SHADER_DIR}/billboard_probe_vertex.h ${SHADER_DIR}/billboard_probe_instanced.h
+    ${SHADER_DIR}/billboard_probe_fragment.h)
+target_include_directories(billboard-probe-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(billboard-probe-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(billboard-probe-test PRIVATE Vulkan::Vulkan)
+
+add_executable(sky-seam-test EXCLUDE_FROM_ALL ../tests/test_sky_seam.cpp
+    ${SHADER_DIR}/sky_seam_comp.h)
+target_include_directories(sky-seam-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(sky-seam-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(sky-seam-test PRIVATE Vulkan::Vulkan)
+add_executable(sky-zenith-test EXCLUDE_FROM_ALL ../tests/test_sky_zenith.cpp
+    ${SHADER_DIR}/sky_zenith_validate_comp.h ${SHADER_DIR}/sky_zenith_horizontal_comp.h
+    ${SHADER_DIR}/sky_zenith_vertical_comp.h)
+target_include_directories(sky-zenith-test PRIVATE ${SHADER_INCLUDE})
+target_compile_features(sky-zenith-test PRIVATE cxx_std_20)
+target_compile_options(sky-zenith-test PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(sky-zenith-test PRIVATE Vulkan::Vulkan)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
@@ -448,6 +502,15 @@ target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan:
 add_executable(engine-hooks-test EXCLUDE_FROM_ALL ../tests/test_engine_hooks.cpp shim/engine/engine_hooks.cpp)
 target_compile_options(engine-hooks-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(engine-hooks-test PRIVATE ..)
+add_executable(pom-patch-test EXCLUDE_FROM_ALL ../tests/test_pom_patch.cpp)
+target_include_directories(pom-patch-test PRIVATE shadps4)
+target_compile_options(pom-patch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(ggx-directional-test EXCLUDE_FROM_ALL ../tests/test_ggx_directional.cpp)
+add_executable(ggx-patch-test EXCLUDE_FROM_ALL ../tests/test_ggx_patch.cpp)
+target_compile_options(ggx-patch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_compile_options(ggx-directional-test PRIVATE -Wall -Wextra -Werror
+    -Wno-missing-field-initializers)
+target_link_libraries(ggx-directional-test PRIVATE Vulkan::Vulkan)
 # Local game-derived native menu assets. No game data is embedded in this tool.
 find_package(ZLIB REQUIRED)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -485,7 +548,7 @@ add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
 target_include_directories(widescreen-test PRIVATE shim)
 target_compile_options(widescreen-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(native-local-shadows-test EXCLUDE_FROM_ALL ../tests/test_native_local_shadows.cpp
-    shim/engine/graphics.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp shim/bbport_menu_i18n.cpp)
+    shim/engine/graphics.cpp shim/engine/native_sss.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp shim/bbport_menu_i18n.cpp)
 target_include_directories(native-local-shadows-test PRIVATE shim)
 target_compile_options(native-local-shadows-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(directional-shadow-test EXCLUDE_FROM_ALL ../tests/test_directional_shadows.cpp)

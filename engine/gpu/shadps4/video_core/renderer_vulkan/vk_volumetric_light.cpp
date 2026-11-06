@@ -136,7 +136,8 @@ bool VolumetricLight::Enabled() const {
     return enabled && !failed &&
            (BbSettings::Get().effects[BbSettings::EffectVolumetricLight].load(
                 std::memory_order_relaxed) ||
-            BbSettings::Get().graphics_point_fog_intensity.load(std::memory_order_relaxed) > 0.0f);
+            (BbSettings::Get().graphics_point_fog.load(std::memory_order_relaxed) &&
+             BbSettings::Get().graphics_point_fog_intensity.load(std::memory_order_relaxed) > 0.0f));
 }
 
 void VolumetricLight::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorType> types,
@@ -414,7 +415,9 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
 void VolumetricLight::PointLights(const PointShadow::Inputs& in, u32 count,
                                 const PointRegion& region) {
     if (!ready || !Enabled()) return;
-    const float intensity = BbSettings::Get().graphics_point_fog_intensity.load(
+    const auto& settings = BbSettings::Get();
+    if (!settings.graphics_point_fog.load(std::memory_order_relaxed)) return;
+    const float intensity = settings.graphics_point_fog_intensity.load(
         std::memory_order_relaxed);
     if (!(intensity > 0.0f) || !std::isfinite(intensity)) return;
     const u32 constants_offset = in.offsets & 255u;
@@ -435,7 +438,12 @@ void VolumetricLight::PointLights(const PointShadow::Inputs& in, u32 count,
         std::array<s32, 4> scissor;
     };
     static_assert(sizeof(PointParams) == 64);
-    const PointParams params{in.offsets, count, std::clamp(intensity, 0.0f, 3.0f),
+    // count packs the glow size beside the light count (PointParams is full): bits 0-7 light
+    // count, bits 8-23 inverse-square glow size (core / radius) in 1/10000ths.
+    const float glow = std::clamp(
+        settings.graphics_point_fog_glow_size.load(std::memory_order_relaxed), 0.03f, 0.20f);
+    const u32 falloff = u32(std::lround((std::isfinite(glow) ? glow : 0.08f) * 10000.0f)) << 8;
+    const PointParams params{in.offsets, count | falloff, std::clamp(intensity, 0.0f, 3.0f),
         region.vertex_offset, region.vertex_stride, region.index_offset, region.index_size,
         region.first_vertex, region.viewport,
         {region.scissor.offset.x, region.scissor.offset.y,

@@ -282,6 +282,13 @@ int main() {
     upload_quad();
     const auto full = run(1);
     assert(std::ranges::any_of(full, [](auto v) { return v != 0; }));
+    push.count = 1u | (800u << 8); // explicit default glow size
+    assert(run(1) == full);
+    push.count = 1u | (2000u << 8); // larger glow: a different, still lit profile
+    const auto wide_glow = run(1);
+    assert(std::ranges::any_of(wide_glow, [](auto v) { return v != 0; }));
+    assert(wide_glow != full);
+    push.count = 1;
     for (unsigned tiles : {2, 3, 7, 19}) {
         upload_quad();
         assert(run(tiles) == full);

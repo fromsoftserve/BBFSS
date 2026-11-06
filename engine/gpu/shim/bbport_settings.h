@@ -165,10 +165,15 @@ struct Values {
     std::atomic<bool> change_appearance{false}, rebirth{false};
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
     std::atomic<bool> graphics_auto_exposure{false};
+    std::atomic<bool> graphics_native_sss{false};
+    std::atomic<bool> graphics_directional_ggx{false};
+    std::atomic<int> graphics_ao_quality{0};
     std::atomic<float> graphics_ao_strength{1},graphics_gi_strength{6},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_volumetric_intensity{1};
     std::atomic<float> graphics_lightshaft_tilt{0};
     std::atomic<float> graphics_point_fog_intensity{1};
+    std::atomic<bool> graphics_point_fog{true};               // Live on/off.
+    std::atomic<float> graphics_point_fog_glow_size{0.08f};    // Inverse-square core / radius, 0.03-0.20.
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ssr_intensity{1};
     std::atomic<int> graphics_shadow_resolution{1}; // High / Very high / Ultra; restart required.
@@ -214,6 +219,8 @@ struct Values {
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 0;
+    bool startup_directional_ggx = false;
+    int startup_ao_quality = 0;
     bool startup_effects[EffectCount]{};
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;

@@ -12,22 +12,33 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_pom_patch.h"
 
 static void CheckMetadata() {
     using namespace Shader;
-    const auto load = [](bool motion, u32 version) {
+    const auto load = [](bool motion, u32 version, HwStage stage = HwStage::Vertex,
+                         u64 pgm_hash = 0x123456) {
         Info original{};
-        original.hw_stage = HwStage::Vertex;
-        original.sw_stage = SwStage::Vertex;
-        original.pgm_hash = 0x123456;
+        original.hw_stage = stage;
+        original.sw_stage = stage == HwStage::Vertex ? SwStage::Vertex : SwStage::Fragment;
+        original.pgm_hash = pgm_hash;
         StageSpecialization spec{};
         spec.info = &original;
         spec.runtime_info.Initialize(original.hw_stage, original.sw_stage);
-        spec.runtime_info.hw.vs.motion_vectors = motion;
+        if (stage == HwStage::Vertex) spec.runtime_info.hw.vs.motion_vectors = motion;
         const auto hash = HashCombine(original.pgm_hash, u64{2});
+        Serialization::Archive emitted{Vulkan::SerializeShaderMeta(original, spec, hash, 2)};
+        Serialization::Reader emitted_reader{emitted};
+        u32 meta_version{}, emitted_version{};
+        emitted_reader.Read(meta_version);
+        emitted_reader.Read(emitted_version);
+        const u32 expected = stage == HwStage::Vertex && motion ? 8 :
+                             stage == HwStage::Fragment &&
+                                 Vulkan::Pom::IsSupportedShader(pgm_hash) ? 9 : 7;
+        assert(emitted_version == expected);
         Serialization::Archive output;
         Serialization::Writer writer{output};
-        writer.Write(u32{7});
+        writer.Write(meta_version);
         writer.Write(version);
         writer.Write(hash);
         writer.Write(size_t{2});
@@ -52,6 +63,16 @@ static void CheckMetadata() {
     assert(load(false, 7));
     assert(!load(false, 8));
     assert(!load(true, 99));
+    assert(!load(false, 9));
+    assert(load(false, 7, HwStage::Fragment));
+    assert(!load(false, 9, HwStage::Fragment));
+    for (const auto& shader : Vulkan::Pom::kShaders) {
+        assert(!load(false, 7, HwStage::Fragment, shader.hash));
+        assert(!load(false, 8, HwStage::Fragment, shader.hash));
+        assert(load(false, 9, HwStage::Fragment, shader.hash));
+        assert(load(false, 7, HwStage::Vertex, shader.hash));
+        assert(load(true, 8, HwStage::Vertex, shader.hash));
+    }
 }
 
 static void CheckMotionInterface(const std::vector<u32>& code, bool vertex_motion) {

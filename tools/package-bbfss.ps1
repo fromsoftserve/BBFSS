@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$Destination,
+    [string]$Version = '0.9.9',
     [string]$RuntimeBin = 'C:\msys64\clang64\bin'
 )
 $ErrorActionPreference = 'Stop'
@@ -37,7 +38,7 @@ Copy-Item -LiteralPath "$PSScriptRoot\bbfss-default.ini" -Destination "$destinat
 Copy-Item -LiteralPath "$PSScriptRoot\BBFSS-README.txt" -Destination "$destination\README-FIRST.txt"
 $commit = (& git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE) { throw 'Cannot identify source revision' }
-@{ version = '0.9.9'; engine = "bbfss-$($commit.Substring(0,7))"; source_commit = $commit;
+@{ version = $Version; engine = "bbfss-$($commit.Substring(0,7))"; source_commit = $commit;
     source_modified = @(& git -C $root status --porcelain --untracked-files=no).Count -gt 0 } |
     ConvertTo-Json | Set-Content -LiteralPath "$destination\package.json" -Encoding utf8
 
