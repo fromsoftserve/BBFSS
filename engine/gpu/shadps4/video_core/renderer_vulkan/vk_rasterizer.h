@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_sky_seam.h"
 #include "video_core/renderer_vulkan/vk_sky_zenith.h"
 #include "video_core/renderer_vulkan/vk_ssgi.h"
+#include "video_core/renderer_vulkan/vk_ao_spatial.h"
 #include "video_core/renderer_vulkan/vk_ssr_temporal.h"
 #include "video_core/renderer_vulkan/vk_volumetric_light.h"
 #include "video_core/renderer_vulkan/vk_constant_ring.h"
@@ -411,6 +412,7 @@ private:
     bool SkyBeforeRendering(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
                             u32 index_offset, const PreparedDraw* prepared, bool inputs_resolved);
     void DepthOfFieldAfterDraw(const GraphicsPipeline* pipeline, const RenderState& state);
+    void HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderState& state);
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
@@ -601,6 +603,7 @@ private:
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
     std::unique_ptr<ScreenSpaceGI> ssgi;
+    std::unique_ptr<SpatialAo> spatial_ao; // bbport: graphics_ao_quality=1 (High GTAO)
     std::unique_ptr<SsrTemporal> ssr_temporal;
     std::unique_ptr<RtShadow> rt_shadow;
     std::unique_ptr<ContactShadow> contact_shadow;
