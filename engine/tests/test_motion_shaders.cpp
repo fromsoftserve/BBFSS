@@ -12,33 +12,29 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
-#include "video_core/renderer_vulkan/vk_pom_patch.h"
+
+extern "C" {
+void runtime_blocked_report(void) {}
+[[noreturn]] void runtime_thread_exit(void*) { std::abort(); }
+int sys_pad_type(void) { return 0; }
+int sys_pad_button(uint32_t, int) { return 0; }
+}
 
 static void CheckMetadata() {
     using namespace Shader;
-    const auto load = [](bool motion, u32 version, HwStage stage = HwStage::Vertex,
-                         u64 pgm_hash = 0x123456) {
+    const auto load = [](bool motion, u32 version) {
         Info original{};
-        original.hw_stage = stage;
-        original.sw_stage = stage == HwStage::Vertex ? SwStage::Vertex : SwStage::Fragment;
-        original.pgm_hash = pgm_hash;
+        original.hw_stage = HwStage::Vertex;
+        original.sw_stage = SwStage::Vertex;
+        original.pgm_hash = 0x123456;
         StageSpecialization spec{};
         spec.info = &original;
         spec.runtime_info.Initialize(original.hw_stage, original.sw_stage);
-        if (stage == HwStage::Vertex) spec.runtime_info.hw.vs.motion_vectors = motion;
+        spec.runtime_info.hw.vs.motion_vectors = motion;
         const auto hash = HashCombine(original.pgm_hash, u64{2});
-        Serialization::Archive emitted{Vulkan::SerializeShaderMeta(original, spec, hash, 2)};
-        Serialization::Reader emitted_reader{emitted};
-        u32 meta_version{}, emitted_version{};
-        emitted_reader.Read(meta_version);
-        emitted_reader.Read(emitted_version);
-        const u32 expected = stage == HwStage::Vertex && motion ? 8 :
-                             stage == HwStage::Fragment &&
-                                 Vulkan::Pom::IsSupportedShader(pgm_hash) ? 9 : 7;
-        assert(emitted_version == expected);
         Serialization::Archive output;
         Serialization::Writer writer{output};
-        writer.Write(meta_version);
+        writer.Write(u32{8});
         writer.Write(version);
         writer.Write(hash);
         writer.Write(size_t{2});
@@ -63,16 +59,6 @@ static void CheckMetadata() {
     assert(load(false, 7));
     assert(!load(false, 8));
     assert(!load(true, 99));
-    assert(!load(false, 9));
-    assert(load(false, 7, HwStage::Fragment));
-    assert(!load(false, 9, HwStage::Fragment));
-    for (const auto& shader : Vulkan::Pom::kShaders) {
-        assert(!load(false, 7, HwStage::Fragment, shader.hash));
-        assert(!load(false, 8, HwStage::Fragment, shader.hash));
-        assert(load(false, 9, HwStage::Fragment, shader.hash));
-        assert(load(false, 7, HwStage::Vertex, shader.hash));
-        assert(load(true, 8, HwStage::Vertex, shader.hash));
-    }
 }
 
 static void CheckMotionInterface(const std::vector<u32>& code, bool vertex_motion) {
@@ -119,18 +105,26 @@ static void CheckMotionInterface(const std::vector<u32>& code, bool vertex_motio
 
 int main(int argc, char** argv) {
     using namespace Shader;
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR);
+#endif
     CheckMetadata();
     const std::filesystem::path dir = argc > 1 ? argv[1] : ".";
     std::filesystem::create_directories(dir);
     for (bool vertex : {true, false}) {
-        for (bool motion : {false, true}) {
+        for (u8 mode : {u8(0), Shader::MotionVectors::VertexOutputs, Shader::MotionVectors::VertexCapture,
+                        Shader::MotionVectors::VertexBoth}) {
+            if (!vertex && mode >= Shader::MotionVectors::VertexCapture) {
+                continue;
+            }
+            const bool motion = mode == Shader::MotionVectors::VertexOutputs;
             Info info{};
             info.hw_stage = vertex ? HwStage::Vertex : HwStage::Fragment;
             info.sw_stage = vertex ? SwStage::Vertex : SwStage::Fragment;
             RuntimeInfo runtime{};
             runtime.Initialize(info.hw_stage, info.sw_stage);
             if (vertex) {
-                runtime.hw.vs.motion_vectors = motion;
+                runtime.hw.vs.motion_vectors = mode;
             } else {
                 runtime.hw.fs.motion_vectors = motion;
                 runtime.hw.fs.color_buffers[0].num_format = AmdGpu::NumberFormat::Float;
@@ -159,9 +153,14 @@ int main(int argc, char** argv) {
             profile.support_int64 = true;
             Backend::Bindings bindings{};
             const auto code = Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings);
-            CheckMotionInterface(code, vertex && motion);
+            if (mode < Shader::MotionVectors::VertexCapture) {
+                CheckMotionInterface(code, vertex && motion);
+            }
+            const char* kind = mode == Shader::MotionVectors::VertexBoth ? "-both.spv"
+                               : mode == Shader::MotionVectors::VertexCapture ? "-capture.spv"
+                                                                            : motion ? "-motion.spv" : "-plain.spv";
             const auto path = dir / (std::string(vertex ? "vertex" : "fragment") +
-                                      (motion ? "-motion.spv" : "-plain.spv"));
+                                      kind);
             std::ofstream out(path, std::ios::binary);
             out.write(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u32));
             if (!out) { return 1; }

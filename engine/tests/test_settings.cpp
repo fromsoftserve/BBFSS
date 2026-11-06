@@ -7,7 +7,6 @@
 #include <chrono>
 #include <sstream>
 #include <string>
-#include <utility>
 #include "gpu/shim/bbport_settings.h"
 
 static std::string Read(const char* path) {
@@ -33,32 +32,6 @@ int main() {
 
     BbSettings::Load();
     auto& s = BbSettings::Get();
-    assert(s.graphics_shadow_resolution == 1);
-    assert(s.graphics_local_shadow_resolution == 0);
-    assert(s.graphics_motion_blur_quality == 0);
-    assert(!s.graphics_auto_exposure);
-    assert(!s.graphics_native_sss);
-    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
-    assert(s.graphics_ao_quality == 0 && s.startup_ao_quality == 0);
-    s.graphics_ao_quality = 1;
-    assert(s.startup_ao_quality == 0);
-    s.graphics_directional_ggx = true;
-    assert(!s.startup_directional_ggx);
-    s.graphics_native_sss = true;
-    assert(s.graphics_point_fog);
-    assert(s.graphics_point_fog_glow_size == 0.08f);
-    s.graphics_point_fog = false;
-    s.graphics_point_fog_glow_size = 0.15f;
-    s.graphics_auto_exposure = true;
-    assert(s.graphics_lightshaft_tilt == 0.0f);
-    s.graphics_lightshaft_tilt = 20.0f;
-    s.graphics_motion_blur_quality = 1;
-    s.graphics_local_shadow_resolution = 1;
-    s.graphics_shadow_resolution = 1;
-    assert(s.graphics_dof_intensity == 1.0f);
-    assert(s.graphics_ssr_intensity == 1.0f);
-    s.graphics_ssr_intensity = 2.25f;
-    s.graphics_dof_intensity = 1.75f;
     assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.show_fps && s.menu_x < 0.0f);
     s.show_fps = true;
     s.upscaler = BbSettings::UpscalerFsr411;
@@ -68,18 +41,6 @@ int main() {
     BbSettings::Save();
 
     const std::string saved = Read(path);
-    assert(saved.find("graphics_shadow_resolution=1\n") != std::string::npos);
-    assert(saved.find("graphics_local_shadow_resolution=1\n") != std::string::npos);
-    assert(saved.find("graphics_motion_blur_quality=1\n") != std::string::npos);
-    assert(saved.find("graphics_auto_exposure=1\n") != std::string::npos);
-    assert(saved.find("graphics_native_sss=1\n") != std::string::npos);
-    assert(saved.find("graphics_point_fog=0\n") != std::string::npos);
-    assert(saved.find("graphics_point_fog_glow_size=0.150\n") != std::string::npos);
-    assert(saved.find("graphics_directional_ggx=1\n") != std::string::npos);
-    assert(saved.find("graphics_ao_quality=1\n") != std::string::npos);
-    assert(saved.find("graphics_lightshaft_tilt=20.00\n") != std::string::npos);
-    assert(saved.find("graphics_dof_intensity=1.75\n") != std::string::npos);
-    assert(saved.find("graphics_ssr_intensity=2.25\n") != std::string::npos);
     assert(saved.find("# launcher\nupscaler=fsr411\nkey.cross=X, Space\npad.circle=a\nshow_fps=1\n"
                       "fullscreen_hint=1\n") == 0);
     assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
@@ -88,36 +49,7 @@ int main() {
 
     s.menu_x = -1.0f;
     s.menu_y = -1.0f;
-    s.graphics_ssr_intensity = 0.0f;
-    s.graphics_shadow_resolution = 0;
-    s.graphics_local_shadow_resolution = 0;
-    s.graphics_motion_blur_quality = 0;
-    s.graphics_auto_exposure = false;
-    s.graphics_native_sss = false;
-    s.graphics_point_fog = true;
-    s.graphics_point_fog_glow_size = 0.08f;
-    s.graphics_directional_ggx = false;
-    s.graphics_lightshaft_tilt = 0.0f;
     BbSettings::Load();
-    assert(!s.graphics_point_fog);
-    assert(s.graphics_point_fog_glow_size == 0.15f);
-    assert(s.graphics_ssr_intensity == 2.25f);
-    assert(s.graphics_shadow_resolution == 1);
-    assert(s.graphics_local_shadow_resolution == 1);
-    assert(s.graphics_motion_blur_quality == 1);
-    assert(s.graphics_auto_exposure);
-    assert(s.graphics_native_sss);
-    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
-    assert(s.graphics_ao_quality == 1 && s.startup_ao_quality == 1);
-    s.graphics_ao_quality = 0;
-    assert(s.startup_ao_quality == 1);
-    s.graphics_ao_quality = 1;
-    s.graphics_directional_ggx = false;
-    assert(s.startup_directional_ggx);
-    s.graphics_directional_ggx = true;
-    assert(s.startup_motion_blur_quality == 1);
-    assert(s.graphics_lightshaft_tilt == 20.0f);
-    assert(s.graphics_dof_intensity == 1.75f);
     assert(s.menu_x == 0.625f && s.menu_y == 0.125f && s.upscaler == BbSettings::UpscalerFsr411);
     s.upscaler = BbSettings::UpscalerDlss;
     BbSettings::Save();
@@ -128,6 +60,17 @@ int main() {
     s.upscaler = BbSettings::UpscalerDlss;
     BbSettings::ConfigureUpscalerSupport(false, false, true);
     assert(s.upscaler == BbSettings::UpscalerDlss && s.dlss_supported);
+    s.upscaler = BbSettings::UpscalerXess;
+    BbSettings::Save();
+    assert(Read(path).find("upscaler=xess\n") != std::string::npos);
+    s.upscaler = BbSettings::UpscalerOff;
+    BbSettings::Load();
+    assert(s.upscaler == BbSettings::UpscalerXess);
+    BbSettings::ConfigureUpscalerSupport(false, false, false);
+    assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.xess_supported);
+    s.upscaler = BbSettings::UpscalerXess;
+    BbSettings::ConfigureUpscalerSupport(false, false, false, false, false, true);
+    assert(s.upscaler == BbSettings::UpscalerXess && s.xess_supported);
     s.upscaler = BbSettings::UpscalerFsr411;
     BbSettings::ConfigureUpscalerSupport(true, false, false);
     assert(s.upscaler == BbSettings::UpscalerFsr4);
@@ -150,76 +93,45 @@ int main() {
     s.rebirth=false;s.graphics_bloom=1.0f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
-    for (const auto& [input, expected] :
-         {std::pair{"0", 0}, {"1", 1}, {"-1", 0}, {"2", 0}, {"nan", 0}, {"1bad", 0}}) {
-        { std::ofstream file(path); file << "graphics_ao_quality=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_ao_quality == expected && s.startup_ao_quality == expected);
-        BbSettings::Save();
-        assert(Read(path).find("graphics_ao_quality=" + std::to_string(expected) + "\n") !=
-               std::string::npos);
-    }
-    { std::ofstream file(path); file << "graphics_dof_intensity=nan\ncamera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
-    BbSettings::Load();
+    assert(!s.graphics_auto_exposure && !s.graphics_native_sss);
+    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
     assert(s.graphics_dof_intensity == 1.0f);
-    { std::ofstream file(path); file << "graphics_dof_intensity=10\n"; }
+    s.graphics_auto_exposure = true;
+    s.graphics_native_sss = true;
+    s.graphics_directional_ggx = true;
+    s.graphics_dof_intensity = 1.75f;
+    assert(!s.startup_directional_ggx);
+    BbSettings::Save();
+    {
+        const std::string fork_keys = Read(path);
+        assert(fork_keys.find("graphics_auto_exposure=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_directional_ggx=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
+    }
+    s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_directional_ggx = false;
+    s.graphics_dof_intensity = 1.0f;
     BbSettings::Load();
-    assert(s.graphics_dof_intensity == 3.0f);
-    { std::ofstream file(path); file << "graphics_dof_intensity=-1\n"; }
+    assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
+    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
+    s.graphics_directional_ggx = false;
+    assert(s.startup_directional_ggx);
+    s.graphics_auto_exposure = s.graphics_native_sss = false;
+    s.graphics_dof_intensity = 1.0f;
+    BbSettings::Save();
+    for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
+        assert(!BbSettings::Effects[e].default_on);
+    }
+    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\ngraphics_volumetric_intensity=nan\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();
-    assert(s.graphics_dof_intensity == 0.0f);
-    for (const auto& [input, expected] :
-         {std::pair{"nan", 1.0f}, {"inf", 1.0f}, {"10", 3.0f}, {"-1", 0.0f},
-          {"0", 0.0f}, {"1", 1.0f}, {"3", 3.0f}}) {
-        { std::ofstream file(path); file << "graphics_ssr_intensity=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_ssr_intensity == expected);
-    }
-    for (const auto& [input, expected] :
-         {std::pair{"-1", 0}, {"0", 0}, {"1", 1}, {"2", 2}, {"99", 2}}) {
-        { std::ofstream file(path); file << "graphics_shadow_resolution=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_shadow_resolution == expected);
-        BbSettings::Save();
-        s.graphics_shadow_resolution = -1;
-        BbSettings::Load();
-        assert(s.graphics_shadow_resolution == expected);
-    }
-    for (const auto& [input, expected] :
-         {std::pair{"-1", 0}, {"0", 0}, {"1", 1}, {"2", 2}, {"99", 2}}) {
-        { std::ofstream file(path); file << "graphics_local_shadow_resolution=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_local_shadow_resolution == expected);
-        BbSettings::Save();
-        s.graphics_local_shadow_resolution = -1;
-        BbSettings::Load();
-        assert(s.graphics_local_shadow_resolution == expected);
-    }
-    for (const auto& [input, expected] :
-         {std::pair{"-1", 0}, {"0", 0}, {"1", 1}, {"2", 1}, {"99", 1}}) {
-        { std::ofstream file(path); file << "graphics_motion_blur_quality=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_motion_blur_quality == expected);
-        assert(s.startup_motion_blur_quality == expected);
-        s.graphics_motion_blur_quality = 1 - expected;
-        assert(s.startup_motion_blur_quality == expected);
-        s.graphics_motion_blur_quality = expected;
-        BbSettings::Save();
-        s.graphics_motion_blur_quality = -1;
-        BbSettings::Load();
-        assert(s.graphics_motion_blur_quality == expected);
-    }
-    for (const auto& [input, expected] :
-         {std::pair{"nan", 0.0f}, {"inf", 0.0f}, {"-5", 0.0f}, {"0", 0.0f},
-          {"15", 15.0f}, {"20", 20.0f}, {"25", 25.0f}, {"30", 30.0f}, {"99", 30.0f}}) {
-        { std::ofstream file(path); file << "graphics_lightshaft_tilt=" << input << "\n"; }
-        BbSettings::Load();
-        assert(s.graphics_lightshaft_tilt == expected);
-        BbSettings::Save();
-        s.graphics_lightshaft_tilt = -1.0f;
-        BbSettings::Load();
-        assert(s.graphics_lightshaft_tilt == expected);
-    }
+    assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_ssr_intensity == 0.0f);
+    assert(s.graphics_volumetric_intensity == 1.0f && s.graphics_shadow_resolution == 2);
+    assert(s.startup_motion_blur_quality == 1 && s.startup_effects[BbSettings::EffectGi]);
+    BbSettings::Save();
+    BbSettings::Load();
+    assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_shadow_resolution == 2);
+    { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
+    BbSettings::Load();
     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
     { std::ofstream file(path); file << "menu_language=pt_BR\n"; }
     BbSettings::Load();

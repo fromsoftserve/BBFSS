@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// bbport: temporal accumulation of the screen-space reflections (vk_ssr_temporal.h).
 
 #include "video_core/renderer_vulkan/vk_ssr_temporal.h"
 
@@ -19,13 +18,12 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
+#include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
-
 namespace {
-
 struct Params {
     std::array<float, 4> proj;
     std::array<float, 12> reproject;
@@ -55,11 +53,6 @@ constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 constexpr auto SampledImage = vk::DescriptorType::eSampledImage;
 constexpr auto StorageImage = vk::DescriptorType::eStorageImage;
 constexpr auto Format = vk::Format::eR16G16B16A16Sfloat;
-
-float EnvFloat(const char* name, float fallback) {
-    const char* env = std::getenv(name);
-    return env && env[0] ? static_cast<float>(std::atof(env)) : fallback;
-}
 
 void MemoryBarrier(vk::CommandBuffer cmdbuf, vk::PipelineStageFlags2 src_stage,
                    vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst_stage,
@@ -94,25 +87,32 @@ vk::WriteDescriptorSet Write(u32 binding, vk::DescriptorType type,
             .pImageInfo = image};
 }
 
-} // namespace
+}
 
 SsrTemporal::SsrTemporal(const Instance& instance_, Scheduler& scheduler_,
                          VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
                          SceneTargets& scene_targets_, CameraMotion& camera_motion_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
       runtime{runtime_}, scene_targets{scene_targets_}, camera_motion{camera_motion_} {
-    enabled = EnvFloat("BB_SSR_TEMPORAL", 1.0f) > 0.5f;
-    if (!enabled) {
-        return;
+}
+
+bool SsrTemporal::Ready() {
+    if (tried) {
+        return !failed;
     }
-    CreatePass(resolve, {SampledImage, SampledImage, SampledImage, StorageImage},
-               SSR_TEMPORAL_RESOLVE_COMP, "ssr_temporal.comp (resolve)");
-    CreatePass(copy, {SampledImage, StorageImage}, SSR_TEMPORAL_COPY_COMP,
-               "ssr_temporal.comp (copy)");
-    full_enabled = EnvFloat("BB_SSR_FULL", 1.0f) > 0.5f;
-    if (full_enabled) {
+    tried = true;
+    const bool made =
+        instance.IsUniformBufferStandardLayoutSupported() &&
+        EffectPass::StorageFormat(instance, Format) &&
+        CreatePass(resolve, {SampledImage, SampledImage, SampledImage, StorageImage},
+                   SSR_TEMPORAL_RESOLVE_COMP, "SSR resolve") &&
+        CreatePass(copy, {SampledImage, StorageImage}, SSR_TEMPORAL_COPY_COMP, "SSR copy") &&
         CreateTracePass();
+    if (!made) {
+        failed = true;
+        std::printf("SSR temporal: off - this GPU cannot run the passes\n");
     }
+    return made;
 }
 
 SsrTemporal::~SsrTemporal() {
@@ -124,43 +124,10 @@ SsrTemporal::~SsrTemporal() {
     }
 }
 
-void SsrTemporal::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorType> types,
+bool SsrTemporal::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorType> types,
                              std::span<const u32> code, const char* name) {
-    const auto device = instance.GetDevice();
-    std::array<vk::DescriptorSetLayoutBinding, 4> bindings{};
-    u32 count = 0;
-    for (const vk::DescriptorType type : types) {
-        bindings[count] = {.binding = count,
-                           .descriptorType = type,
-                           .descriptorCount = 1,
-                           .stageFlags = vk::ShaderStageFlagBits::eCompute};
-        ++count;
-    }
-    pass.set_layout = Check<"create SSR temporal descriptor set layout">(
-        device.createDescriptorSetLayoutUnique({
-            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
-            .bindingCount = count,
-            .pBindings = bindings.data(),
-        }));
-    const vk::PushConstantRange push{
-        .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = sizeof(Params)};
-    pass.layout = Check<"create SSR temporal pipeline layout">(device.createPipelineLayoutUnique({
-        .setLayoutCount = 1,
-        .pSetLayouts = &*pass.set_layout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &push,
-    }));
-    const auto module = CompileSPV(code, device);
-    ASSERT(module);
-    SetObjectName(device, module, name);
-    pass.pipeline = Check<"create SSR temporal pipeline">(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *pass.layout,
-            }));
-    device.destroyShaderModule(module);
+    return EffectPass::Create(instance, pass.set_layout, pass.layout, pass.pipeline, types,
+                              sizeof(Params), code, name);
 }
 
 bool SsrTemporal::EnsureImage(OwnImage& own, u32 width, u32 height, const char* name) {
@@ -234,7 +201,7 @@ vk::ImageView SsrTemporal::CachedView(const VideoCore::Image& image, vk::Format 
 }
 
 void SsrTemporal::OnSsrDraw(VideoCore::ImageId target, const TraceInputs& inputs) {
-    if (!enabled || failed || done_this_frame) {
+    if (failed || done_this_frame || !Ready()) {
         return;
     }
     pending = target;
@@ -247,53 +214,14 @@ void SsrTemporal::OnFrameEnd() {
     pending = {};
 }
 
-void SsrTemporal::CreateTracePass() {
-    const auto device = instance.GetDevice();
-    const auto make_sampler = [&](vk::Filter filter) {
-        return Check<"create SSR trace sampler">(device.createSamplerUnique({
-            .magFilter = filter,
-            .minFilter = filter,
-            .mipmapMode = vk::SamplerMipmapMode::eNearest,
-            .addressModeU = vk::SamplerAddressMode::eClampToEdge,
-            .addressModeV = vk::SamplerAddressMode::eClampToEdge,
-            .addressModeW = vk::SamplerAddressMode::eClampToEdge,
-            .maxLod = 0.0f,
-        }));
-    };
-    nearest_sampler = make_sampler(vk::Filter::eNearest);
-    linear_sampler = make_sampler(vk::Filter::eLinear);
-    const std::array<vk::DescriptorSetLayoutBinding, 5> bindings{{
-        {0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eCompute},
-        {1, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eCompute},
-        {2, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eCompute},
-        {3, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eCompute},
-        {4, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
-    }};
-    trace.set_layout = Check<"create SSR trace descriptor set layout">(
-        device.createDescriptorSetLayoutUnique({
-            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
-            .bindingCount = u32(bindings.size()),
-            .pBindings = bindings.data(),
-        }));
-    const vk::PushConstantRange push{
-        .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = 16};
-    trace.layout = Check<"create SSR trace pipeline layout">(device.createPipelineLayoutUnique({
-        .setLayoutCount = 1,
-        .pSetLayouts = &*trace.set_layout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &push,
-    }));
-    const auto module = CompileSPV(SSR_TRACE_COMP, device);
-    ASSERT(module);
-    SetObjectName(device, module, "ssr_trace.comp");
-    trace.pipeline = Check<"create SSR trace pipeline">(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *trace.layout,
-            }));
-    device.destroyShaderModule(module);
+bool SsrTemporal::CreateTracePass() {
+    using enum vk::DescriptorType;
+    return EffectPass::CreateSampler(instance, nearest_sampler, vk::Filter::eNearest) &&
+           EffectPass::CreateSampler(instance, linear_sampler, vk::Filter::eLinear) &&
+           EffectPass::Create(instance, trace.set_layout, trace.layout, trace.pipeline,
+                              {eUniformBuffer, eCombinedImageSampler, eCombinedImageSampler,
+                               eCombinedImageSampler, eStorageImage},
+                              16, SSR_TRACE_COMP, "SSR trace");
 }
 
 void SsrTemporal::Flush(std::array<float, 2> jitter) {
@@ -315,34 +243,61 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
         std::printf("SSR temporal: the SSR target is not RGBA16F; off\n");
         return;
     }
-    if (!(target.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+    const bool reduced = scene_targets.Reduced() && scene_targets.Eligible(depth) &&
+                         scene_targets.Eligible(target);
+    if (!reduced && !(target.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
         failed = true;
         std::printf("SSR temporal: the SSR target is not a storage image; off\n");
-        return;
-    }
-    if (scene_targets.Reduced() && scene_targets.EligibleScene(depth)) {
-        failed = true;
-        std::printf("SSR temporal: reduced scene targets are not supported; off\n");
         return;
     }
     done_this_frame = true;
 
     u32 width = depth.info.size.width, height = depth.info.size.height;
-    if (const auto render = camera_motion.RenderSize(); render[0] && render[1]) {
+    u32 half_width = target.info.size.width, half_height = target.info.size.height;
+    if (reduced) {
+        const auto scene_size = scene_targets.ProxySize(depth);
+        const auto target_size = scene_targets.ProxySize(target);
+        width = scene_size.width;
+        height = scene_size.height;
+        half_width = target_size.width;
+        half_height = target_size.height;
+    } else if (const auto render = camera_motion.RenderSize(); render[0] && render[1]) {
         width = std::min(width, render[0]);
         height = std::min(height, render[1]);
     }
-    const u32 half_width = target.info.size.width, half_height = target.info.size.height;
 
     scheduler.EndRendering();
-    const auto target_view = CachedView(target, Format, vk::ImageAspectFlagBits::eColor);
-    const auto depth_view =
-        CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
-    runtime.Transit(&target, vk::ImageLayout::eGeneral, Compute,
-                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
-    runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);
-    runtime.FlushBarriers();
+    vk::ImageView target_view{}, depth_view{};
+    if (reduced) {
+        VideoCore::ImageViewInfo target_info, depth_info;
+        target_info.format = Format;
+        depth_info.format = depth.info.pixel_format;
+        const auto proxy = scene_targets.Read(target_id, target_info, Compute,
+                                              vk::AccessFlagBits2::eShaderRead |
+                                                  vk::AccessFlagBits2::eShaderWrite);
+        if (!(proxy.usage & vk::ImageUsageFlagBits::eStorage)) {
+            failed = true;
+            std::printf("SSR temporal: the reduced SSR target is not a storage image; off\n");
+            return;
+        }
+        target_view = proxy.view;
+        depth_view = scene_targets.Read(depth_id, depth_info).view;
+    } else {
+        target_view = CachedView(target, Format, vk::ImageAspectFlagBits::eColor);
+        depth_view = CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
+        runtime.Transit(&target, vk::ImageLayout::eGeneral, Compute,
+                        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+        runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute,
+                        vk::AccessFlagBits2::eShaderRead);
+        runtime.FlushBarriers();
+    }
 
+    if ((!accum[0].image || accum[0].width != half_width || accum[0].height != half_height) &&
+        !EffectPass::HasRoom(instance, 3ull * 8 * half_width * half_height + 3ull * 8 * width * height)) {
+        failed = true;
+        std::printf("SSR temporal: off - not enough video memory\n");
+        return;
+    }
     bool created = false;
     for (auto& image : accum) {
         created |= EnsureImage(image, half_width, half_height, "accum");
@@ -350,7 +305,7 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
     if (created) {
         history_valid = false;
     }
-    static const float blend = EnvFloat("BB_SSR_TEMPORAL_BLEND", 0.9f);
+    constexpr float blend = 0.9f;
     static bool printed = false;
     if (!printed) {
         printed = true;
@@ -371,6 +326,7 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
         .blend = blend,
     };
     const u32 current = frame & 1;
+    EffectPass::Mark(2, "SSR temporal");
     scheduler.RecordCrumb(
         {.name = "SSR temporal"},
         [params, half_width, half_height, target_view, depth_view,
@@ -417,7 +373,7 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
             MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, AllCommands,
                           vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
         });
-    if (full_enabled && trace_inputs.constants && trace_inputs.normals_view &&
+    if (EffectShaders::SsrCompositeActive() && trace_inputs.constants && trace_inputs.normals_view &&
         trace_inputs.color_view) {
         const auto normals_view = trace_inputs.normals_view;
         const auto color_view = trace_inputs.color_view;
@@ -444,6 +400,7 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
         const std::array<u32, 4> trace_push{
             trace_inputs.constants_dword_offset, trace_inputs.frame_index,
             std::bit_cast<u32>(float(width)), std::bit_cast<u32>(float(height))};
+        EffectPass::Mark(3, "SSR full trace");
         scheduler.RecordCrumb(
             {.name = "SSR full trace"},
             [full_params, trace_push, width, height, constants = trace_inputs.constants,
@@ -529,4 +486,4 @@ void SsrTemporal::Flush(std::array<float, 2> jitter) {
     ++frame;
 }
 
-} // namespace Vulkan
+}

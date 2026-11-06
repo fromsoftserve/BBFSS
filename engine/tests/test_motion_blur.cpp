@@ -193,7 +193,7 @@ int main() {
     auto out = run(1);
     for (const auto& p : out) for (u32 c = 0; c < 4; ++c)
         assert(std::abs(p[c] - color[0][c]) < 0.001f);
-    // Both native pass gains must apply once, not be normalized away or applied twice.
+
     for (float gain : {13.44f, 1.0f}) {
         std::fill_n(cb + 636,4,gain);
         out = run(1);
@@ -203,8 +203,7 @@ int main() {
     for (auto& v : velocity) v = {0.5f,0.5f,0,0};
     assert(run(1) == color);
     for (auto& v : velocity) v = {1,0.5f,0,0};
-    // A single bright texel exposes sparse five-tap banding; the dense result
-    // should match a uniform 17-position reference at the same +/-8-pixel radius.
+
     for (u32 y = 0; y < H; ++y) for (u32 x = 0; x < W; ++x)
         color[y*W+x] = {x == W/2 ? 8.0f : 0.0f,0,0,0.5f};
     const auto stock = run(0);
@@ -217,7 +216,7 @@ int main() {
         assert(std::abs(high[(H/2)*W+x][3] - 0.5f) < 0.001f);
     }
     assert(high_error < stock_error * 0.05);
-    // Opposing motion on a closer red surface must not bleed onto a green background.
+
     for (u32 y = 0; y < H; ++y) for (u32 x = 0; x < W; ++x) {
         color[y*W+x] = x < W/2 ? Pixel{8,0,0,0.1f} : Pixel{0,4,0,0.9f};
         velocity[y*W+x] = x < W/2 ? Pixel{0,0.5f,0,0} : Pixel{1,0.5f,0,0};
@@ -227,7 +226,7 @@ int main() {
         assert(std::abs(out[(H/2)*W+x][0]) < 0.001f);
         assert(std::abs(out[(H/2)*W+x][1] - 4) < 0.001f);
     }
-    // Short trails use the exact native five positions; odd extents and bounds stay valid.
+
     cb[748] = 1.0f/W; cb[750] = -0.5f/W;
     assert(run(1) == run(0));
     std::printf("PASS: native motion blur HDR/gains, zero/short motion, depth/velocity rejection, "

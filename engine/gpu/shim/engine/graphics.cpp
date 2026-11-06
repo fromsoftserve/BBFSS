@@ -9,7 +9,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -290,12 +289,11 @@ bool InstallDirectionalShadowResolution(std::uint8_t* image, std::size_t size) {
         std::printf("Engine: directional shadow resolution unavailable: allocation code differs from 1.09\n");
         return false;
     }
-    const unsigned quality = unsigned(std::clamp(
-        BbSettings::Get().graphics_shadow_resolution.load(std::memory_order_relaxed), 0, 2));
+    const int quality = std::clamp(
+        BbSettings::Get().graphics_shadow_resolution.load(std::memory_order_relaxed), 0, 2);
+    if (quality == 0) return false;
     const std::uint32_t atlas = 2048u << quality;
     const std::array<std::uint32_t, 4> sizes{atlas, atlas, atlas, atlas};
-    // Override every native quality/profile entry and the out-of-range fallback.
-    // Native allocation, half-atlas viewports, projection and reciprocal sizes stay in sync.
     if (!WriteCode(image + kDirectionalSizeTable, sizes.data(), sizeof sizes) ||
         !WriteCode(image + kDirectionalSizeDefault + 1, &atlas, sizeof atlas)) {
         std::printf("Engine: directional shadow resolution incomplete: cannot write native allocation settings\n");
@@ -307,9 +305,9 @@ bool InstallDirectionalShadowResolution(std::uint8_t* image, std::size_t size) {
 }
 
 bool InstallDirectionalShadows(std::uint8_t* image, std::size_t size) {
-    const char* enabled = std::getenv("BB_DIRECTIONAL_SHADOWS");
-    if (enabled && std::strcmp(enabled, "0") == 0) {
-        std::printf("Engine: directional cascade coverage left at the game's settings\n");
+    const auto& settings = BbSettings::Get();
+    if (!settings.startup_effects[BbSettings::EffectPcss] &&
+        !settings.startup_effects[BbSettings::EffectContactShadows]) {
         return false;
     }
     Hook hook;
@@ -318,8 +316,6 @@ bool InstallDirectionalShadows(std::uint8_t* image, std::size_t size) {
         std::printf("Engine: directional overlap off: cascade code does not match 1.09 or hook unavailable\n");
         return false;
     }
-    // Expand the next cascade backwards; the native camera feeds both caster culling
-    // and light projection. Split selection and each map's overall distance stay authored.
     Commit(std::span<Hook>{&hook, 1});
     g_cascade_overlap.store(true, std::memory_order_relaxed);
     std::printf("Engine: directional cascades overlap by 10%%; authored splits and atlas size retained\n");
@@ -344,8 +340,6 @@ bool InstallLocalShadowSoftness(std::uint8_t* image, std::size_t size, bool poin
         std::printf("Engine: local-shadow filter tuning unavailable: the filter code is not 1.09's\n");
         return false;
     }
-    // The native 13-tap generator multiplies only XY offsets by this radius, not the
-    // normalized weights. Both upgraded qualities keep a quarter-stock UV footprint.
     const float radius = LocalShadowQuality() == 1 ? 3.2f : 6.4f;
     for (const auto at : {point ? kPointShadowRadius : 0, spot ? kSpotShadowRadius : 0}) {
         if (at && !WriteCode(image + at, &radius, sizeof radius)) {
@@ -359,12 +353,8 @@ bool InstallLocalShadowSoftness(std::uint8_t* image, std::size_t size, bool poin
 }
 
 bool InstallLocalShadows(std::uint8_t* image, std::size_t size) {
-    const char* enabled = std::getenv("BB_NATIVE_LOCAL_SHADOWS");
     const int quality = LocalShadowQuality();
-    if (quality == 0 || (enabled && std::strcmp(enabled, "0") == 0)) {
-        std::printf("Engine: native point-shadow resolution left at the game's settings\n");
-        return false;
-    }
+    if (quality == 0) return false;
     if (!image ||
         !Matches(image, size, kLocalShadowPool, kLocalShadowPoolEntry, sizeof kLocalShadowPoolEntry) ||
         !Matches(image, size, kLocalShadowSize, kLocalShadowSizeRead, sizeof kLocalShadowSizeRead) ||
@@ -372,8 +362,6 @@ bool InstallLocalShadows(std::uint8_t* image, std::size_t size) {
         std::printf("Engine: higher-resolution point shadows off: the pool code is not 1.09's\n");
         return false;
     }
-    // Replace only the point pool's base-size load. The native allocator
-    // derives all four tiers, cube faces, shared depth targets and render dimensions from it.
     const std::uint32_t base = quality == 1 ? 1024u : 2048u;
     std::array<std::uint8_t, 5> resolution{0xb8};
     std::memcpy(resolution.data() + 1, &base, sizeof base);
@@ -387,12 +375,8 @@ bool InstallLocalShadows(std::uint8_t* image, std::size_t size) {
 }
 
 bool InstallSpotShadows(std::uint8_t* image, std::size_t size) {
-    const char* enabled = std::getenv("BB_NATIVE_SPOT_SHADOWS");
     const int quality = LocalShadowQuality();
-    if (quality == 0 || (enabled && std::strcmp(enabled, "0") == 0)) {
-        std::printf("Engine: native spotlight shadow resolution left at the game's settings\n");
-        return false;
-    }
+    if (quality == 0) return false;
     if (!image ||
         !Matches(image, size, kLocalShadowPool, kLocalShadowPoolEntry, sizeof kLocalShadowPoolEntry) ||
         !Matches(image, size, kSpotShadowSize, kSpotShadowSizeRead, sizeof kSpotShadowSizeRead) ||
@@ -400,8 +384,6 @@ bool InstallSpotShadows(std::uint8_t* image, std::size_t size) {
         std::printf("Engine: higher-resolution spotlight shadows off: the pool code is not 1.09's\n");
         return false;
     }
-    // xor eax,eax; mov ah,8/16 sets EAX to 2048/4096 in the original four-byte load's space.
-    // The following stores feed both dimensions; the native loop halves them for each tier.
     const std::uint8_t resolution[] = {0x31, 0xc0, 0xb4, std::uint8_t(quality == 1 ? 8 : 16)};
     if (!WriteCode(image + kSpotShadowSize, resolution, sizeof resolution)) {
         std::printf("Engine: higher-resolution spotlight shadows off: cannot write the pool size\n");

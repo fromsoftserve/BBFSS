@@ -85,8 +85,18 @@ namespace BloodborneLauncher.Core
 
         private static readonly Choice[] AutoOnOff = { new(L.T("Auto"), ""), new(L.T("On"), "1"), new(L.T("Off"), "0") };
 
+        public static readonly string[] NativeSwitches =
+            { "LANTERN_GX_DRAWS", "LANTERN_GX_TEXTURES", "LANTERN_GX_BUFFERS", "LANTERN_GX_RECORDS", "LANTERN_GX_NATIVE", "LANTERN_READ_FILTER", "LANTERN_LIFTER" };
+
         public static readonly IReadOnlyList<EngineSwitch> All = new[]
         {
+            OnUnless0("LANTERN_GX_DRAWS", Performance, L.T("Native renderer: draws"), L.T("Lantern's own resource binds. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. New in beta 31; turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_READ_FILTER", Performance, L.T("Native renderer: read tracking"), L.T("Watches fewer memory reads. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_LIFTER", Performance, L.T("Native shader compiler"), L.T("Lantern's own shader compiler. Switching recompiles every shader once. Turn off if something draws wrong or crashes")),
             Pick("BB_GPU_ID", Graphics, L.T("Graphics card"),
                 L.T("For laptops and PCs with two graphics cards where the game picks the wrong one. Auto takes the faster one"), "",
                 new(L.T("Auto"), ""), new(L.T("First"), "0"), new(L.T("Second"), "1")),
@@ -94,9 +104,16 @@ namespace BloodborneLauncher.Core
                 L.T("Anisotropic filtering forced on the game's textures: ground and walls seen at an angle stay sharp. Lower ") +
                 L.T("values cost a little less GPU time; Game's own leaves the game's filtering as it is"), "16",
                 new("16x", "16"), new("8x", "8"), new("4x", "4"), new("2x", "2"), new(L.T("Game's own"), "0")),
+            OnUnless0("BB_VOLUMETRIC_STEADY", Graphics, L.T("Steady sunlight color"),
+                L.T("Keeps the sunlight fog's color steady: it ignores the game's default white light and fades to new colors, so it ") +
+                L.T("does not flicker as the camera moves. Off: the original color, which can flip to white and back. Needs Volumetric ") +
+                L.T("sunlight on")),
             Flag("BB_UPSCALER_NO_BLUR", Graphics, L.T("No motion blur smear with upscalers"),
                 L.T("With an upscaler at an output other than 1920x1080 the game's motion blur is left out: the upscaler would ") +
                 L.T("smear it over the whole picture. Off (default): the blur stays. The Motion blur setting is not changed")),
+            OnUnless0("BB_POINT_FOG_STEADY", Graphics, L.T("Steady lamp fog"),
+                L.T("Keeps each lamp's fog on after the game stops listing the lamp, with slow fades, so it does not flicker as the camera moves. ") +
+                L.T("Can leave fog showing through a wall. Off: the original fog, from the first 64 lights the game lists. Needs Fog around lamps on")),
 
             Pick("BB_PIPELINE_THREADS", Performance, L.T("Shader compile threads"),
                 L.T("How many threads compile new shaders in the background. More finish a new area's shaders sooner but take CPU ") +
@@ -110,6 +127,16 @@ namespace BloodborneLauncher.Core
                 L.T("The frame-rate limit while the game window is in the background or minimized, to save power and heat. Online ") +
                 L.T("play is never limited, so co-op and invasions keep their pace"), "30",
                 new("10 FPS", "10"), new("15 FPS", "15"), new("30 FPS", "30"), new("60 FPS", "60"), new(L.T("No limit"), "0")),
+            OnUnless0("LANTERN_FRAMERATE", Performance, L.T("Native frame rate"),
+                L.T("Lantern Engine sets the game's frame rate itself: every per-frame step follows the time a frame really takes, ") +
+                L.T("so physics, stamina and animations keep their real speed when a scene runs slower. Off: the older frame-rate ") +
+                L.T("patches with fixed steps")),
+            OnUnless0("LANTERN_FRAMERATE_FOLLOW", Performance, L.T("Steps follow the frame rate"),
+                L.T("With the native frame rate: the game's steps take the frame rate it actually holds. Off: they stay at the ") +
+                L.T("chosen frame rate, and the game slows down when it runs below it")),
+            OnUnless0("LANTERN_MEMORY_RETRY_LIMIT", Performance, L.T("Memory retry limit"),
+                L.T("With the PC memory model: game data the processor keeps rewriting stays in system memory after three tries ") +
+                L.T("instead of moving back and forth for ever, which slowed the game down the longer you played. Off: no limit")),
 
 
 
@@ -124,6 +151,12 @@ namespace BloodborneLauncher.Core
 
             OnUnless0("BB_RESPAWN_DELAY_FIX", Fixes, L.T("No minimum loading time after death"),
                 L.T("Skips the game's 12-second minimum loading screen after dying. Off: the original delay")),
+            OnUnless0("LANTERN_JOB_SLOTS", Fixes, L.T("Cutscene freeze fix"),
+                L.T("A physics job that boss cutscenes start (Rom, Ludwig, the Queen) gives its memory slot back when it has to try again, ") +
+                L.T("so the game no longer waits for ever on a black screen. Off: the game's own behaviour")),
+            OnUnless0("LANTERN_GAME_STATUS", Fixes, L.T("Live Discord status"),
+                L.T("The game tells the launcher the area, the boss, your level, Blood Echoes and Insight, so the Discord status can show them. ") +
+                L.T("Off: the status shows only its own lines")),
             OnUnless0("BB_SOUND_HACK", Fixes, L.T("Weapon sound save fix"),
                 L.T("Sets the flag in the game's save that some weapon and player sounds need (without it they never play), before ") +
                 L.T("the game reads the save. Off leaves saves untouched")),

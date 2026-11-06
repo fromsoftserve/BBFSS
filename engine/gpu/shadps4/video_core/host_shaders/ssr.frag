@@ -1,28 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Screen-space reflection ray march, in place of Bloodborne's SSR pixel shader (hash 6c2323c2).
-// It keeps that shader's resource interface and constants (decoded from its SPIR-V) so the
-// engine's descriptors, targets and the later composite stay as they are.
-//
-//   ubo_0 (binding 0)  [0..15]  clip position -> view position rows (x, y, z, w)
-//                      [16..27] view position -> (x, y, depth) projection rows
-//                      [32..42] view normal rows from the encoded normal
-//                      [48..63] screen position + depth -> previous frame screen position rows
-//                      [64] minimum ray facing, [68,69] depth -> view distance, [72] step scale,
-//                      [76,77] hit thickness (minimum, per depth step), [78] max distance,
-//                      [79] extra stride
-//   img0 / samp0  depth        img1 / samp1  normals        img2 / samp2  scene colour
-//
-// Output RT0: premultiplied reflected colour, A = confidence (0 where the ray found nothing).
-//
-// What changed from the original: it stepped at most `step scale` times per screen width
-// (coarse, so thin geometry was missed and hits were only linearly interpolated); this one steps
-// about every pixel, refines each hit by bisection, drops the circular screen vignette that
-// faded reflections out toward the corners, and instead fades only when the hit is near the
-// screen border.
-// Normal stabilization and bracketed hit validation match ssr_trace.comp; see
-// engine/tests/test_ssr_geometry.py for policy and shader-path parity checks.
-
 #version 450
 #extension GL_EXT_scalar_block_layout : require
 
@@ -82,7 +59,6 @@ vec3 viewNormal(vec2 uv) {
                 dot(vec3(cb(40), cb(41), cb(42)), ne));
 }
 
-// Stabilize within the same surface, without borrowing normals across depth/material edges.
 vec3 stableNormal(vec2 uv) {
     vec2 t = 1.0 / vec2(textureSize(sampler2D(img0, samp0), 0));
     vec3 center = normalize(viewNormal(uv));
@@ -118,8 +94,7 @@ vec3 stableNormal(vec2 uv) {
         if (weight > 0.0) {
             n = normalize(mix(n, g, GEO_BLEND * weight));
         }
-        // A flat receiver needs a coherent mirror plane. Retain subtle ripples, not
-        // the large shading-normal tilt that stretches reflected silhouettes.
+
         float footprint = max(max(length(px - p), length(nx - p)),
                               max(length(py - p), length(ny - p)));
         float plane_error = max(max(abs(dot(g, px - p)), abs(dot(g, nx - p))),
@@ -177,7 +152,7 @@ vec4 trace(vec2 uv0, vec3 N) {
     float stepLen = min(stride / stepScale, MIN_STEP_PX * min(texel.x, texel.y));
     stepLen = max(stepLen, totalLen / float(MAX_STEPS));
     int steps = int(totalLen / stepLen);
-    vec3 stepV = w * (stepLen / uvLen); // uv x, uv y, depth per step
+    vec3 stepV = w * (stepLen / uvLen);
 
     float minThick = cb(76);
     float thickSlope = cb(77);
@@ -256,8 +231,7 @@ vec4 trace(vec2 uv0, vec3 N) {
 
 void main() {
     base = (buf_off & 0xffu) >> 2;
-    // Two rays per pixel at Halton positions that change every frame: the temporal accumulation
-    // (vk_ssr_temporal) integrates them into a sharper, supersampled reflection.
+
     vec2 texel = 1.0 / vec2(textureSize(sampler2D(img0, samp0), 0));
     vec2 c = attr1.xy;
     vec3 N = stableNormal(c);

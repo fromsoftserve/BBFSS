@@ -50,11 +50,25 @@ if [[ -z ${PYTHON:-} ]]; then
     fi
 fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
+if [[ -n ${BB_CONFIG:-} ]]; then
+    online_env=$("$PYTHON" scripts/online.py --config "$BB_CONFIG" --data "$data") || exit 1
+    while IFS= read -r line; do
+        case $line in
+            "unset "*) unset "${line#unset }" ;;
+            *=*) export "$line" ;;
+        esac
+    done <<< "$online_env"
+fi
 # BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default next to this directory.
 game=${BB_GAME_DIR:-../CUSA03173}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 original_game=$game
-game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
+first_layers=()
+while IFS= read -r layer; do
+    [[ -z $layer ]] || first_layers+=(--first-layer "$layer")
+done < <("$PYTHON" scripts/first_layers.py "$game" --engine . --data "$data" --config "${BB_CONFIG:-lantern.ini}" \
+    --patches "${BB_PATCHES_CONFIG:-$data/patches.json}")
+game=$("$PYTHON" scripts/mods.py "$game" --out "$out" "${first_layers[@]}" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
     --enabled "${BB_MODS_ENABLED:-1}")
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
@@ -81,6 +95,11 @@ fi
 # Frame rate: BB_FPS=uncap (default; delta-time patch, vblank 480 Hz, frames shown at once),
 # 60/90 (fixed-timestep patches) or 30 (unpatched). BB_PATCHES adds patch names ("a;b").
 fps=${BB_FPS:-uncap}
+if [[ $fps != 30 && ${LANTERN_FRAMERATE:-1} != 0 && -n ${BB_ENGINE_IMAGE_SHA256:-} ]]; then
+    export LANTERN_FRAMERATE_FROM_ENGINE=1
+else
+    unset LANTERN_FRAMERATE_FROM_ENGINE
+fi
 # bbport.ini output_res other than 1080p (720p for the Steam Deck, 1440p, 2160p): the whole game
 # renders at the preset's size of the output (a patch), the upscaler fills the output, the UI is
 # drawn at the output size. Preset and output changes need a restart.
@@ -113,12 +132,34 @@ fi
 if [[ $live == 1 ]]; then
     echo "Output ${scaled_output}: live resolution changes (live_resolution=0: startup patch)"
 elif [[ -n ${scaled_output:-} ]]; then
+    early=${BB_UPSCALE_EARLY:-}
+    if [[ -z $early && -f $BB_CONFIG ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            [[ $line =~ ^upscale_before_post=([01]) ]] && early=${BASH_REMATCH[1]}
+        done < "$BB_CONFIG"
+    fi
+    if [[ $early == 1 ]] && (( ${scaled_output%x*} % 4 == 0 && ${scaled_output#*x} % 4 == 0 )); then
+        scaled_render=$scaled_output
+        export BB_UPSCALE_EARLY=1
+    else
+        unset BB_UPSCALE_EARLY
+    fi
     export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_AUTO_RENDER_RES=1
     export BB_DMEM_MB=${BB_DMEM_MB:-9152}
     echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=1: live changes)"
 fi
 "$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
     --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"
+# Widescreen: the UI viewport patches.py chose (BB_UI_SIZE) and, on a screen of another shape than
+# 16:9, the menu movies widened for it, as bb-start.exe does (start/main.cpp).
+unset BB_UI_SIZE BB_WIDE_UI_MOVIES BB_WIDE_OPTION_MOVIE
+if [[ -n ${BB_PROBE:-} ]]; then wide_tool=$(dirname -- "$BB_PROBE")/bb-engine-assets
+elif [[ -n ${BB_PREBUILT:-} ]]; then wide_tool=bin/bb-engine-assets
+else wide_tool=out/bb-engine-assets
+fi
+while IFS= read -r line; do
+    if [[ $line == env:* ]]; then export "${line#env:}"; else printf '%s\n' "$line"; fi
+done < <("$PYTHON" scripts/wide_ui.py "$game" --out "$out" --data "$data" --tool "$wide_tool")
 # The GPU cache as bb-start.exe keeps it on Windows: recompiled by bb-shader-lab when the shader
 # compiler changed, then the shipped shader catalog seeded, so pipelines are built at the start
 # instead of in play. Packages only (packaging/linux/bb-start sets BB_GPU_USER_DIR).

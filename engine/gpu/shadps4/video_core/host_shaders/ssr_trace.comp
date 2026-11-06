@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: full-resolution screen-space reflection ray march (vk_ssr_temporal.h). It is
-// ssr.frag at the scene's size: the SSR draw's own constants (ubo_0), the G-buffer normals and
-// the lit scene colour, with the scene depth at full size. One ray per pixel; the temporal pass
-// accumulates the result.
-// Normal stabilization rejects neighbors beyond 3% relative depth or a normal dot below 0.8.
-// Hits require a front-to-back bracket, forward travel and a refined view-space residual
-// within 0.2% depth (bounded to 0.02-0.2 game units). Rejected candidates keep marching.
+
 #version 450
 #extension GL_EXT_scalar_block_layout : require
 
@@ -49,7 +43,6 @@ vec3 viewNormal(vec2 uv) {
                 dot(vec3(cb(40), cb(41), cb(42)), ne));
 }
 
-// Stabilize within the same surface, without borrowing normals across depth/material edges.
 vec3 stableNormal(vec2 uv) {
     const vec2 t = 1.0 / size;
     const vec2 k[8] = vec2[8](vec2(-1, -1), vec2(0, -1), vec2(1, -1), vec2(-1, 0), vec2(1, 0),
@@ -85,8 +78,7 @@ vec3 stableNormal(vec2 uv) {
         if (weight > 0.0) {
             n = normalize(mix(n, g, GEO_BLEND * weight));
         }
-        // A flat receiver needs a coherent mirror plane. Retain subtle ripples, not
-        // the large shading-normal tilt that stretches reflected silhouettes.
+
         float footprint = max(max(length(px - p), length(nx - p)),
                               max(length(py - p), length(ny - p)));
         float plane_error = max(max(abs(dot(g, px - p)), abs(dot(g, nx - p))),

@@ -50,11 +50,25 @@ std::u16string Utf16(const std::string& utf8);
 struct PcMessage {
     std::string text, help;
 };
+// The language bundles that carry their own translation of the PC port's strings; every other
+// bundle gets the English columns.
+enum class Language { English, Chinese, Russian };
+// The language of a msg/<folder> bundle: "zhocn" is Chinese, "rusru" is Russian.
+Language LanguageOf(const std::string& folder);
+std::map<std::int32_t, PcMessage> PcMessages(Language language);
 std::map<std::int32_t, PcMessage> PcMessages(bool chinese = false);
 enum class Kind { Menu, Question, Event };
 Kind KindOf(std::int32_t id);
 
+struct PlateTitles {
+    std::optional<std::string> host, guest;
+};
+Bytes MenuMessages(const Bytes& dcx, Language language, const PlateTitles& titles = {});
 Bytes MenuMessages(const Bytes& dcx, bool chinese = false);
 Bytes OptionMovie(const Bytes& gfx);
+// Widescreen: `gfx` with its full-screen shapes scaled to cover the UI viewport of `width` x `height`
+// (BB_UI_SIZE), what was changed added to `notes`; empty when nothing needs it. Its pictures only
+// with `pictures` (all but the title screen's, whose art keeps its shape).
+Bytes WideMovie(const Bytes& gfx, int width, int height, std::string& notes, bool pictures = false);
 Bytes AltarScripts(const Bytes& dcx);
 }

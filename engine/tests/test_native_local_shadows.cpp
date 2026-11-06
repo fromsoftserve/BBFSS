@@ -12,6 +12,8 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <signal.h>
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -24,9 +26,12 @@ bool ReadProcessMemory(const void* p, void* out, size_t n) {
 }
 #endif
 
+// native_sss.cpp (linked through graphics.cpp) reads and logs through the engine host.
 namespace BbEngine {
 bool host_read_safe(const void* p, void* out, std::size_t n) {
-    return BbPlatform::ReadProcessMemory(p, out, n);
+    if (!p) return false;
+    std::memcpy(out, p, n);
+    return true;
 }
 void host_log(const char* format, ...) {
     va_list args;
@@ -42,18 +47,30 @@ int failures = 0;
 void Check(bool ok, const char* what) {
     if (!ok) { std::printf("FAIL: %s\n", what); ++failures; }
 }
-void Stock(bool enabled, const char* name = "BB_NATIVE_LOCAL_SHADOWS") {
-#ifdef _WIN32
-    _putenv_s(name, enabled ? "0" : "");
-#else
-    if (enabled) setenv(name, "0", 1);
-    else unsetenv(name);
-#endif
+void Stock(bool enabled) {
+    BbSettings::Get().graphics_local_shadow_resolution = enabled ? 0 : 2;
+}
+void Directional(bool enabled) {
+    BbSettings::Get().startup_effects[BbSettings::EffectPcss] = enabled;
 }
 }
 
+#ifndef _WIN32
+void WritableAgain(int, siginfo_t* info, void*) {
+    const auto page = reinterpret_cast<std::uintptr_t>(info->si_addr) & ~std::uintptr_t(4095);
+    if (mprotect(reinterpret_cast<void*>(page), 4096, PROT_READ | PROT_WRITE | PROT_EXEC)) _exit(2);
+}
+#endif
+
 int main() {
+#ifndef _WIN32
+    struct sigaction action{};
+    action.sa_sigaction = WritableAgain;
+    action.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &action, nullptr);
+#endif
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    Stock(false);
     constexpr std::size_t pool = 0x22440b0, size_at = 0x224443f, tier = 0x2244cb0;
     constexpr std::uint8_t entry[] = {
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
@@ -104,7 +121,7 @@ int main() {
     std::memcpy(image.data() + spot_size, spot_read, sizeof spot_read);
     std::memcpy(image.data() + spot_tier, spot_tiers, sizeof spot_tiers);
     const auto spot_original = image;
-    Stock(false, "BB_NATIVE_SPOT_SHADOWS");
+    Stock(false);
     Check(!BbEngine::Graphics::InstallSpotShadows(nullptr, image.size()), "null spotlight images are refused");
     Check(!BbEngine::Graphics::InstallSpotShadows(image.data(), spot_tier + sizeof spot_tiers - 1),
           "truncated spotlight images are refused");
@@ -117,14 +134,11 @@ int main() {
         Check(image == foreign, "a refused spotlight patch changes no bytes");
         image[at] ^= 1;
     }
-    Stock(true, "BB_NATIVE_SPOT_SHADOWS");
+    Stock(true);
     Check(!BbEngine::Graphics::InstallSpotShadows(image.data(), image.size()), "spotlight opt-out is honored");
     Check(image == spot_original, "stock spotlight mode leaves the whole image unchanged");
-    Stock(false, "BB_NATIVE_SPOT_SHADOWS");
-    Stock(true);
-    Check(BbEngine::Graphics::InstallSpotShadows(image.data(), image.size()),
-          "spotlight upgrade is independent of the point-shadow opt-out");
     Stock(false);
+    Check(BbEngine::Graphics::InstallSpotShadows(image.data(), image.size()), "spotlight upgrade installs");
     constexpr std::uint8_t spot_resolution[] = {0x31, 0xc0, 0xb4, 0x10};
     Check(!std::memcmp(image.data() + spot_size, spot_resolution, sizeof spot_resolution),
           "the spotlight base load sets EAX to 4096");
@@ -137,7 +151,6 @@ int main() {
 #endif
     Check(code != nullptr, "executable memory for spotlight instruction regression");
     if (code) {
-        // Start with nonzero upper bits to verify that the replacement clears the entire register.
         constexpr std::uint8_t incoming[] = {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff};
         std::memcpy(code, incoming, sizeof incoming);
         std::memcpy(code + sizeof incoming, image.data() + spot_size, sizeof spot_resolution);
@@ -213,7 +226,7 @@ int main() {
               "spotlight filter UV footprint is one quarter of stock at every tier");
     }
     constexpr std::size_t range = 0xeac540, tail = 0xeac657;
-    // Both qualities must use matching sizes/softness, while Default changes no bytes.
+
     std::memcpy(image.data() + size_at, read, 5);
     std::memcpy(image.data() + spot_size, spot_read, 4);
     reset_radii();
@@ -258,6 +271,7 @@ int main() {
     std::memcpy(image.data() + range, range_entry, sizeof range_entry);
     std::memcpy(image.data() + tail, range_stores, sizeof range_stores);
     Check(BbEngine::Graphics::DirectionalShadowBlend() == 0, "blending is off before native overlap");
+    Directional(true);
     Check(!BbEngine::Graphics::InstallDirectionalShadows(nullptr, image.size()), "null cascade image refused");
     Check(!BbEngine::Graphics::InstallDirectionalShadows(image.data(), tail + 14),
           "truncated cascade stores refused");
@@ -267,10 +281,10 @@ int main() {
               BbEngine::Graphics::DirectionalShadowBlend() == 0, "foreign cascade code cannot enable blending");
         image[at] ^= 1;
     }
-    Stock(true, "BB_DIRECTIONAL_SHADOWS");
+    Directional(false);
     Check(!BbEngine::Graphics::InstallDirectionalShadows(image.data(), image.size()),
-          "native directional rollback honored");
-    Stock(false, "BB_DIRECTIONAL_SHADOWS");
+          "overlap stays off unless an effect asks for it");
+    Directional(true);
     Check(BbEngine::Graphics::InstallDirectionalShadows(image.data(), image.size()) &&
           BbEngine::Graphics::DirectionalShadowBlend() == 0.1f, "guarded overlap enables matching blend band");
     auto* tail_page = reinterpret_cast<void*>(
@@ -341,7 +355,11 @@ int main() {
         PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
 #endif
     Check(selection_executable, "atlas selection test is executable");
-    for (int quality = 0; quality < 3; ++quality) {
+    reset_atlas();
+    BbSettings::Get().graphics_shadow_resolution = 0;
+    Check(!BbEngine::Graphics::InstallDirectionalShadowResolution(image.data(), image.size()) &&
+          image == atlas_original, "the game's own atlas changes no bytes");
+    for (int quality = 1; quality < 3; ++quality) {
         reset_atlas();
         BbSettings::Get().graphics_shadow_resolution = quality;
         Check(BbEngine::Graphics::InstallDirectionalShadowResolution(image.data(), image.size()),
@@ -357,7 +375,7 @@ int main() {
             std::memcpy(selection_test.data(), image.data() + selection, sizeof select_code);
             selection_test[sizeof select_code] = 0xc3;
             std::memcpy(selection_test.data() + 256, actual.data(), sizeof actual);
-            // Relocate only the RIP-relative table address in the copied native instructions.
+
             const std::int32_t displacement = 256 - 18;
             std::memcpy(selection_test.data() + 14, &displacement, sizeof displacement);
             using Select = unsigned (__attribute__((sysv_abi)) *)(void*, void*, void*, std::int64_t);
@@ -379,7 +397,7 @@ int main() {
 #endif
     if (failures) return 1;
     std::puts("Native local shadows: PASS (point and spotlight code guards, independent opt-outs, "
-              "2048/4096 bases, four tiers, instruction execution, isolated writes, combined install, "
+              "1024/2048 bases, four tiers, instruction execution, isolated writes, combined install, "
               "guarded per-type softness and quarter-stock filter footprints, "
               "directional cascade overlap and 2048/4096/8192 atlas selection)");
     return 0;

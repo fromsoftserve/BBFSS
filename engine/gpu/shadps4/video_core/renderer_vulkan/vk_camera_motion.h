@@ -66,8 +66,6 @@ public:
     [[nodiscard]] std::array<u32, 2> RenderSize() const noexcept {
         return render_size;
     }
-    /// The projection of the G-buffer pass in progress (x scale, y scale, z scale, z offset), or
-    /// zeros before this frame's first camera.
     [[nodiscard]] std::array<float, 4> PassProjection() const noexcept {
         return pass_has_camera ? pass_camera.proj : std::array<float, 4>{};
     }
@@ -88,8 +86,6 @@ public:
         return {current.view, current.inv_view, previous.view, current.proj, previous.proj,
                 current.valid && previous.valid};
     }
-    /// bbport: the camera of the G-buffer pass in progress (SSGI runs before the frame's camera is
-    /// committed): view, inverse view and projection; `valid` once its constants were seen.
     [[nodiscard]] Matrices PassMatrices() const noexcept {
         return {pass_camera.view, pass_camera.inv_view, {}, pass_camera.proj, {},
                 pass_has_camera && pass_camera.valid};

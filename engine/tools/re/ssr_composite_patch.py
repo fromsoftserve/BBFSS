@@ -1,22 +1,4 @@
-"""Generates ssr_composite_patch.h: the SSR composite pass (ps 3fe9e964) with a depth-aware upsample.
-
-Usage: python ssr_composite_patch.py <original 0x000000003fe9e964_0.spv> <out header>
-Needs spirv-dis, spirv-as and spirv-val on PATH (or SPIRV_BIN pointing at their folder).
-
-The original reads the half-size SSR pyramid (img6) with one bilinear sample at the full-size UV.
-This replaces that sample with four taps at the surrounding half-size texel centres, each weighted
-by its bilinear weight and by how close the full-size linear depth (img1) at the texel is to the
-depth of the pixel being shaded, so reflections no longer bleed across depth edges. The mip slope
-is also steepened (13 -> 16), as PatchSsrComposite did.
-Roughness attenuation is (1 - clamp(lod * 0.08, 0, 1)) squared: smooth surfaces
-keep full strength, while the roughest surfaces retain 27% instead of 5%.
-The live graphics_ssr_intensity multiplier (0-3, default 1) arrives in push-data
-member 11 (byte 120) and scales the final SSR RGB contribution relative to the
-original environment reflection, preserving confidence alpha. Zero restores the
-environment reflection rather than replacing it with black.
-It is applied after temporal stabilization and roughness fading, independently
-of Picture tuning. Game's own picture resets it to 1; BB_SSR_ORIGINAL bypasses it.
-"""
+# SPDX-License-Identifier: GPL-2.0-or-later
 import os
 import struct
 import subprocess
@@ -26,10 +8,8 @@ import tempfile
 src, out = sys.argv[1], sys.argv[2]
 bindir = os.environ.get("SPIRV_BIN", "")
 
-
 def tool(name):
     return os.path.join(bindir, name) if bindir else name
-
 
 tmp = tempfile.mkdtemp()
 asm_path = os.path.join(tmp, "orig.spvasm")
@@ -43,7 +23,6 @@ checksum = 2166136261
 for w in words:
     checksum = ((checksum ^ w) * 16777619) & 0xFFFFFFFF
 
-# Constants and types, inserted before the entry point's variables.
 consts = """
 %i32_0 = OpConstant %i32_id 0
 %i32_1 = OpConstant %i32_id 1
@@ -129,8 +108,7 @@ for i, (off, wx, wy) in enumerate(taps):
         acc, wsum = n("acc"), n("ws")
 a("%%inv = OpFDiv %%f32_id %%f32_id_1 %s" % wsum)
 a("%%pre = OpVectorTimesScalar %%f32vec4_id %s %%inv" % acc)
-# Rough surfaces (a high lod, from the smoothness) reflect less: the blur that used to soften
-# them is gone, so their strength falls off instead.
+
 a("%lod_n = OpFMul %f32_id %140 %f32_fade_k")
 a("%lod_c = OpExtInst %f32_id %139 FClamp %lod_n %f32_id_0 %f32_id_1")
 a("%fade0 = OpFSub %f32_id %f32_id_1 %lod_c")
@@ -140,13 +118,10 @@ a("%intensity_bits = OpLoad %u32_id %intensity_ptr")
 a("%intensity = OpBitcast %f32_id %intensity_bits")
 a("%154 = OpVectorTimesScalar %f32vec4_id %pre %fade")
 
-# Replace the original lines for %150..%154.
 start = next(i for i, l in enumerate(asm) if l.strip().startswith("%150 = OpCompositeConstruct"))
 end = next(i for i, l in enumerate(asm) if l.strip().startswith("%154 = OpImageSampleExplicitLod"))
 asm[start:end + 1] = body
 
-# Scale the confidence-weighted replacement delta, not the sampled reflection:
-# the latter would darken the environment contribution at zero intensity.
 for result, delta, environment in ((480, 479, 146), (482, 481, 147), (484, 483, 148)):
     line = next(i for i, l in enumerate(asm) if l.strip().startswith("%%%d = OpFAdd" % result))
     asm[line:line + 1] = [
@@ -154,11 +129,9 @@ for result, delta, environment in ((480, 479, 146), (482, 481, 147), (484, 483, 
         "%%%d = OpFAdd %%f32_id %%ssr_delta_%d %%%d" % (result, result, environment),
     ]
 
-# Constants go right after the last constant (before the first OpVariable).
 first_var = next(i for i, l in enumerate(asm) if "= OpVariable" in l)
 asm[first_var:first_var] = consts
 
-# Steeper mip slope.
 slope = next(i for i, l in enumerate(asm) if l.strip().startswith("%f32_id_13 = OpConstant %f32_id 13"))
 asm[slope] = asm[slope].replace("%f32_id 13", "%f32_id 16")
 

@@ -1,23 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// bbport: temporal accumulation of the screen-space reflections (vk_ssr_temporal.h). Two passes:
-//   RESOLVE  half size: the traced reflection (ssr.frag) blended with last frame's result,
-//            read where the reflecting surface was (camera motion), the history clamped to the
-//            colours of the current 3x3 neighbourhood so it cannot ghost.
-//   COPY     half size: the result back into the game's SSR target, which its blur chain reads.
+
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant) uniform Constants {
-    vec4 proj;         // x scale, y scale, z scale, z offset (depth = zs + zo / z)
-    vec4 reproject[3]; // previous view * inverse current view, rows (3x4)
-    vec2 size;         // scene size in pixels
-    vec2 jitter;       // viewport shift in pixels
+    vec4 proj;
+    vec4 reproject[3];
+    vec2 size;
+    vec2 jitter;
     vec2 prev_jitter;
-    vec2 prev_proj;    // previous projection x / y scale
-    uint history;      // 1: last frame's result is valid
-    float blend;       // history weight at rest
+    vec2 prev_proj;
+    uint history;
+    float blend;
 };
 
 #if defined(RESOLVE)
@@ -38,8 +34,7 @@ void main() {
     const vec4 cur = texelFetch(cur_tex, h, 0);
     vec4 result = cur;
     const ivec2 isize = ivec2(size);
-    // The texel's place in the scene-size depth; `ratio` is 2 for the game's half-size target
-    // and 1 for the full-size trace.
+
     const vec2 ratio = size / vec2(hsize);
     const ivec2 f = min(ivec2((vec2(h) + 0.5) * ratio), isize - 1);
     const float depth = texelFetch(depth_tex, f, 0).r;

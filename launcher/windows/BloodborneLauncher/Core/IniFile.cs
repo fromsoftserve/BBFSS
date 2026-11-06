@@ -12,11 +12,12 @@ namespace BloodborneLauncher.Core
     {
         public static readonly (string Key, string Value)[] Defaults =
         {
-            ("upscaler", "fsr4"),
+            ("upscaler", OperatingSystem.IsWindows() ? "fsr" : "fsr4"),
             ("preset", "4"),
             ("sharpen", "1"),
             ("sharpness", "0.50"),
             ("object_motion", "1"),
+            ("anti_lag", "1"),
             ("show_fps", "1"),
             ("compile_note", "1"),
             ("output_res", "1920x1080"),
@@ -26,7 +27,6 @@ namespace BloodborneLauncher.Core
             ("frame_gen", "off"),
             ("graphics_auto_exposure", "0"),
             ("graphics_native_sss", "0"),
-            ("graphics_ao_quality", "0"),
             ("frame_gen_cap", "1"),
             ("dlss_preset", "k"),
             ("fps_position", "0"),

@@ -131,8 +131,18 @@ Bytes Movie() {
 }
 
 int main(int argc, char** argv) {
-    const auto english = PcMessages(), chinese = PcMessages(true);
-    assert(english.size() == chinese.size() && english.size() > 150);
+    const auto english = PcMessages(), chinese = PcMessages(true), russian = PcMessages(Language::Russian);
+    assert(english.size() == chinese.size() && english.size() == russian.size() && english.size() > 150);
+    assert(LanguageOf("rusru") == Language::Russian && LanguageOf("zhocn") == Language::Chinese &&
+           LanguageOf("enggb") == Language::English);
+    assert(russian.at(110010).text == "Эффекты (ПК)" && russian.at(110015).help == "Закрыть игру и вернуться на рабочий стол");
+    assert(russian.at(119100).text == "Вперёд" && russian.at(119215).text.rfind(". Enter", 0) == 0);
+    assert(russian.at(920000).text.find('\n') != std::string::npos);
+    assert(russian.at(117010).text == "1280x720" && russian.at(116030).text == "30");  // untranslated rows stay English
+    assert(russian.at(116020).help.empty());
+    std::size_t translated = 0;
+    for (const auto& [id, m] : russian) translated += m.text != english.at(id).text;
+    assert(translated > 120);  // the table is translated, not copied from English
     assert(english.at(110010).text == "PC Effects" && chinese.at(110010).text == "PC 特效");
     assert(chinese.at(110015).help == "关闭游戏并返回桌面。");
     assert(chinese.at(117010).text == "1280x720");
@@ -170,12 +180,12 @@ int main(int argc, char** argv) {
     try { DcxRead(short_dcx); } catch (const Error&) { refused = true; }
     assert(refused);
 
-    for (const bool zh : {false, true}) {
+    for (const Language language : {Language::English, Language::Chinese, Language::Russian}) {
         for (const bool in_dcx : {false, true}) {
-            const Bytes made = MenuMessages(in_dcx ? dcx : packed, zh);
+            const Bytes made = MenuMessages(in_dcx ? dcx : packed, language);
             const Binder out = BinderRead(in_dcx ? DcxRead(made).data : made);
             assert(out.files.size() == 6);
-            const auto& expect = zh ? chinese : english;
+            const auto& expect = language == Language::Chinese ? chinese : language == Language::Russian ? russian : english;
             for (const BinderFile& f : out.files) {
                 if (f.id == 999) {
                     assert(f.data == bundle.files.back().data);
@@ -202,16 +212,16 @@ int main(int argc, char** argv) {
     assert(refused);
 
     const Bytes movie = OptionMovie(Movie());
-    for (const char* name : {"PCGraphics", "PCControls", "PCKeys", "PCEffects", "PCCamera", "PCEnhance", "PCColour"})
+    for (const char* name : {"PCGraphics", "PCControls", "PCKeys", "PCEffects", "PCCamera", "PCEnhance", "PCColour", "PCLighting", "PCDetail", "PCLooks"})
         assert(Count(movie, std::string(name) + '\0') == 1);
-    for (const char* title : {"117020", "118020", "119020", "120020", "121020", "124020", "125020"})
+    for (const char* title : {"117020", "118020", "119020", "120020", "121020", "124020", "125020", "126020", "127020", "128020"})
         assert(Count(movie, std::string("StaticText_") + title) == 1);
     assert(Count(movie, "StaticText_113020") == 1);
-    assert(Count(movie, "Item_7_0") == 2);
-    assert(Count(movie, "Item_6_0") == 1 + 1 + 2);
-    assert(Count(movie, "Item_3_0") == 1 + 1 + 7);
+    assert(Count(movie, "Item_7_0") == 4);
+    assert(Count(movie, "Item_6_0") == 1 + 1 + 4);
+    assert(Count(movie, "Item_3_0") == 1 + 1 + 9);
     assert(Count(movie, "ScrollBarV") == 2);
-    assert(Count(movie, "OptionSetting_fla._ControllSetting") == 8);
+    assert(Count(movie, "OptionSetting_fla._ControllSetting") == 11);
     assert(movie[4] == (movie.size() & 0xff) && movie[5] == (movie.size() >> 8 & 0xff));
     refused = false;
     try { OptionMovie(movie); } catch (const Error&) { refused = true; }

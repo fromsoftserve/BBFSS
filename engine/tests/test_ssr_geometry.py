@@ -1,28 +1,25 @@
-"""Regression checks for the matched SSR filtering and intersection policies."""
+# SPDX-License-Identifier: GPL-2.0-or-later
 import math
 import re
 import unittest
 from pathlib import Path
 
-
 SHADERS = Path(__file__).resolve().parents[1] / "gpu/shadps4/video_core/host_shaders"
-
 
 def smoothstep(lo, hi, value):
     t = max(0, min(1, (value - lo) / (hi - lo)))
     return t * t * (3 - 2 * t)
 
-
 class SsrGeometryTest(unittest.TestCase):
     def test_shader_paths_match(self):
         compute = (SHADERS / "ssr_trace.comp").read_text()
         fragment = (SHADERS / "ssr.frag").read_text()
-        # Both routes must refine and validate exactly the same way.
+
         def intersections(source):
             return source.split("float hitT = -1.0;", 1)[1].split(
                 "vec4 hc =", 1)[0].strip()
         self.assertEqual(intersections(compute), intersections(fragment))
-        # Different working resolutions intentionally use different footprints.
+
         def normals(source):
             body = source.split("vec3 stableNormal(vec2 uv) {", 1)[1].split(
                 "vec4 trace(", 1)[0]
@@ -49,7 +46,7 @@ class SsrGeometryTest(unittest.TestCase):
         self.assertEqual(weight(0, 0.5), 0)
         self.assertEqual(weight(0, -1), 0)
         self.assertAlmostEqual(weight(0.02, 1), 0.5)
-        # Unit center retains nonzero weight even if every neighbor is rejected.
+
         center = (0, 1, 0)
         neighbors = [((1, 0, 0), 0), ((0, -1, 0), 0.2)]
         total = list(center)
@@ -61,9 +58,9 @@ class SsrGeometryTest(unittest.TestCase):
     def test_crossing_and_hit_validation(self):
         def bracket(previous, current, depth):
             return previous < 0 <= current < 0.0002 and depth < 1
-        self.assertFalse(bracket(0, 0.00001, 0.9))  # No origin self-hit.
-        self.assertFalse(bracket(0.00001, 0.00002, 0.9))  # Already behind depth.
-        self.assertFalse(bracket(-0.0001, 0.0001, 1))  # Sky is not geometry.
+        self.assertFalse(bracket(0, 0.00001, 0.9))
+        self.assertFalse(bracket(0.00001, 0.00002, 0.9))
+        self.assertFalse(bracket(-0.0001, 0.0001, 1))
         self.assertTrue(bracket(-0.0001, 0.0001, 0.9))
         def valid(surface, ray, direction, origin):
             delta = [a - b for a, b in zip(surface, origin)]
@@ -84,9 +81,9 @@ class SsrGeometryTest(unittest.TestCase):
                     (1 - smoothstep(0.01, 0.03, continuity)) *
                     smoothstep(0.8, 0.95, alignment))
         self.assertEqual(confidence(0, 0, 1), 1)
-        self.assertEqual(confidence(0.1, 0, 1), 0)  # Curved/broken receiver.
-        self.assertEqual(confidence(0, 0.1, 1), 0)  # Depth discontinuity.
-        self.assertEqual(confidence(0, 0, 0.5), 0)  # Incompatible shading normal.
+        self.assertEqual(confidence(0.1, 0, 1), 0)
+        self.assertEqual(confidence(0, 0.1, 1), 0)
+        self.assertEqual(confidence(0, 0, 0.5), 0)
         for angle in (0, 0.5, 5, 15):
             tangent = math.sin(math.radians(angle))
             limited = min(tangent, 0.02)
@@ -97,7 +94,6 @@ class SsrGeometryTest(unittest.TestCase):
         source = (SHADERS / "ssr_trace.comp").read_text()
         self.assertIn("0.02 / max(length(ripple), 0.0001)", source)
         self.assertIn("smoothstep(0.02, 0.08, plane_error)", source)
-
 
 if __name__ == "__main__":
     unittest.main()

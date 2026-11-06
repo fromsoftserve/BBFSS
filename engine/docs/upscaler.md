@@ -1,47 +1,121 @@
 # Temporal upscaling and frame generation — frame analysis and plan
 
-The map-driven DOF filter and its stock fallback are described in
-[depth-of-field.md](depth-of-field.md). It preserves the current upscaler/DOF ordering.
+## Intel XeSS Super Resolution (upscaler=xess, 2026-11-01)
 
-## Optional higher-quality native motion blur
+`upscaler=xess` runs XeSS-SR from Intel's XeSS SDK 3.0.2 (`vk_xess.cpp`, Windows only) on the same
+frame as DLSS. XeSS Frame Generation is D3D12 only and not used. See docs/xess.md.
 
-The overlay's **Game effects > Motion blur quality** dropdown selects **Default**
-(the original filter) or **High** (denser filtering for native shader `29e06868`).
-The choice is saved as `graphics_motion_blur_quality` (0/1, default 0) and applies
-after restarting Bloodborne. Module selection uses the startup snapshot, so
-changing the dropdown cannot partially switch pipelines mid-session.
-The existing Motion blur setting still controls whether the effect runs.
+## FSR through AMD's FSR SDK 2.4 (upscaler=fsr, 2026-10-29)
 
-Both native blur passes retain their original velocity decoding, maximum sampling
-extent, activity threshold, depth/velocity rejection, screen bounds, per-pass gain,
-and RGBA processing. Long trails use up to 33 samples rather than five; trails
-with a radius of two working-image pixels or less keep the original five positions.
-The sample budget follows the native UV offsets and bound color-image size rather
-than assuming 1080p. No temporal color accumulation, random jitter, brightness
-clamp, alpha-derived color normalization, or extra blur strength is added.
+`upscaler=fsr` / `BB_UPSCALER=fsr` runs AMD's own signed Vulkan upscaler from the FSR SDK 2.4.0
+(`vk_fsr_sdk.cpp`). It is the single FSR entry of the Windows launcher and the default of the
+shipped `lantern.ini`; saved `fsr3` and `fsr4` become `fsr` when the Graphics page opens, and so
+does `fsr411` on AMD GPUs.
 
-The replacement is selected for fresh compilation and cached module restoration.
-Original translated shader binaries remain in the cache, so opting out does not
-require deleting it. Unsupported resource layouts are logged and retain the
-original shader. `motion-blur-shader-test` exercises the shared filtering code on
-Vulkan, including HDR/native gains, stationary pixels, short-trail equivalence,
-depth/velocity rejection, bounds and long-trail sampling.
+**What runs where.** The SDK chooses the version and the model by itself; the engine creates the
+context without a version override, so the newest version the GPU supports is taken:
 
-This changes sampling only, not the native half-resolution velocity preparation
-or packed object-velocity format. It does not relocate blur after temporal
-reconstruction or change shutter/frame-rate scaling. On scaled-output paths,
-DLSS/FSR can still reconstruct already-blurred imagery. More samples add GPU work;
-this is an opt-in quality tradeoff, not a performance optimization.
+| GPU | What the SDK runs |
+|---|---|
+| Radeon RX 9000 (RDNA 4) | FSR 4.1.2, FP8 model |
+| Radeon RX 6000 / 7000 (RDNA 2 / 3), Ryzen AI Max 300/400 | FSR 4.1.2, INT8 model |
+| Ryzen AI 300/400, Z2 A, Z2 Extreme | FSR 4.1.2, lightweight INT8 model |
+| Radeon RX 5000 (RDNA 1) and older, NVIDIA, Intel | FSR 3.1.6 |
 
-Same-frame constant captures with the launcher set to 30 FPS and 60 FPS showed
-identical native preparation gains (dwords 616/617: 2.21698/-1.25), packed-vector
-decoding, both blur kernels, activity threshold and rejection settings. The
-preparation shader combines camera reprojection with packed object displacement;
-these captured stages did not increase their gain at the higher cap. This does
-not establish an exact shutter angle, rule out earlier history compensation, or
-measure the exposure of animated objects. Frame-relative blur can legitimately
-shorten at higher frame rates; a fixed-duration shutter is a different behavior.
-No speculative FPS multiplier is applied by either quality mode.
+The log names what was chosen: `Upscaler: AMD FSR SDK upscaler versions for this GPU: ...` (every
+version the SDK offers on this device) and `Upscaler: FSR <version> (AMD FSR SDK 2.4), output WxH`
+(the one in use). On AMD drivers that ship their own FSR provider (Adrenalin 26.10.1 and newer) the
+SDK loader itself takes the driver's newer version when there is one, so the engine no longer looks
+for the driver's `amdvkffx64.dll` (`vk_amd_ffx_driver.cpp`, the `LANTERN_FSR_AMD_DRIVER` switch and
+the launcher's "FSR 4 from the AMD driver" card are gone).
+
+**Files.** `engine/fsr_sdk/amd_fidelityfx_loader_vk.dll` (1.0.2.4555) and
+`amd_fidelityfx_upscaler_vk.dll` (4.1.2.4555), unchanged from the SDK's `Kits/FidelityFX/signedbin`
+at tag v2.4.0, signed by AMD; `SOURCE.txt` records the commit and hashes. `BB_FSR_SDK_DIR`
+overrides the folder (`bb-start` sets it to `enginesr_sdk`); `BB_FSR_SDK=0` hides the files. The
+frame generation DLL of the SDK is not shipped (frame generation stays the built-in FSR 3.1 one and
+DLSS FG).
+
+**License.** The DLLs come under AMD's binary redistribution license
+(`fsr_sdk/LICENSE-AMD-FSR-SDK.md`): binary redistribution is allowed, its copyright notice,
+permission notice and disclaimers must ship with them, and reverse engineering, decompilation and
+disassembly are not permitted. The engine loads them at run time as separate programs, as it does
+NVIDIA's DLSS and Streamline, and contains none of their code. The ABI structures in
+`vk_fsr_sdk.cpp` follow the SDK's public MIT headers (`ffx_api.h`, `ffx_api_vk.h`,
+`ffx_upscale.h`).
+
+**Integration.** The same inputs as the other frame upscalers (`Fsr4Upscaler::Frame`): HDR scene
+colour RGBA16F, depth D32S8 read through its depth aspect (standard depth, near = 0), motion vectors
+in render pixels, the jitter offset, auto exposure from the menu. The context is created with the
+SDK's version descriptor (`FFX_UPSCALER_VERSION` 4.1.2) and the current Vulkan backend descriptor
+(`FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK`), on a worker thread: FSR 3.1 is shown until it is
+ready (`BB_FSR_SDK_ASYNC=0` creates it on the render thread). The SDK picks the model by the
+render/output ratio, so the presets' render sizes stay the engine's own and the "Sharper motion
+(FSR 4)" switch does not apply. At most three frames are in flight for its descriptors.
+Device features it may use are requested only when the files are present:
+`shaderStorageImageReadWithoutFormat`, runtime descriptor arrays and variable descriptor counts
+(each only where the GPU has it); FP8 cooperative matrices, INT8 dot products, FP16/INT8 storage
+and subgroup size control are enabled already for the other upscalers.
+
+**Fallbacks.** No SDK files, a non-Windows build or a GPU without
+`shaderStorageImageWriteWithoutFormat`/`synchronization2`: `fsr` becomes the built-in FSR 3.1
+before the first frame, and the menu says why. A failed context or dispatch: FSR 3.1 for the rest of
+the session (choosing FSR again in the menu retries). FSR 4.1.1 through fsr4vk that fails falls
+back to `fsr` when the SDK is there.
+
+**fsr4vk stays experimental for NVIDIA and Intel.** The SDK gives them only FSR 3.1.6, so the
+launcher keeps "FSR 4.1.1 (fsr4vk, experimental)" there; on AMD the entry is hidden (the SDK's own
+FSR 4.1.2 is better and needs no driver fix). FSR 1 (`host_passes/fsr_pass.cpp`) is unchanged.
+
+**Linux.** The SDK is Windows-only. The Linux launcher keeps FSR 3.1, the built-in FSR 4 v07 model
+(`fsr4_shaders`) and the FSR 4.1.1 replay (`fsr4_411`), and maps `fsr` to `fsr4`. The Windows
+release no longer ships `enginesr4_shaders` (33 MB); the folder stays in `package-template` for
+the Linux package.
+
+**Not verified yet.** Built only; not run on hardware in this change. To check per GPU family
+before a release: RX 9000 (FP8), RX 6000/7000 (INT8, the first tester has an RX 6650 XT), an RDNA 1
+card (expects 3.1.6), a Ryzen APU (lightweight INT8), NVIDIA and Intel (3.1.6), each with
+the Vulkan validation layer on (`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`), plus a package with `fsr_sdk` removed (expects the
+FSR 3.1 fallback and the launcher hint).
+
+## FSR with OptiScaler, and the built-in FSR 4 on Radeon (2026-10-31)
+
+**"dispatch failed: runtime error (3)".** OptiScaler recognizes AMD's FFX DLLs by file name
+(`amd_fidelityfx_loader_vk.dll`, `amd_fidelityfx_upscaler_vk.dll`) and hooks their exports. With its
+FFX inputs on, our FSR SDK and fsr4vk calls become its own NGX feature. With `VulkanUpscaler=ffx_12`
+that feature needs `vkGetDeviceProcAddr`, gets none ("InGDPA does not exist"), and fails with
+"Failed to load Vulkan external memory functions"; the dispatch then returns 3. While OptiScaler is
+loaded, the engine now loads the upscaler DLL directly from a hard link with a private name in
+`engine/out/ffx-private`, which the hook does not match (`BB_OPTISCALER_FFX_PRIVATE=0`: the old way;
+`=1`: the private name without OptiScaler, for tests). If a dispatch still fails with OptiScaler
+loaded, the message names `EnableFfxInputs=false`.
+
+**8-10 FPS with "FSR 4" on an RX 6700 XT.** That entry is the built-in v07 INT8 model
+(`fsr4_shaders`, no longer in the Windows package, still in old installs): about 90 ms a frame there,
+against 87 FPS with FSR 3.1 in the same session. On AMD with the SDK present, `fsr4` now runs through
+the SDK and the menu entry is disabled (`BB_FSR4_BUILTIN_AMD=1` keeps the old model). Any FSR 4 path
+under 20 FPS for 5 s falls back once per session with a message (`BB_FSR4_SLOW_GUARD=0`).
+
+**Not verified on AMD.** Built and checked on NVIDIA only; these paths need a player on an RX 6000.
+
+## DLSS jitter while the camera moves (2026-10-31)
+
+Measured on an RTX 5060, 1280x720 -> 1920x1080, preset K, 40 presented frames, a scripted camera pan
+of about 5.7 px a frame. The image's frame-to-frame shift alternated every frame (-5.60, -5.77, -5.58,
+-5.73...) and was smooth with jitter off (about +/-0.02). The inputs are right: per block, the input's
+shift equals the motion vector plus the change in jitter, and flipping the jitter sign doubles the
+flicker of a still camera. DLSS trusts the new frame more in motion, so part of the jitter reaches
+its output. Other things tried, with the camera still: the extra -1 mip bias (flicker 0.58 with it,
+0.54 without), bloom off (no better), preset E (0.79, worse), FSR 3.1 (0.67).
+
+The camera's own movement already gives sub-pixel coverage, so with DLSS the jitter can fade out as
+the camera moves: full up to 0.25 render px a frame, none from 1 px a frame. Mean second difference of
+the shift: 0.32 px with full jitter, 0.035 px with the fade; sharpness 63.5-65.6 and 63.4, within noise.
+NVIDIA's guide (8.4) lists jitter only on a static camera among differences that can cause corruption,
+so the fade is an experimental setting, off by default (`dlss_jitter_fade`, the menu,
+`BB_DLSS_JITTER_FADE`). See [dlss-audit.md](dlss-audit.md).
+
+**Not measured yet:** slower pans, walking, and the 1440p path (`RunScaled`, tonemapped input).
 
 ## Native exposure investigation
 
@@ -395,290 +469,14 @@ sampled textures, and the first 1 KiB of bound constants for small passes and fi
 | G-buffer | 6 targets 1920x1080 (RGBA8 x3, sRGB albedo, B10G11R11, RGBA16F) + D32S8 depth |
 | lighting | light volumes into two B10G11R11 targets |
 | scene color | RGBA16F 1920x1080, also forward/transparent draws and effects |
-| authored fog | scene-combine pixel shader `32e47788`: depth-based exponential distance and height fog using 96-byte parameter records; additional textured transparent effects follow |
+| volumetric fog | compute, reads linear depth (R32F 1920x1080) and composites into scene color |
 | half-res effects | RGBA8 960x540 with half-res depth |
 | post | combine/bloom pyramid in RGBA16F / B10G11R11 |
 | tonemap | into RGBA8 1920x1080 (the UI target) |
 | game AA | ping-pong RGBA8 1920x1080 after tonemap (to be skipped when upscaling) |
 | UI | stencil-masked draws over the same RGBA8 target |
 
-There is no velocity buffer, also with the camera moving: motion vectors are computed.
-
-### Directional volumetric-lighting prototype
-
-`effect_volumetric_light` adds a separate, live-toggled scattering layer without
-replacing or scaling the authored fog. After shadow resolve `f55643de`, a half-resolution
-compute pass uses that draw's inverse projection, cascade transforms, shadow map and
-shadow-distance fade. It marches 32 samples toward visible opaque surfaces, up to 40 m,
-with four depth comparisons per sample. Sky rays also stop at 40 m; their direction is
-reconstructed from a finite projected point, not the potentially infinite far plane.
-The pass snapshots full-resolution opaque depth into an owned R32F image. At the first
-`ccbf44a6` HDR post copy, after the authored fog, sky and transparent draws, a depth-aware
-upsample adds scattering to HDR RGB, preserving alpha. Sky and surface samples never mix.
-`32e47788` identifies the HDR scene; its saved image ID is UID-checked at composite and
-cleared on the next G-buffer. Guest buffers and sampled guest views are consumed immediately
-after their source draws, not retained for the late composite. No upscaler or camera-motion
-tracking is required.
-
-The in-game overlay's Picture section has a **Volumetric fog intensity** slider
-beside ambient occlusion strength. It applies live from 0 to 3 times the calibrated
-scattering strength, with 1 preserving the default appearance and 0 adding no
-scattering. It leaves density, range, tint, celestial phase and the game's original
-fog unchanged. Both half-resolution integration and thin-surface repair use the
-same multiplier. It requires the volumetric-lighting effect, not Picture tuning.
-The value is saved as `graphics_volumetric_intensity` in `lantern.ini`; resetting
-the Picture section restores 1. The multiplier also scales `BB_VOLUMETRIC_STRENGTH`
-when that diagnostic environment override is set.
-
-Thin depth-tested surfaces can be absent from all four half-resolution bilateral
-samples. A full-resolution repair pass uses the same sample weights and raymarches
-only pixels whose total weight is below `1e-5`, rather than leaving those pixels
-without scattering. It runs immediately after integration using the same depth and
-shadow inputs. Its owned RGBA16F output receives the shared atmosphere tint and celestial
-phase correction before the late composite. Supported half-resolution samples retain
-their existing result. This targets depth-represented cutouts such as grass and leaves;
-it does not resolve separate alpha-blended layers that do not write opaque depth.
-The repair alone partially improved the reported foliage gaps. Sharing the atmosphere
-tint instead of selecting it from each receiving surface's LightSet then completely
-resolved the remaining mismatch in the user's test scene. Performance impact has not
-been measured separately.
-
-After directional lighting `d92266b9`, a tint pass reads its resolved 288-byte lighting
-records. The highest-luminance bounded primary record supplies a shared atmosphere tint for
-geometry, repaired cutouts and sky; the receiving surface's material/LightSet no longer
-selects the fog colour. Words 16-18 are the primary directional diffuse RGB, used directly
-by the original shader.
-These are already resolved lighting values, so no additional gamma conversion or alpha
-multiplication is applied. The fog strength is calibrated against unit-white scattering,
-not the HDR surface radiance stored in these records. RGB is divided by
-`max(1, max(R, G, B))`: sub-unit lights are unchanged and brighter lights retain their
-hue without amplifying the scattering above its calibrated strength. This prevents
-high-intensity backdrop/material lighting records from turning distant buildings into
-bright silhouettes. The ray length still saturates at 40 m; distant surfaces do not
-accumulate a longer column than the sky.
-Scene-wide words 76-78 instead tint shadowed
-lighting and are not the primary diffuse colour. The atmosphere anchor comes from the
-current lighting table without parsing GPARAM files or hard-coding map names.
-All records are reduced cooperatively per workgroup. Selection uses linear luminance
-after the RGB bound, with lexicographic RGB tie-breaking, not the record's index.
-The earlier first-populated-record rule flickered in Old Yharnam: two GPU captures
-showed record 0 switching between moonlight RGB (0.449710, 0.830904, 1.600000) and
-a dim region RGB (0.111474, 0.128867, 0.156326), while moonlight remained elsewhere
-in the table. The new rule selects the same moonlight from both captured tables,
-independent of packing order and duplicate records.
-The user confirmed the updated selection removed the Old Yharnam camera-pan flicker.
-It does not select a light from visible materials: screen-centre/grid selection caused
-whole-sky colour and brightness jumps when panning across different lighting records.
-For an unchanged set of lighting colours, tint is independent of camera orientation, screen contents
-and geometry/sky coverage. Surface LightSet differences cannot create tint-shaped holes
-in the added scattering. This is still a table-defined approximation; runtime record
-indices have not been proven to map directly to GPARAM IDs, so it is not guaranteed to
-select file ID 0.
-
-The bounded atmosphere colour is blended 75% toward the sampled RGB from its
-equal-luminance neutral grey (linear RGB luminance weights 0.2126/0.7152/0.0722).
-This reduces strong blue and other colour casts without reducing luminance,
-changing the intensity multiplier, or reintroducing surface LightSet selection.
-
-The directional layer adds no additional extinction, animated density, or temporal history. Its
-shadow visibility comes from the shadow transforms. The phase direction also defaults
-to those transforms, with the verified Central daytime celestial override described below.
-The cascade rows are stored in ordinary U/V/depth/divisor order: divide row 2 by
-row 3, matching the original resolve shader. Swapping those last rows produces
-reciprocal shadow depths above 1 and rejects valid scattering samples.
-It fades out with the game's shadow coverage rather than assuming unshadowed air outside
-the map. FogBank colours/density are not mixed into this layer; the original fog keeps its
-own 96-byte records and distance/height blends. The added scattering remains an artistic
-approximation; it can brighten interiors where
-the directional shadow map lacks suitable occluders. Fixed spatial jitter and half-resolution
-integration can show grain, and non-depth-writing transparent surfaces are not volume
-termination surfaces.
-
-### Experimental lightshaft elevation offset
-
-The overlay's Picture section exposes **Lightshaft elevation offset (experimental)**,
-saved as `graphics_lightshaft_tilt` (0-30 degrees, default 0). It applies live to both
-directional integration and thin-surface repair. Positive values lower the recovered
-shadow light's absolute elevation toward the world-space horizon, preserving azimuth
-and never crossing the horizon. Try 20 degrees, then compare 15 and 25. The current
-shadow-resolve draw's world-to-view Y column establishes world up, so camera pitch
-and roll do not define the tilt. Exactly vertical lights retain their direction
-because they have no defined azimuth.
-
-Changing the phase alone does not tilt occlusion. This experiment also takes one
-blocker-relative parallax step in shadow UV: project the tilted light direction into
-the current cascade and offset the sample according to its depth separation from
-the original blocker. The blocker-depth plane has zero offset. Warped samples are
-restricted to their original cascade tile, including the PCF footprint, rather than
-reading an adjacent cascade. The same tilted direction drives angular scattering;
-the daytime celestial phase override is bypassed while this experiment is active.
-
-This is an artistic approximation, not a shadow map rendered from the new direction.
-It cannot recover hidden occluders, and changes of blocker depth, cascade boundaries
-or large offsets can distort/break shafts or misalign them with surface shadows.
-There is one additional shadow fetch per integration step while enabled. Surface
-shadows, surface lighting, point-light fog, authored fog, density and intensity remain
-unchanged. Set 0 to use the original visibility and celestial-phase paths without the
-extra fetch. **Game's own picture** also restores 0. `volumetric-tilt-test` runs the shared
-direction/warp math on Vulkan, including 0/15/20/25/30-degree cases, camera covariance,
-horizon clamping, blocker-plane anchoring and cascade boundaries.
-
-### Central Yharnam daytime celestial phase prototype
-
-The daytime prototype aligns angular scattering brightness with verified sun geometry.
-It does not rotate shadow visibility or change tint, density, strength, range or the
-game's original fog. Integration saves its inverse projection and original phase
-direction in an owned 112-byte GPU buffer, resetting the same-frame match count.
-After a candidate sky-dome draw, a single compute invocation fingerprints all 393 dome
-vertex positions (word-wise FNV-1a, `0xf7004131`) and checks the centroid against the
-daytime asset. It also checks every vertex's packed transform index is zero. Shader hashes and
-index count are only a broad prefilter, never sufficient identification. Vertex data
-comes from the actual GPU-bound streams, including their stride and aligned-offset
-adjustments; the potentially stale CPU backing is not used for identification.
-
-On a match, the shader verifies the actual dome palette entry selected by model
-word 20 is identity. The daytime dome and disk are distinct nodes with baked world-space
-vertices; nonidentity placement is not assumed to transfer between them. The shader
-uses the verified daytime disk centre (-67.5080062, 99.7654301, 577.6338876), subtracts
-the current scene camera, and uses the scene's world-to-view rotation.
-Guest vertex/model/scene buffers are consumed immediately
-after the draw. Only the resulting direction is kept in owned storage for the late
-composite; no guest descriptors are retained across draws or frames. Normal rendering
-uses no readback, CPU/GPU wait or previous-frame celestial history.
-
-At composite, each half-resolution fog sample is multiplied by the ratio of celestial
-phase to its original shadow-direction phase, before bilateral upsampling. This replaces
-the phase, rather than adding another light or rotating the shadow-map coordinates.
-Exactly one valid geometry match is required; absent, unrecognized, invalid or duplicate
-matches retain the original phase. More than four eligible draw attempts also fall back.
-CPU-side unsupported buffers and absent/excessive candidates produce bounded log messages;
-GPU fingerprint rejection keeps the documented shadow fallback without claiming detection.
-This path supports the 1,824-index, single-instance, zero-base-vertex daytime dome
-draw only. Unlike the culled disk, this surrounding geometry remains drawn when
-facing away from the sun, identifying the active sky afresh each frame. No cached sun,
-timeout, camera-motion threshold or GPARAM-colour heuristic is used. Evening, night,
-red moon and other maps do not match its geometry. Their dome position fingerprints
-are distinct (`0x6d352c6f`, `0x070d76da`, `0xa26549c9` for the other Central variants).
-Other vertex formats, placements and LODs are not
-validated for automatic alignment and retain shadow phase. There is no GPARAM identity
-mapping or per-variant override UI.
-
-Central Yharnam's `900000`, `900010`, `900020` and `900030` sky models each have a separate
-1,986-vertex sun/moon mesh (24-byte vertices; 11,904/7,140/2,376 indices by LOD). Their
-model-space centres differ between day, evening, night and red moon. The normal texture
-is `m24_00_moon_a`; the red-moon model instead uses `m24_00_moon_red_a`. Neither a model
-centre alone nor the shared `b28f5a56`/`dda49e89` shader pair establishes world direction.
-
-The temporary celestial GPU-readback and vertex-dump hooks used for the captures
-below have been removed, including their explicit GPU waits and diagnostic buffer
-accessor. The runtime geometry fingerprint remains necessary for stable celestial
-alignment; it is rendering logic, not tracing. Existing opt-in engine diagnostics
-remain available but are not enabled for normal launches.
-
-The Central Yharnam research capture `frame_1793364982` contains one candidate
-11,904-index draw sampling a 1024x1024 texture. Its GPU transform buffer starts with
-identity rows, whereas its CPU backing dump is all zero. The same snapshot recovers
-the camera at approximately (-194.159, -27.791, 64.352). Under that identity transform,
-the day and evening model centres project to normalized image coordinates
-(0.6070, 0.3904) and (0.6016, 0.3292), respectively (image Y downward). The two night
-centres project behind this camera. Fitting the visible rim in the corresponding
-2000x1125 screenshot gives a centre of about (1215.1, 437.9); the daytime model predicts
-(1213.9, 439.2), within 1.8 pixels, whereas the evening prediction is about 69 pixels
-away. This supports the daytime model for that view. The existing scene shadow vector
-has about 37.5 degrees elevation versus 13.6 degrees for the daytime centre ray,
-a direction difference of about 25 degrees.
-
-A second, rotated-view capture (`frame_1793365413`) still reads identity model rows.
-Its camera is approximately (-194.984, -27.807, 64.526), and the daytime centre now
-projects to normalized image coordinates (0.4461, 0.3985). Its matching screenshot
-has a visible rim centre of about (890.6, 445.3) at 2000x1125, versus the predicted
-(892.2, 448.3), a difference of 3.4 pixels. Together these views support recovering the
-daytime sun direction from the authored geometry and actual draw transform across
-camera rotation. They do not yet validate the other sky variants or a general runtime
-mesh-identification method. No celestial direction is wired into the rendering effect
-at the time of those two research captures. Aligning the scattering phase does not rotate shadow-map
-occlusion or make its shafts physically consistent with a different light direction.
-
-Runtime capture `frame_1793365917` verifies the implemented path: the owned buffer
-contains integer match count 1 and celestial validity 1. Its sun view direction is
-approximately (0.129166, 0.015237, 0.991506), agreeing with independent reconstruction
-from the captured camera and model centroid within 0.000002 per component. The
-shadow direction remains approximately (-0.006951, 0.418095, 0.908377). The corrected
-phase is about 25 degrees away from the original, while integration still uses the
-original shadow map. The original disk-driven version visibly switched to fallback
-when the game culled the off-screen disk; the dome-driven version replaces that
-visibility-dependent identification.
-
-Runtime capture `frame_1793366410` verifies the dome version with the disk visible:
-one valid dome match, identity palette, view direction (0.141729, 0.064607, 0.987795).
-Capture `frame_1793366453` has no 11,904-index sun draw at all, but still has the
-1,824-index dome draw and exactly one valid match. Its recovered direction is
-(0.115818, 0.297297, -0.947734), correctly behind the camera. Both agree with independent
-reconstruction from the current scene constants within 0.000003 per component.
-This validates off-screen operation without retaining any previous-frame source.
-
-Environment overrides (read at startup):
-`BB_VOLUMETRIC_LIGHT=0`, `BB_VOLUMETRIC_STRENGTH` (default 0.08, range 0..1),
-`BB_VOLUMETRIC_RANGE` (40 m, 1..100), `BB_VOLUMETRIC_DENSITY` (0.025, 0.001..0.2),
-`BB_VOLUMETRIC_ANISOTROPY` (0.4, 0..0.8), and `BB_VOLUMETRIC_STEPS` (32, 8..96).
-The directional toggle is available in the overlay and launcher; the game's custom
-options menu does not yet have a dedicated row. `BB_VOLUMETRIC_LIGHT=0` disables
-both directional and point-light scattering; the remaining environment overrides
-above affect only the directional layer.
-
-### Unshadowed point-light volumetric fog
-
-The Picture section's **Point-light fog** checkbox turns this layer on or off live
-(`graphics_point_fog`, default on), and **Glow size** (`graphics_point_fog_glow_size`,
-0.03-0.20, default 0.08) sets the inverse-square profile's core below, live.
-The **Point-light fog intensity** slider independently controls
-an additive 3D scattering layer: 0 disables it, 1 is the default, and 3 triples its
-strength. It works with directional volumetrics, point shadows and Picture tuning
-disabled. The value is persisted as `graphics_point_fog_intensity` in `lantern.ini`;
-Picture reset restores 1. It does not change the game's original fog or surface lights.
-
-After each supported unshadowed point-light batch, a full-resolution compute pass
-consumes that draw's current view-space light positions, radii, diffuse RGB and
-inverse projection. Sixteen-word light records store inverse radius **squared**
-at word 3, not inverse radius. The shader intersects each camera ray with each
-light sphere, clips to opaque scene depth (at most 100 m, also used for sky), and
-integrates 12 segments over the surviving segment. Attenuation is inverse-square,
-`core^2 / (distance^2 + core^2)` with `core = glow_size * radius` (glow size 0.03-0.20,
-default 0.08; peak 1 at the centre,
-so source intensity scales with radius squared), multiplied by the smooth window
-`saturate(1 - (distance / radius)^4)^2` so it reaches zero at the light's radius.
-The inverse-square term is integrated analytically per segment (`atan`), so the
-bright core cannot slip between fixed samples. A constant 2.5 puts the peak at
-2.5x the earlier `(1 - distance / radius)^2` profile's while total scattered power
-over each sphere is about 29% of it at the default glow size: a tight glow at the
-source that falls off quickly, rather than brighter surrounding air. Glow size
-changes the shape at a fixed peak (larger is a wider, softer haze); it travels in
-bits 8-23 of the push-constant light count, in 1/10000ths. (Matching total power instead needs
-a 5.86x peak, which made the fog noticeably brighter near lights.)
-Homogeneous density 0.025 and view-ray transmittance are applied per segment.
-RGB is bounded to peak 4 and uses 75% saturation.
-The accumulated RGB is added before tone mapping without changing scene alpha.
-
-This is not a screen-space halo or screen-space shadow trace. Off-screen light
-centres can contribute when their spheres intersect visible air; camera-inside
-volumes are supported. There is no temporal history or source-position cache.
-The full-resolution depth snapshot avoids the half-resolution foliage coverage
-problem. Shared depth acquisition still relies on the game's normal shadow-resolve
-pass, even when directional scattering is disabled.
-
-Fourteen decoded pure point-batch shaders cover fixed counts of 1 through 12
-lights; `9f9ef267` contains 12 unrolled records, not the 11 suggested by its
-unused constant. Mixed spotlight and special/shadowed variants are excluded.
-The source is the game's current light list: captures include off-screen centres,
-but this does not guarantee that the game retains every light whose fog sphere
-would intersect visible air. Live camera-edge behavior and performance need
-in-game confirmation.
-
-There is deliberately no light-to-air occlusion: foreground geometry terminates
-the camera ray, but walls do not cast shadows into these point-light volumes.
-Light can therefore leak into air on the camera side of a wall. This is the
-accepted tradeoff for supporting non-shadowcasting lights without screen-space
-visibility approximations or new point-shadow rendering.
+There is no velocity buffer, even with the camera moving: motion vectors are computed.
 
 ## Scene constants (864 bytes, bound by most passes)
 

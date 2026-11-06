@@ -5,18 +5,10 @@
 #include <dlfcn.h>
 #endif
 #include "bbport_platform.h"
+#include "engine/gx_trace.h"
+#include "engine/gx_records.h"
 #include <bit>
-#include <cerrno>
-#include <charconv>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <map>
-#include <sstream>
-#include <string>
-#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <xxhash.h>
@@ -61,91 +53,6 @@
 
 namespace Vulkan {
 
-static bool HideTessellationEffect(u64 hs, u64 ds, u64 ps) {
-    static const std::string mode_file = [] {
-        const char* file = std::getenv("BB_TESS_EFFECT_MODE_FILE");
-        return file ? std::string(file) : std::string{};
-    }();
-    if (mode_file.empty()) return false;
-    u32 family = 0;
-    if (hs == 0x8453cd1c && ds == 0x7f03e945 && ps == 0x71c96598) family = 1;
-    if (hs == 0xbc234799 && ds == 0x0c1888bd && ps == 0x71c96598) family = 2;
-    if (hs == 0xbc234799 && ds == 0x52d756df && ps == 0x2e86d610) family = 3;
-    if (!family) return false;
-    static u32 mode = 0, polls = 0;
-    if (polls++ % 30 == 0) {
-        u32 next = 0;
-        if (FILE* file = std::fopen(mode_file.c_str(), "r")) {
-            char extra;
-            const int fields = std::fscanf(file, "%1u %c", &next, &extra);
-            const bool valid = fields == 1 && next <= 3 && !std::ferror(file);
-            std::fclose(file);
-            if (!valid) {
-                std::printf("Tessellation effect diagnostic: invalid mode; restoring all draws\n");
-                next = 0;
-            }
-        } else {
-            std::printf("Tessellation effect diagnostic: mode file unavailable (%d); "
-                        "restoring all draws\n", errno);
-        }
-        if (mode != next)
-            std::printf("Tessellation effect diagnostic mode %u (0 restores all draws)\n", next);
-        mode = next;
-    }
-    return mode == family;
-}
-
-static bool HidePomDraw(u64 ps, u32 count) {
-    if (ps != 0x053bbf3b && ps != 0x505acc58 && ps != 0x08ccd4c7) return false;
-    static const std::string mode_file = [] {
-        const char* file = std::getenv("BB_POM_DRAW_MODE_FILE");
-        return file ? std::string(file) : std::string{};
-    }();
-    if (mode_file.empty()) return false;
-    static u32 selected_ps = 0, selected_count = 0, polls = 0;
-    if (polls++ % 30 == 0) {
-        u32 next_ps = 0, next_count = 0;
-        if (FILE* file = std::fopen(mode_file.c_str(), "r")) {
-            char text[128]{};
-            bool valid = std::fgets(text, sizeof(text), file) && !std::ferror(file);
-            if (valid) {
-                std::string_view remaining{text};
-                const auto number = [&](u32& output, int base) {
-                    const auto start = remaining.find_first_not_of(" \t\r\n");
-                    if (start == std::string_view::npos) return false;
-                    remaining.remove_prefix(start);
-                    const auto result = std::from_chars(
-                        remaining.data(), remaining.data() + remaining.size(), output, base);
-                    if (result.ec != std::errc{}) return false;
-                    remaining.remove_prefix(size_t(result.ptr - remaining.data()));
-                    return remaining.empty() || remaining.front() == ' ' ||
-                           remaining.front() == '\t' || remaining.front() == '\r' ||
-                           remaining.front() == '\n';
-                };
-                valid = number(next_ps, 16) && number(next_count, 10) &&
-                        remaining.find_first_not_of(" \t\r\n") == std::string_view::npos &&
-                        std::fgetc(file) == EOF && !std::ferror(file) &&
-                        ((next_ps == 0 && next_count == 0) ||
-                         ((next_ps == 0x053bbf3b || next_ps == 0x505acc58 ||
-                           next_ps == 0x08ccd4c7) && next_count > 0));
-            }
-            std::fclose(file);
-            if (!valid) {
-                std::printf("POM draw diagnostic: invalid selection; restoring all draws\n");
-                next_ps = next_count = 0;
-            }
-        } else {
-            std::printf("POM draw diagnostic: file unavailable (%d); restoring all draws\n", errno);
-        }
-        if (next_ps != selected_ps || next_count != selected_count)
-            std::printf("POM draw diagnostic: hide ps %08x idx %u (0 0 restores draws)\n",
-                        next_ps, next_count);
-        selected_ps = next_ps;
-        selected_count = next_count;
-    }
-    return selected_ps == ps && selected_count == count;
-}
-
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -176,22 +83,22 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     camera_motion->SetObjectMotion(object_motion.get());
     // bbport: native HDR output's passes run at points of the frame the upscaler finds.
     hdr_native = std::make_unique<HdrNative>(instance, scheduler, texture_cache, runtime);
+    rt_shadow = std::make_unique<RtShadow>(instance, scheduler, *camera_motion, *object_motion);
+    pipeline_cache.SetPositionCapture(rt_shadow->Capturing());
     ssgi = std::make_unique<ScreenSpaceGI>(instance, scheduler, texture_cache, runtime,
-                                           *scene_targets, *camera_motion);
-    spatial_ao = std::make_unique<SpatialAo>(instance, scheduler, runtime,
-                                           *scene_targets, texture_cache);
+                                           *scene_targets, *camera_motion, *rt_shadow);
     ssr_temporal = std::make_unique<SsrTemporal>(instance, scheduler, texture_cache, runtime,
                                                  *scene_targets, *camera_motion);
     contact_shadow = std::make_unique<ContactShadow>(instance, scheduler, texture_cache, runtime,
-                                                     *camera_motion);
+                                                     *scene_targets, *camera_motion, *rt_shadow);
     point_shadow = std::make_unique<PointShadow>(instance, scheduler, texture_cache, runtime,
-                                                 *camera_motion);
+                                                 *scene_targets, *camera_motion, *rt_shadow);
     volumetric_light = std::make_unique<VolumetricLight>(instance, scheduler, texture_cache,
-                                                       runtime, *scene_targets);
+                                                         runtime, *scene_targets);
     sky_seam = std::make_unique<SkySeam>(instance, scheduler);
     sky_zenith = std::make_unique<SkyZenith>(instance, scheduler);
     depth_of_field = std::make_unique<DepthOfField>(instance, scheduler, texture_cache,
-                                                 runtime, *scene_targets);
+                                                    runtime, *scene_targets);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets, *hdr_native);
     if (!EmulatorSettings.IsNullGPU()) {
@@ -702,15 +609,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = Regs();
-    const bool ssr_draw = key.mrt_mask &&
-                          IsSsrReplacement(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash,
-                                           Shader::HwStage::Fragment);
-    if (!ssr_draw) {
-        ssr_temporal->Flush(upscaler->Jitter());
-    }
-    contact_shadow->Flush(
-        key.mrt_mask && pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x11ffdfb5);
-    point_shadow->Flush();
+    EffectsBeforeTargets(pipeline);
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
     }
@@ -754,22 +653,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     // bbport: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
     // main camera (shadow passes bind the same layout with the light's camera).
-    if (std::popcount(key.mrt_mask) >= 5 && db_desc.first) {
-        volumetric_light->Reset();
-        depth_of_field->Reset();
-    }
     gbuffer_draw = camera_motion->Enabled() && std::popcount(key.mrt_mask) >= 5 && db_desc.first;
     if (gbuffer_draw) {
         const auto& vp = regs.viewports[0];
         camera_motion->OnGBufferPass(db_desc.first, vp.xscale < 0.0f ? -1.0f : 1.0f,
                                      vp.yscale < 0.0f ? -1.0f : 1.0f);
-        ssgi->OnGBufferDraw(db_desc.first, cb_descs[2].first, cb_descs[0].first);
     }
-    if (key.mrt_mask && cb_descs[0].first &&
-        IsGtaoReplacement(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash,
-                          Shader::HwStage::Fragment)) {
-        ssgi->OnAoDraw(cb_descs[0].first);
-    }
+    EffectsAfterTargets(pipeline);
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
     }
@@ -788,7 +678,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass &&
                 !regs.depth_control.depth_write_enable &&
                 (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
-                ssgi->OnOpaqueScene(cb_descs[0].first, db_desc.first, upscaler->Jitter());
+                EffectsBlendedScene();
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
                 // A full-screen pass over the scene (the fog composite): the transparents are in.
@@ -881,7 +771,9 @@ struct DrawPacket {
     std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> cb_extent;
     AmdGpu::CbDbExtent db_extent;
     u32 num_vsharps; ///< V#s of the vertex streams, after the indirect arguments
-    u32 pad;
+    u32 num_gx_registers;
+    u64 index_key;
+    u32 num_view_keys;
     u64 ring_end; ///< constant ring position after this packet's copies
 };
 struct PacketStage {
@@ -965,11 +857,52 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // Numbered by packet (a position, the packet's start, counted as reached once the packet
     // before it had run, while this one was not recorded yet), in hashed granules: a lookup per
     // constant binding instead of a scan of the writes (a list scan was ~5% of this thread).
-    pending_write_table.Note(address, size, draw_pipe->NextPacket());
+    newest_pending_write = draw_pipe->NextPacket();
+    pending_write_table.Note(address, size, newest_pending_write);
+    const u64 first = address >> 20, last = (address + size - 1) >> 20;
+    for (u64 g = first; g <= last && g - first < 64; ++g) {
+        const u64 at = std::min<u64>(g, gpu_written_granules.size() * 64 - 1);
+        gpu_written_granules[at >> 6] |= u64(1) << (at & 63);
+    }
+}
+
+bool Rasterizer::ReadTrackingFiltered() {
+    static const bool filtered = [] {
+        const char* env = std::getenv("LANTERN_READ_FILTER");
+        return !env || env[0] == '1';
+    }();
+    return filtered;
+}
+
+bool Rasterizer::WaitedOnBefore(VAddr address, u64 size) const {
+    const u64 first = address >> WaitedGranuleShift, last = (address + size - 1) >> WaitedGranuleShift;
+    if (last - first >= WaitedScanLimit) {
+        return true;
+    }
+    for (u64 granule = first; granule <= last; ++granule) {
+        if (waited_on[(granule >> 6) & (waited_on.size() - 1)] & (1ull << (granule & 63))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Rasterizer::NoteWaitedOn(VAddr address, u64 size) {
+    bool fresh = false;
+    for (u64 granule = address >> WaitedGranuleShift; granule <= (address + size - 1) >> WaitedGranuleShift; ++granule) {
+        u64& word = waited_on[(granule >> 6) & (waited_on.size() - 1)];
+        const u64 bit = 1ull << (granule & 63);
+        fresh |= (word & bit) == 0;
+        word |= bit;
+    }
+    return fresh;
 }
 
 void Rasterizer::NotePendingRead(VAddr address, u64 size) {
     if (draw_pipe && size && OnStageA()) {
+        if (ReadTrackingFiltered() && !WaitedOnBefore(address, size)) {
+            return;
+        }
         pending_reads.Note(address, size, draw_pipe->NextPacket());
     }
 }
@@ -983,6 +916,10 @@ void Rasterizer::WaitForPendingReads(VAddr address, u64 size) {
         return;
     }
     if (!enabled || !UseDrawPipe() || size == 0) {
+        DrainDrawPipe(DrawPipe::ReasonConstRam);
+        return;
+    }
+    if (ReadTrackingFiltered() && NoteWaitedOn(address, size)) {
         DrainDrawPipe(DrawPipe::ReasonConstRam);
         return;
     }
@@ -1031,6 +968,9 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     if (!draw_pipe || size == 0) {
         return false;
     }
+    if (ReadTrackingFiltered() && draw_pipe->ReachedPacket(newest_pending_write)) {
+        return false;
+    }
     const u64 packet = pending_write_table.Newest(address, size);
     return packet != 0 && !draw_pipe->ReachedPacket(packet);
 }
@@ -1050,6 +990,80 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
     const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
                                         instance.UniformMinAlignment());
+    const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+    const u32 gx_stage = stage.sw_stage == Shader::SwStage::Vertex     ? 0
+                         : stage.sw_stage == Shader::SwStage::Fragment ? 1
+                                                                       : 2;
+    const bool tracked = gx && gx_stage < 2 && BbEngine::GxRecords::ConstantsTracked();
+    std::array<std::pair<VAddr, u32>, 16> versions{};
+    u32 num_versions = 0;
+    if (tracked) {
+        const auto& gs = gx->stages[gx_stage];
+        for (u32 slot = 0; slot < 16; ++slot) {
+            const u8 at = gs.constants[slot];
+            if (at == BbEngine::GxBindings::kUnbound || at >= gx->descriptors) {
+                continue;
+            }
+            const u32* words = gx->words[at];
+            versions[num_versions++] = {VAddr(words[0]) | (VAddr(words[1] & 0xfff) << 32),
+                                        gs.constant_versions[slot]};
+        }
+        if (!BbEngine::GxRecords::Intact()) {
+            num_versions = 0;
+        }
+    }
+    const auto version_of = [&](VAddr address, u32& version) {
+        for (u32 i = 0; i < num_versions; ++i) {
+            if (versions[i].first == address) {
+                version = versions[i].second;
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto written_by_gpu = [&](VAddr address, u64 size) {
+        const u64 first = address >> 20, last = (address + size - 1) >> 20;
+        for (u64 g = first; g <= last; ++g) {
+            const u64 at = std::min<u64>(g, gpu_written_granules.size() * 64 - 1);
+            if (gpu_written_granules[at >> 6] >> (at & 63) & 1) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto copy_slot = [&](VAddr address, u64 size) -> ConstantCopy& {
+        const u64 key = (address >> 4) ^ (size << 40);
+        return constant_copies[(key * 0x9E3779B97F4A7C15ull) >> 52];
+    };
+    const auto reuse = [&](u32 index, VAddr address, u64 size) {
+        u32 version;
+        if (!num_versions || !version_of(address, version)) {
+            return false;
+        }
+        auto& memo = copy_slot(address, size);
+        const bool known = memo.address == address && memo.size == size && memo.version == version &&
+                           constant_ring->Reusable(memo.at) && !written_by_gpu(address, size);
+        if (!known) {
+            BbEngine::GxRecords::NoteConstant(false, false, true, address, u32(size));
+            return false;
+        }
+        const bool check = memo.hash != 0;
+        bool same = true;
+        if (check && memory->IsValidGpuMapping(address, size)) {
+            same = (XXH3_64bits(reinterpret_cast<const void*>(address), size) | 1) == memo.hash;
+            if (same && !BbEngine::GxRecords::Compared()) {
+                memo.hash = 0;
+            }
+        }
+        BbEngine::GxRecords::NoteConstant(same, check, same, address, u32(size));
+        if (!same) {
+            memo.address = 0;
+            return false;
+        }
+        constant_ring->Hold(memo.at);
+        out.push_back({index, static_cast<u32>(size), memo.offset, address});
+        return true;
+    };
     const auto copy = [&](u32 index, const void* source, VAddr address, u64 size) {
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
@@ -1063,6 +1077,14 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
+        u32 version;
+        if (!source && num_versions && version_of(address, version)) {
+            const bool hashed = (BbEngine::GxRecords::Compared() || (++constant_checks & 63) == 0) &&
+                                memory->IsValidGpuMapping(address, size);
+            copy_slot(address, size) = {
+                address, static_cast<u32>(size), version, constant_ring->LastAbsolute(), *offset,
+                hashed ? XXH3_64bits(reinterpret_cast<const void*>(address), size) | 1 : 0};
+        }
         return true;
     };
     // Compute stages may run as HLE copy shaders, which read their buffers on the recording
@@ -1099,6 +1121,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         // written by the GPU (now or by work still queued for the recording thread). What is not
         // copied is read on the recording thread: a CPU write over these bytes on this thread
         // waits for the packet (WaitForPendingReads).
+        if (!hle_candidate && size != 0 && size <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+            reuse(index, address, size)) {
+            continue;
+        }
         if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
             buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size) ||
             !copy(index, nullptr, address, size) || hle_candidate) {
@@ -1184,15 +1210,48 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     // the index buffer are still read there: a DumpConstRam over them waits for this packet.
     thread_local boost::container::static_vector<AmdGpu::Buffer, Shader::NUM_BUFFERS> vsharps;
     vsharps.clear();
+    thread_local boost::container::static_vector<u64, Shader::NUM_BUFFERS> vkeys;
+    vkeys.clear();
+    const bool by_object = BbEngine::GxRecords::BindsByObject() && gx_state;
+    u64 index_key = 0;
     BbSections::ScopeA inputs_scope{BbSections::AInputs};
     if (pipeline && !pipeline->IsCompute()) {
         const auto* graphics = static_cast<const GraphicsPipeline*>(pipeline);
         if (const auto& fetch = graphics->GetFetchShader();
             fetch && fetch->attributes.size() <= vsharps.capacity()) {
             const auto& vs = graphics->GetStage(Shader::SwStage::Vertex);
+            const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
             for (const auto& attrib : fetch->attributes) {
-                const auto buffer = attrib.GetSharp(vs);
+                u32 words[4];
+                const bool recorded = gx && BbEngine::GxBindings::VertexWords(*gx, attrib.dword_offset, words);
+                AmdGpu::Buffer buffer{};
+                if (recorded) {
+                    std::memcpy(&buffer, words, sizeof words);
+                    buffer.base_address += attrib.inst_offset;
+                    if (attrib.data_format) {
+                        buffer.data_format = attrib.data_format;
+                        buffer.num_format = attrib.num_format;
+                    }
+                }
+                if (!recorded || BbEngine::GxRecords::Compared() || (draw_pipe->packets & 63) == 0) {
+                    const auto old = attrib.GetSharp(vs);
+                    if (recorded) {
+                        for (u32 w = 0; w < 4; ++w) {
+                            BbEngine::GxRecords::NoteWord(2, attrib.dword_offset + w,
+                                                          reinterpret_cast<const u32*>(&buffer)[w],
+                                                          reinterpret_cast<const u32*>(&old)[w], vs.pgm_hash);
+                        }
+                    }
+                    if (!recorded || BbEngine::GxRecords::Compared()) {
+                        buffer = old;
+                    }
+                }
                 vsharps.push_back(buffer);
+                vkeys.push_back(recorded && by_object
+                                    ? BbEngine::GxBindings::VertexKey(
+                                          *static_cast<const BbEngine::GxBindings::State*>(gx_state),
+                                          attrib.dword_offset)
+                                    : 0);
                 if (buffer.base_address != 0 && buffer.GetSize() > 0) {
                     if (BbCeStats::Enabled()) {
                         BbCeStats::Check(BbCeStats::Vertex, buffer.base_address, buffer.GetSize());
@@ -1216,6 +1275,28 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     inputs_scope.End();
     size += AlignPacket(u32(vsharps.size() * sizeof(AmdGpu::Buffer)));
+    size += AlignPacket(u32(vsharps.size() * sizeof(u64)));
+    if (by_object && is_indexed && !cs && !indirect) {
+        const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+        if (gx->render.index_known && gx->render.index_base == liverpool->regs.index_base_address.Address<VAddr>()) {
+            index_key = gx->index_key;
+        }
+    }
+    u32 num_view_keys = 0;
+    thread_local std::array<u64, 2 * BbEngine::GxBindings::kMaxViewKeys> view_keys;
+    if (by_object && !cs && !indirect) {
+        const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+        num_view_keys = std::min(gx->num_view_keys, BbEngine::GxBindings::kMaxViewKeys);
+        std::memcpy(view_keys.data(), gx->view_keys, num_view_keys * 2 * sizeof(u64));
+    }
+    if (by_object && !BbEngine::GxRecords::Intact()) {
+        std::fill(vkeys.begin(), vkeys.end(), 0);
+        index_key = 0;
+        num_view_keys = 0;
+    }
+    size += AlignPacket(num_view_keys * 2 * u32(sizeof(u64)));
+    const u32 gx_count = pipeline && !cs && !indirect ? num_gx_registers : 0;
+    size += AlignPacket(u32(gx_count * sizeof(GxRegister)));
     const u32 interval = VerifyInterval();
     const bool verify = interval && (draw_pipe->packets % interval) == 0;
     if (verify) {
@@ -1242,6 +1323,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     packet.db_extent = liverpool->last_db_extent;
     packet.ring_end = constant_ring ? constant_ring->Position() : 0;
     packet.num_vsharps = static_cast<u32>(vsharps.size());
+    packet.index_key = index_key;
+    packet.num_view_keys = num_view_keys;
+    packet.num_gx_registers = gx_count;
     out += sizeof(DrawPacket);
     std::memcpy(out, blocks.data(), num_blocks * sizeof(u16));
     out += AlignPacket(num_blocks * sizeof(u16));
@@ -1283,6 +1367,12 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::memcpy(out, vsharps.data(), vsharps.size() * sizeof(AmdGpu::Buffer));
     out += AlignPacket(u32(vsharps.size() * sizeof(AmdGpu::Buffer)));
+    std::memcpy(out, vkeys.data(), vkeys.size() * sizeof(u64));
+    out += AlignPacket(u32(vsharps.size() * sizeof(u64)));
+    std::memcpy(out, view_keys.data(), num_view_keys * 2 * sizeof(u64));
+    out += AlignPacket(num_view_keys * 2 * u32(sizeof(u64)));
+    std::memcpy(out, gx_registers.data(), gx_count * sizeof(GxRegister));
+    out += AlignPacket(u32(gx_count * sizeof(GxRegister)));
     if (verify) {
         std::memcpy(out, &liverpool->regs, sizeof(AmdGpu::Regs));
         out += sizeof(AmdGpu::Regs);
@@ -1432,6 +1522,15 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     }
     self.packet_vsharps = {reinterpret_cast<const AmdGpu::Buffer*>(in), packet.num_vsharps};
     in += AlignPacket(u32(packet.num_vsharps * sizeof(AmdGpu::Buffer)));
+    self.packet_vkeys = {reinterpret_cast<const u64*>(in), packet.num_vsharps};
+    in += AlignPacket(u32(packet.num_vsharps * sizeof(u64)));
+    self.packet_view_keys = {reinterpret_cast<const u64*>(in), packet.num_view_keys * 2};
+    in += AlignPacket(packet.num_view_keys * 2 * u32(sizeof(u64)));
+    self.packet_index_key = packet.index_key;
+    thread_local std::array<GxRegister, 160> gx_swapped;
+    const u32 gx_count = std::min<u32>(packet.num_gx_registers, gx_swapped.size());
+    std::memcpy(gx_swapped.data(), in, gx_count * sizeof(GxRegister));
+    in += AlignPacket(u32(packet.num_gx_registers * sizeof(GxRegister)));
     if (packet.verify) {
         // The resource tables the GPU thread walked must read the same now: else a write
         // still queued here (WriteData, DMA) changed them after that thread read them.
@@ -1525,12 +1624,17 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
     } else {
+        SwapGxRegisters(regs, gx_swapped.data(), gx_count);
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
+        SwapGxRegisters(regs, gx_swapped.data(), gx_count);
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
     self.packet_vsharps = {};
+    self.packet_vkeys = {};
+    self.packet_view_keys = {};
+    self.packet_index_key = 0;
     if (self.constant_ring) {
         self.constant_ring->Stamp(packet.ring_end);
     }
@@ -1828,6 +1932,15 @@ void Rasterizer::PrintPipeStats() {
             }
             last_sections[s] = now_cycles;
         }
+        static std::array<u64, 6> last_paths{};
+        if (packets > 0) {
+            const auto& paths = VideoCore::BufferCache::obtain_paths;
+            const auto per = [&](u32 i) { return double(paths[i] - last_paths[i]) / packets; };
+            std::printf("\n  stage B buffers per packet: in place %.2f read %.2f written, stream %.2f, "
+                        "VRAM %.2f read %.2f written, %.3f with uploads",
+                        per(0), per(1), per(2), per(3), per(4), per(5));
+            last_paths = paths;
+        }
         static std::array<u64, BbSections::ACount> last_a{};
         static u64 last_a_draws = 0;
         const u64 a_draws = BbSections::a_draws.load(std::memory_order_relaxed);
@@ -1941,7 +2054,8 @@ bool Rasterizer::FilterDrawPasses() const {
     return !(mode == Mode::Disable && (depth_copy || stencil_copy));
 }
 
-void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
+void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared,
+                      u64 gx_record) {
     RENDERER_TRACE;
     BbSections::ScopeA draw_scope{BbSections::ADraw};
     if (BbSections::Enabled()) {
@@ -1992,7 +2106,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     }
     const u32 srt_faults = Shader::Info::srt_walk_faults;
     BbSections::ScopeA pipeline_scope{BbSections::APipeline};
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared, gx_record);
     pipeline_scope.End();
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
@@ -2003,11 +2117,221 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     if (!pipeline || Shader::Info::srt_walk_faults != srt_faults) {
         return;
     }
+    num_gx_registers = 0;
+    gx_state = nullptr;
+    if (gx_record && (BbEngine::GxRecords::Compared() || BbEngine::GxRecords::Used())) {
+        BbSections::ScopeA record_scope{BbSections::ARecord};
+        ApplyGxRecord(pipeline, used_prepared, gx_record, is_indexed);
+    }
+    if (BbEngine::GxTrace::On()) {
+        if (const void* sample = BbEngine::GxTrace::TakeSample()) {
+            for (const auto* stage : pipeline->GetStages()) {
+                if (!stage) {
+                    continue;
+                }
+                for (const auto& resource : stage->images) {
+                    const auto sharp = resource.GetSharp(*stage);
+                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceImage, &sharp, resource.is_r128 == false);
+                }
+                for (const auto& resource : stage->buffers) {
+                    if (resource.IsSpecial()) {
+                        continue;
+                    }
+                    const auto sharp = resource.GetSharp(*stage);
+                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceBuffer, &sharp, false);
+                }
+                for (const auto& resource : stage->samplers) {
+                    const auto sharp = resource.GetSharp(*stage);
+                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceSampler, &sharp, false);
+                }
+            }
+        }
+    }
     if (pipelined && FilterDrawPasses()) {
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
+        num_gx_registers = 0;
+        gx_state = nullptr;
         return;
     }
+    const u32 gx_count = num_gx_registers;
+    num_gx_registers = 0;
+    gx_state = nullptr;
+    SwapGxRegisters(liverpool->regs, gx_registers.data(), gx_count);
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
+    SwapGxRegisters(liverpool->regs, gx_registers.data(), gx_count);
+}
+
+void Rasterizer::SwapGxRegisters(AmdGpu::Regs& regs, GxRegister* list, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        std::swap(regs.reg_array[AmdGpu::Regs::ContextRegWordOffset + list[i].index], list[i].value);
+    }
+}
+
+void Rasterizer::ApplyGxRecord(const GraphicsPipeline* pipeline, const PreparedDraw*& used_prepared,
+                               u64 gx_record, bool is_indexed_draw) {
+    namespace Gx = BbEngine::GxBindings;
+    static_assert(sizeof(Gx::Entry) == sizeof(Shader::Native::TablePlan::Entry));
+    const auto& regs = liverpool->regs;
+    static const bool layout = [&] {
+        const auto at = [&](const void* field) {
+            return u32(reinterpret_cast<const u32*>(field) - regs.reg_array.data()) -
+                   AmdGpu::Regs::ContextRegWordOffset;
+        };
+        const bool same =
+            at(&regs.color_target_mask) == 0x8e && at(&regs.blend_control[0]) == 0x1e0 &&
+            at(&regs.blend_constants) == 0x105 && at(&regs.depth_control) == 0x200 &&
+            at(&regs.stencil_control) == 0x10b && at(&regs.stencil_ref_front) == 0x10c &&
+            at(&regs.stencil_ref_back) == 0x10d && at(&regs.clipper_control) == 0x204 &&
+            at(&regs.polygon_control) == 0x205 && at(&regs.viewports[0]) == 0x10f &&
+            at(&regs.viewport_depths[0]) == 0xb4 && at(&regs.viewport_scissors[0]) == 0x94 &&
+            at(&regs.color_buffers[0]) == 0x318 && at(&regs.depth_buffer) == 0x10;
+        if (!same) {
+            std::printf("GX records: the register layout is not GX's; render state stays with the registers\n");
+        }
+        return same;
+    }();
+    constexpr Shader::SwStage kStages[Gx::kStages] = {Shader::SwStage::Vertex,
+                                                      Shader::SwStage::Fragment};
+    const u32 unfilled = pipeline_cache.GxUnfilled();
+    const auto refresh = [&](u32 s) {
+        if ((unfilled >> s) & 1) {
+            const_cast<Shader::Info*>(pipeline->GetStages()[u32(kStages[s])])->RefreshFlatBuf();
+        }
+    };
+    const Gx::State* state = BbEngine::GxRecords::Taken(gx_record);
+    if (!state) {
+        refresh(0);
+        refresh(1);
+        BbEngine::GxRecords::NoteDraw(Gx::NoState, 0, false);
+        return;
+    }
+    const bool compare = BbEngine::GxRecords::Compared();
+    struct FillOp {
+        u16 flat;
+        u8 dynamic;
+        Gx::Fill fill;
+        u32 offset;
+    };
+    struct FillPlan {
+        const Shader::Info* info = nullptr;
+        u64 shader = 0;
+        u64 inputs_hash = 0;
+        u32 size = 0;
+        std::vector<FillOp> ops;
+        Gx::Reason reason = Gx::Covered;
+    };
+    thread_local std::unordered_map<u64, FillPlan> plans;
+    thread_local std::vector<Gx::Fill> fills;
+    thread_local std::vector<u32> scratch;
+    Gx::Reason bindings = Gx::Covered;
+    for (u32 s = 0; s < Gx::kStages; ++s) {
+        const auto* info = pipeline->GetStages()[u32(kStages[s])];
+        if (!info || (!compare && !((unfilled >> s) & 1))) {
+            continue;
+        }
+        const Gx::Stage& stage = state->stages[s];
+        auto& flat = const_cast<Shader::Info*>(info)->flattened_ud_buf;
+        const auto& table_plan = info->table_plan;
+        const u32 size = u32(flat.size());
+        if (plans.size() > 8192) {
+            plans.clear();
+        }
+        FillPlan& plan = plans[reinterpret_cast<u64>(info) * 0x9E3779B97F4A7C15ull ^ stage.shader];
+        if (plan.info != info || plan.shader != stage.shader || plan.inputs_hash != stage.inputs_hash ||
+            plan.size != size) {
+            plan.info = info;
+            plan.shader = stage.shader;
+            plan.inputs_hash = stage.inputs_hash;
+            plan.size = size;
+            plan.ops.clear();
+            fills.assign(size, Gx::Fill{});
+            const Gx::Plan entries{reinterpret_cast<const Gx::Entry*>(table_plan.entries.data()),
+                                   u32(table_plan.entries.size()), table_plan.valid};
+            plan.reason = size > 0xffff ? Gx::Outside : Gx::Prepare(stage, entries, size, fills.data());
+            for (u32 f = 0; f < size && plan.reason == Gx::Covered; ++f) {
+                if (fills[f].from == Gx::FromNone) {
+                    continue;
+                }
+                const bool table = f >= Shader::Native::TablePlan::FirstFlat;
+                const auto* entry = table ? &table_plan.entries[f - Shader::Native::TablePlan::FirstFlat] : nullptr;
+                plan.ops.push_back({u16(f), u8(entry && entry->expr_len), fills[f], entry ? entry->offset : 0});
+            }
+        }
+        Gx::Reason reason = state->reason != Gx::Covered ? static_cast<Gx::Reason>(state->reason) : plan.reason;
+        u32* out = flat.data();
+        if (compare && reason == Gx::Covered) {
+            scratch.assign(flat.begin(), flat.end());
+            out = scratch.data();
+        }
+        for (const FillOp& op : plan.ops) {
+            if (reason != Gx::Covered) {
+                break;
+            }
+            const u32 offset =
+                op.dynamic ? table_plan.Offset(table_plan.entries[op.flat - Shader::Native::TablePlan::FirstFlat], out)
+                           : op.offset;
+            reason = Gx::Value(*state, s, op.fill, offset, out[op.flat]);
+        }
+        if (reason != Gx::Covered) {
+            bindings = bindings == Gx::Covered ? reason : bindings;
+            if (!compare) {
+                refresh(s);
+            }
+            continue;
+        }
+        if (compare) {
+            for (const FillOp& op : plan.ops) {
+                BbEngine::GxRecords::NoteWord(s, op.flat, out[op.flat], flat[op.flat], info->pgm_hash);
+            }
+        }
+    }
+    if (!compare && !BbEngine::GxRecords::Intact()) {
+        for (u32 s = 0; s < Gx::kStages; ++s) {
+            if (const auto* info = pipeline->GetStages()[u32(kStages[s])]) {
+                const_cast<Shader::Info*>(info)->RefreshFlatBuf();
+            }
+        }
+        BbEngine::GxRecords::NoteDraw(Gx::NoState, 0, false);
+        return;
+    }
+    if (unfilled) {
+        used_prepared = nullptr;
+    }
+    std::array<Gx::Register, Gx::kMaxRegisters> list;
+    thread_local u64 last_render = 0;
+    thread_local bool last_clean = false;
+    const bool unchanged = !compare && last_clean && state->render.hash == last_render;
+    const u32 count = layout && !unchanged ? Gx::Registers(state->render, list.data()) : 0;
+    gx_state = state;
+    if (state->render.index_known && is_indexed_draw) {
+        BbEngine::GxRecords::NoteTarget(-2, state->render.index_base, regs.index_base_address.Address());
+    }
+    u32 differing = 0;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 old = regs.reg_array[AmdGpu::Regs::ContextRegWordOffset + list[i].index];
+        BbEngine::GxRecords::NoteRegister(list[i].index, list[i].value, old);
+        if (!compare && old != list[i].value && differing < gx_registers.size()) {
+            gx_registers[differing++] = {list[i].index, list[i].value};
+        }
+    }
+    if (compare) {
+        for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS && i < 8; ++i) {
+            if (state->render.color[i]) {
+                BbEngine::GxRecords::NoteTarget(int(i), state->render.color[i],
+                                                regs.color_buffers[i].Address());
+            }
+        }
+        if (state->render.depth) {
+            BbEngine::GxRecords::NoteTarget(-1, state->render.depth, regs.depth_buffer.DepthAddress());
+        }
+    } else {
+        num_gx_registers = differing;
+    }
+    if (count) {
+        last_render = state->render.hash;
+        last_clean = differing == 0;
+    }
+    BbEngine::GxRecords::NoteDraw(bindings, 0, layout);
 }
 
 // BB_PROXY_TRACE (defined with BindTextures).
@@ -2053,8 +2377,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         upscaler->OnDisplayPass(regs.color_buffers[0].Address(), cb_descs[0].first);
         previous_scene_depth = camera_motion->Depth(); // the last G-buffer pass's (bbport)
         camera_motion->OnDisplayPass(cb_descs[0].first);
-        ssgi->OnFrameEnd();
-        ssr_temporal->OnFrameEnd();
+        EffectsOnFrameEnd();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
@@ -2067,17 +2390,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_targets->debug = scene_debug_frame;
     }
     bind_prepared = used_prepared;
-    motion_draw = pipeline->GetGraphicsKey().motion_vectors;
+    motion_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexOutputs) != 0;
+    capture_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexCapture) != 0;
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
     NotifyUiDraw(pipeline);
-    // The first HDR post copy follows sky and transparent scene draws. Composite before
-    // binding its sampled resources so BindResources restores the game's expected layouts.
-    if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        ps && ps->pgm_hash == 0xccbf44a6) {
-        volumetric_light->Composite();
-    }
+    EffectsBeforeResources(pipeline);
     const PreparedDraw* draw_prepared = bind_prepared;
     // bbport: vertex and index buffers are resolved while the helper binds textures (their
     // commands are recorded after BeginRendering, as before).
@@ -2089,102 +2408,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (!bound) {
         return;
     }
-    const auto* sky_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    bool sky_candidate = sky_seam->Enabled() && sky_ps && sky_ps->pgm_hash == 0xdda49e89 &&
-        pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash == 0xb28f5a56 &&
-        is_indexed && regs.num_indices == 1920 && regs.num_instances.NumInstances() == 1 &&
-        instance.IsVertexInputDynamicState();
-    if (sky_candidate) {
-        const auto [vertex, instance_index] = GetDrawOffsets(
-            regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
-        sky_candidate = vertex == 0 && instance_index == 0;
-    }
-    if (sky_candidate) {
-        if (!inputs_resolved) {
-            ResolveVertexBuffers(pipeline, draw_prepared);
-            ResolveIndexBuffer(index_offset);
-        }
-        auto& v = vertex_binds;
-        if (FrameCapture::Active()) {
-            for (const auto& attr : v.attributes) {
-                const auto binding = attr.binding;
-                if (binding >= v.num_buffers) continue;
-                const auto note = fmt::format(
-                    "\n  sky vertex location {} format {} stride {} size {} offset {}",
-                    attr.location, vk::to_string(attr.format), v.host_strides[binding],
-                    v.host_sizes[binding], attr.offset);
-                FrameCapture::Note(note.c_str());
-            }
-        }
-        const auto position = std::ranges::find(v.attributes, 0u,
-            &vk::VertexInputAttributeDescription2EXT::location);
-        const auto uv = std::ranges::find(v.attributes, 3u,
-            &vk::VertexInputAttributeDescription2EXT::location);
-        if (position != v.attributes.end() && uv != v.attributes.end() &&
-            position->format == vk::Format::eR32G32B32Sfloat &&
-            uv->format == vk::Format::eR16G16Sint &&
-            position->offset == 0 && uv->offset == 0 &&
-            position->binding < v.num_buffers && uv->binding < v.num_buffers) {
-            const auto pi = position->binding, ui = uv->binding;
-            if (v.host_strides[pi] == 24 && v.host_strides[ui] == 24 &&
-                v.host_sizes[pi] == v.host_sizes[ui] && v.host_sizes[pi] % 24 == 0 &&
-                v.host_sizes[pi] == 1824 * 24 &&
-                v.host_buffers[pi] && v.host_buffers[ui]) {
-                const u32 count = u32(v.host_sizes[pi] / 24);
-                const auto result = sky_seam->Correct(
-                    {v.host_buffers[pi], v.host_offsets[pi], 484 * 24 + 12},
-                    {v.host_buffers[ui], v.host_offsets[ui], (count - 1) * 24 + 4}, 24, 24, count);
-                if (result) {
-                    if (sky_zenith->Enabled()) {
-                        u32 first_image = 0;
-                        for (const auto* stage : pipeline->GetStages()) {
-                            if (stage == sky_ps) break;
-                            if (stage) first_image += u32(stage->images.size());
-                        }
-                        for (u32 i = 0; i < sky_ps->images.size(); ++i) {
-                            const auto sharp = sky_ps->images[i].GetSharp(*sky_ps);
-                            const u32 index = first_image + i;
-                            if (sharp.base_level != 0 || sharp.last_level != 11 ||
-                                index >= image_infos.size()) continue;
-                            const auto image = std::ranges::find_if(bound_images,
-                                [&](VideoCore::ImageId id) {
-                                    if (!id) return false;
-                                    const auto& info = texture_cache.GetImage(id).info;
-                                    return info.guest_address == sharp.Address() &&
-                                        info.pixel_format == vk::Format::eBc1RgbaSrgbBlock &&
-                                        info.size.width == 2048 && info.size.height == 512 &&
-                                        info.resources.layers == 1 && info.resources.levels == 12;
-                                });
-                            if (image == bound_images.end()) continue;
-                            runtime.FlushBarriers();
-                            if (const auto view = sky_zenith->Filter(image_infos[index],
-                                    sky_seam->VerificationBuffer(), count)) {
-                                image_infos[index].imageView = view;
-                                image_infos[index].imageLayout = vk::ImageLayout::eGeneral;
-                                if (FrameCapture::Active()) {
-                                    const auto note = fmt::format("\n  sky zenith GPU verified {}",
-                                        sky_zenith->CaptureVerification());
-                                    FrameCapture::Note(note.c_str());
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    if (FrameCapture::Active()) {
-                        const auto note = fmt::format("\n  sky seam GPU verified {}",
-                            sky_seam->CaptureVerification());
-                        FrameCapture::Note(note.c_str());
-                    }
-                    v.host_buffers[ui] = result;
-                    v.host_offsets[ui] = 0;
-                    v.host_sizes[ui] = count * 4;
-                    v.host_strides[ui] = 4;
-                    for (auto& binding : v.bindings)
-                        if (binding.binding == ui) binding.stride = 4;
-                }
-            }
-        }
-    }
+    const bool sky_resolved =
+        SkyBeforeRendering(regs, pipeline, is_indexed, index_offset, draw_prepared, inputs_resolved);
     const auto state = BeginRendering(pipeline);
     if (ProxyTraceOn()) {
         const auto target = cb_descs[0].first ? cb_descs[0].first : db_desc.first;
@@ -2192,7 +2417,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                         target ? &texture_cache.GetImage(target) : nullptr);
     }
 
-    if (!inputs_resolved && !sky_candidate) {
+    if (!inputs_resolved && !sky_resolved) {
         ResolveVertexBuffers(pipeline, draw_prepared);
         if (is_indexed) {
             ResolveIndexBuffer(index_offset);
@@ -2241,6 +2466,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 break;
             }
             const VAddr address = buffer.base_address;
+            if (role == Motion::BufferRole::SmallSkeleton &&
+                buffer_cache.IsRegionGpuModified(address, size)) {
+                gated = false;
+                break;
+            }
             if (role == Motion::BufferRole::SmallSkeleton &&
                 memory->IsValidGpuMapping(address, 0) &&
                 memory->ClampRangeSize(address, size) == size) {
@@ -2295,523 +2525,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
-    if (const auto& key = pipeline->GetGraphicsKey();
-        key.mrt_mask &&
-        IsGtaoReplacement(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash,
-                          Shader::HwStage::Fragment)) {
-        static_assert(offsetof(Shader::PushData, motion_param) == 120);
-        const float k = std::clamp(
-            BbSettings::Get().graphics_ao_strength.load(std::memory_order_relaxed), 0.0f, 1.0f);
-        push_data.motion_param = std::bit_cast<u32>(k);
+    if (capture_draw) {
+        EffectsCaptureDraw(regs, pipeline, is_indexed, index_offset);
     }
-    if (const auto& key = pipeline->GetGraphicsKey();
-        key.mrt_mask &&
-        IsSsrReplacement(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash,
-                         Shader::HwStage::Fragment)) {
-        static u32 ssr_frame = 0;
-        push_data.motion_param = ssr_frame;
-        if (cb_descs[0].first) {
-            SsrTemporal::TraceInputs inputs{.frame_index = ssr_frame};
-            if (!buffer_infos.empty() && buffer_infos[0].buffer && image_infos.size() == 6) {
-                inputs.constants = buffer_infos[0].buffer;
-                inputs.constants_offset = buffer_infos[0].offset;
-                inputs.constants_range = buffer_infos[0].range;
-                inputs.constants_dword_offset = push_data.buf_offsets[0];
-                // image_infos holds the draw's images (depth, normals, scene color), then its
-                // samplers.
-                inputs.normals_view = image_infos[1].imageView;
-                inputs.normals_layout = image_infos[1].imageLayout;
-                inputs.color_view = image_infos[2].imageView;
-                inputs.color_layout = image_infos[2].imageLayout;
-            }
-            ssr_temporal->OnSsrDraw(cb_descs[0].first, inputs);
-        }
-        ++ssr_frame;
-    }
-    if (pipeline->GetGraphicsKey().mrt_mask &&
-        pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x11ffdfb5 &&
-        cb_descs[0].first) {
-        const auto& blur = pipeline->GetStage(Shader::SwStage::Fragment);
-        contact_shadow->OnBlurDraw(cb_descs[0].first,
-                                   blur.images.empty() ? 0 : blur.images[0].GetSharp(blur).Address());
-    }
-    if (pipeline->GetGraphicsKey().mrt_mask &&
-        pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0xf55643de &&
-        cb_descs[0].first && !buffer_infos.empty() && buffer_infos[0].buffer) {
-        static u32 shadow_frame = 0;
-        const bool has_ubo = buffer_infos.size() > 1 && buffer_infos[1].buffer;
-        const bool has_map = image_infos.size() > 1 && image_infos[1].imageView;
-        contact_shadow->OnShadowDraw(
-            cb_descs[0].first,
-            {.constants = buffer_infos[0].buffer,
-             .constants_offset = buffer_infos[0].offset,
-             .constants_range = buffer_infos[0].range,
-             .uniforms = has_ubo ? buffer_infos[1].buffer : vk::Buffer{},
-             .uniforms_offset = has_ubo ? buffer_infos[1].offset : 0,
-             .uniforms_range = has_ubo ? buffer_infos[1].range : 0,
-             .shadow_map = has_map ? image_infos[1].imageView : vk::ImageView{},
-             .shadow_layout = has_map ? image_infos[1].imageLayout : vk::ImageLayout::eUndefined,
-             .constants_offset_word = push_data.buf_offsets[0],
-             .frame_index = shadow_frame++});
-    }
-    if (const auto& key = pipeline->GetGraphicsKey();
-        (key.mrt_mask & 3) == 3 && cb_descs[0].first && cb_descs[1].first &&
-        pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x9f9ef267 &&
-        buffer_infos.size() >= 2 && buffer_infos[0].buffer && buffer_infos[1].buffer) {
-        point_shadow->OnLightDraw(cb_descs[0].first, cb_descs[1].first,
-                                  {.constants = buffer_infos[0].buffer,
-                                   .constants_offset = buffer_infos[0].offset,
-                                   .constants_range = buffer_infos[0].range,
-                                   .lights = buffer_infos[1].buffer,
-                                   .lights_offset = buffer_infos[1].offset,
-                                   .lights_range = buffer_infos[1].range,
-                                   .offsets = push_data.buf_offsets[0]});
-    }
-    if (pipeline->GetGraphicsKey().mrt_mask &&
-        pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x3fe9e964) {
-        static_assert(offsetof(Shader::PushData, motion_param) == 120);
-        const float intensity =
-            BbSettings::Get().graphics_ssr_intensity.load(std::memory_order_relaxed);
-        push_data.motion_param = std::bit_cast<u32>(
-            std::clamp(std::isfinite(intensity) ? intensity : 1.0f, 0.0f, 3.0f));
-        // The composite reads the scene-size reflection when this frame's trace made one.
-        // image_infos holds the 8 images, then the 4 samplers.
-        if (const auto full = ssr_temporal->FullResult();
-            full && image_infos.size() == 12) {
-            auto& info = image_infos[6];
-            info.imageView = full;
-            info.imageLayout = vk::ImageLayout::eGeneral;
-        }
-    }
-    static const u32 capture_pom_patch = [] {
-        const char* flag = std::getenv("BB_POM_PATCH_CAPTURE");
-        if (!flag || !flag[0] || (flag[0] == '0' && flag[1] == '\0')) {
-            return 0u;
-        }
-        if ((flag[0] >= '1' && flag[0] <= '3') && flag[1] == '\0') {
-            return u32(flag[0] - '0');
-        }
-        std::printf("POM patch capture: invalid BB_POM_PATCH_CAPTURE; disabled\n");
-        return 0u;
-    }();
-    static const bool capture_specular = [] {
-        const char* flag = std::getenv("BB_SPECULAR_CAPTURE");
-        if (!flag || !flag[0] || (flag[0] == '0' && flag[1] == '\0')) return false;
-        if (flag[0] == '1' && flag[1] == '\0') return true;
-        std::printf("Specular capture: invalid BB_SPECULAR_CAPTURE; disabled\n");
-        return false;
-    }();
-    const auto* capture_vertex = pipeline->GetStages()[u32(Shader::SwStage::Vertex)];
-    const auto* capture_fragment = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    const u64 capture_vs = capture_vertex ? capture_vertex->pgm_hash : 0;
-    const u64 capture_ps = capture_fragment ? capture_fragment->pgm_hash : 0;
-    const bool capture_patch_match =
-        capture_vs == 0xc829ee58 && capture_ps == 0x08ccd4c7 && regs.num_indices == 210;
-    const bool capture_neighbor_match =
-        (capture_vs == 0xc829ee58 && capture_ps == 0x08ccd4c7 && regs.num_indices == 4455) ||
-        (capture_vs == 0x9da6aacb && capture_ps == 0xca7226ec && regs.num_indices == 30096);
-    const bool capture_specular_match =
-        capture_specular && capture_vs == 0x8747a367 && capture_ps == 0xd92266b9;
-    std::filesystem::path specular_capture_directory;
-    const auto capture_specular_targets = [&](const std::filesystem::path& directory,
-                                              const char* phase) {
-        scheduler.EndRendering();
-        const bool include_depth = regs.depth_control.depth_enable &&
-                                   std::strcmp(phase, "before") == 0;
-        for (u32 local = 0; local < (include_depth ? 3u : 2u); ++local) {
-            const bool depth = local == 2;
-            const auto id = depth ? db_desc.first : cb_descs[local].first;
-            if (!id) return false;
-            auto& image = texture_cache.GetImage(id);
-            const bool format_ok = depth
-                                       ? (image.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
-                                          image.info.pixel_format == vk::Format::eD32Sfloat)
-                                       : image.info.pixel_format == vk::Format::eB10G11R11UfloatPack32;
-            if (!format_ok ||
-                image.info.resources.layers != 1 || image.info.resources.levels != 1 ||
-                image.info.num_samples != 1 ||
-                (!depth && state.color_attachments[local].is_clear)) {
-                std::printf("Specular capture: unsupported lighting target %u\n", local);
-                return false;
-            }
-            const u64 bytes = u64(image.info.size.width) * image.info.size.height * 4;
-            if (!bytes || bytes > 32 * 1024 * 1024) return false;
-            // Runtime's range tracker uses the combined depth/stencil block size.
-            const u64 allocation_bytes = depth ? bytes * 2 : bytes;
-            VideoCore::Buffer readback(instance, 0, allocation_bytes, VideoCore::MemoryType::HostCached,
-                                       "Native specular target capture");
-            const vk::BufferImageCopy region{
-                .imageSubresource = {depth ? vk::ImageAspectFlagBits::eDepth
-                                          : vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                .imageExtent = {image.info.size.width, image.info.size.height, 1}};
-            runtime.DownloadImage(&image, &readback, std::span{&region, 1});
-            runtime.Transit(&image, depth ? vk::ImageLayout::eDepthStencilAttachmentOptimal
-                                         : vk::ImageLayout::eColorAttachmentOptimal,
-                            depth ? vk::PipelineStageFlagBits2::eEarlyFragmentTests |
-                                        vk::PipelineStageFlagBits2::eLateFragmentTests
-                                  : vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-                            depth ? vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-                                        vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                                  : vk::AccessFlagBits2::eColorAttachmentRead |
-                                        vk::AccessFlagBits2::eColorAttachmentWrite);
-            runtime.FlushBarriers();
-            scheduler.Record([](vk::CommandBuffer cmd) {
-                const vk::MemoryBarrier2 barrier{
-                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                    .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-                    .dstAccessMask = vk::AccessFlagBits2::eHostRead};
-                cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-            });
-            scheduler.Finish();
-            readback.Invalidate(0, allocation_bytes);
-            const auto filename = depth ? "before-depth.bin" :
-                std::string(phase) + "-" + std::to_string(local) + ".bin";
-            std::ofstream file(directory / filename,
-                               std::ios::binary);
-            file.write(reinterpret_cast<const char*>(readback.mapped_data.data()),
-                       std::streamsize(bytes));
-            file.close();
-            if (!file) return false;
-        }
-        return true;
-    };
-    if (FrameCapture::Active() && (is_indexed || capture_specular_match) &&
-        (capture_specular_match ||
-         (capture_pom_patch && regs.depth_control.depth_enable &&
-          regs.depth_control.depth_write_enable &&
-          (capture_patch_match || (capture_pom_patch >= 2 && capture_neighbor_match))))) {
-        const char* capture_label = capture_specular_match ? "Specular" : "POM patch";
-        const char* capture_dir = std::getenv("BB_CAPTURE_DIR");
-        if (!capture_dir) {
-            std::printf("%s capture: BB_CAPTURE_DIR is required\n", capture_label);
-        } else {
-            struct Copy {
-                vk::Buffer source;
-                u64 offset, size, destination;
-                std::string name;
-            };
-            std::vector<Copy> copies;
-            u64 total = 0;
-            bool valid = true;
-            std::ostringstream metadata;
-            metadata << std::setprecision(9);
-            const auto add = [&](vk::Buffer buffer, u64 offset, u64 size, std::string name) {
-                if (!buffer || !size || size > 8 * 1024 * 1024) {
-                    std::printf("%s capture: unsupported %s, bytes %llu, bound %u\n",
-                                capture_label, name.c_str(),
-                                static_cast<unsigned long long>(size), u32(bool(buffer)));
-                    valid = false;
-                    return;
-                }
-                copies.push_back({buffer, offset, size, total, std::move(name)});
-                total += size;
-            };
-            const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
-            const auto [base, first_instance] = GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
-            const u32 index_bytes = index_bind.type == vk::IndexType::eUint16 ? 2 :
-                                    index_bind.type == vk::IndexType::eUint32 ? 4 : 0;
-            metadata << "version 3\nvs " << std::hex << capture_vs << "\nps " << capture_ps
-                     << std::dec << "\nindices " << regs.num_indices << "\nindex_bytes "
-                     << index_bytes << "\nbase_vertex " << s32(base) << "\nfirst_instance "
-                     << first_instance << "\ninstances " << regs.num_instances.NumInstances()
-                     << "\nprimitive " << u32(regs.primitive_type) << '\n';
-            metadata << "viewport " << regs.viewports[0].xscale << ' '
-                     << regs.viewports[0].xoffset << ' ' << regs.viewports[0].yscale << ' '
-                     << regs.viewports[0].yoffset << '\n';
-            if (capture_specular_match) {
-                metadata << "pipeline_key " << std::hex
-                         << std::hash<GraphicsPipelineKey>{}(pipeline->GetGraphicsKey()) << std::dec
-                         << "\nspecular_capture 1\nindexed " << is_indexed << "\ndepth_test "
-                         << u32(regs.depth_control.depth_enable) << "\nstencil_test "
-                         << u32(regs.depth_control.stencil_enable) << "\ndepth_func "
-                         << u32(regs.depth_control.depth_func) << "\ndepth_write "
-                         << u32(regs.depth_control.depth_write_enable) << "\ndepth_bounds "
-                         << u32(regs.depth_control.depth_bounds_enable) << "\nhost_topology "
-                         << u32(LiverpoolToVK::PrimitiveType(pipeline->GetGraphicsKey().prim_type))
-                         << '\n';
-                metadata << "depth_format "
-                         << (db_desc.first ? u32(texture_cache.GetImage(db_desc.first).info.pixel_format)
-                                           : 0u) << '\n';
-                for (u32 stage = 0; stage < MaxShaderStages; ++stage)
-                    if (pipeline->GetStages()[stage])
-                        metadata << "shader_key " << stage << ' ' << std::hex
-                                 << pipeline->GetGraphicsKey().stage_hashes[stage]
-                                 << std::dec << '\n';
-                for (u32 i = 0; i < 2; ++i) {
-                    if (!cb_descs[i].first) { valid = false; break; }
-                    const auto& target = texture_cache.GetImage(cb_descs[i].first);
-                    metadata << "target " << i << " format " << u32(target.info.pixel_format)
-                             << " width " << target.info.size.width << " height "
-                             << target.info.size.height << '\n';
-                }
-            }
-            if (is_indexed)
-                add(index_bind.handle, index_bind.offset, u64(regs.num_indices) * index_bytes,
-                    "indices.bin");
-            const auto& v = vertex_binds;
-            for (u32 i = 0; i < v.num_buffers; ++i) {
-                add(v.host_buffers[i], v.host_offsets[i], v.host_sizes[i],
-                    "vertex-" + std::to_string(i) + ".bin");
-                metadata << "vertex " << i << " stride " << v.host_strides[i] << " bytes "
-                         << v.host_sizes[i] << '\n';
-            }
-            for (const auto& a : v.attributes)
-                metadata << "attribute " << a.location << " binding " << a.binding
-                         << " offset " << a.offset << " format " << u32(a.format) << '\n';
-            u32 buffer_binding = 0, image_binding = 0;
-            for (const auto* stage : pipeline->GetStages()) {
-                if (!stage) continue;
-                for (u32 i = 0; i < stage->buffers.size(); ++i, ++buffer_binding) {
-                    const auto& resource = stage->buffers[i];
-                    if (buffer_binding >= buffer_infos.size()) { valid = false; break; }
-                    if (resource.IsSpecial() && !capture_specular_match) continue;
-                    const auto& info = buffer_infos[buffer_binding];
-                    if (capture_specular_match &&
-                        resource.buffer_type == Shader::BufferType::ClipPlanes &&
-                        !info.buffer && regs.clipper_control.user_clip_plane_enable == 0) {
-                        metadata << "unused_null_clip_planes " << buffer_binding << '\n';
-                        continue;
-                    }
-                    const VAddr address =
-                        resource.IsSpecial() ? 0 : resource.GetSharp(*stage).base_address;
-                    add(info.buffer, info.offset, info.range,
-                        "constant-" + std::to_string(buffer_binding) + ".bin");
-                    metadata << "constant " << buffer_binding << " stage " << u32(stage->sw_stage)
-                             << " local " << i << " guest " << std::hex << address
-                             << std::dec << " bytes " << info.range << " push_offset "
-                             << u32(push_data.buf_offsets[buffer_binding]) << '\n';
-                    if (capture_specular_match)
-                        metadata << "buffer_type " << buffer_binding << " uniform "
-                                 << resource.is_uniform << " special " << resource.IsSpecial()
-                                 << '\n';
-                }
-                for (u32 i = 0; i < stage->images.size(); ++i, ++image_binding) {
-                    const auto sharp = stage->images[i].GetSharp(*stage);
-                    std::array<u32, 8> words;
-                    std::memcpy(words.data(), &sharp, sizeof(words));
-                    metadata << "image " << image_binding << " stage " << u32(stage->sw_stage)
-                             << " local " << i << " sharp";
-                    for (u32 word : words) metadata << ' ' << std::hex << word;
-                    metadata << std::dec << '\n';
-                }
-                for (u32 i = 0; i < stage->samplers.size(); ++i) {
-                    const auto sharp = stage->samplers[i].GetSharp(*stage);
-                    std::array<u32, sizeof(sharp) / sizeof(u32)> words;
-                    std::memcpy(words.data(), &sharp, sizeof(sharp));
-                    metadata << "sampler_guest stage " << u32(stage->sw_stage)
-                             << " local " << i << " sharp";
-                    for (u32 word : words) metadata << ' ' << std::hex << word;
-                    metadata << std::dec << '\n';
-                    auto effective = sharp;
-                    ForceAnisotropy(effective, stage->samplers[i].is_depth);
-                    std::memcpy(words.data(), &effective, sizeof(effective));
-                    metadata << "sampler_effective stage " << u32(stage->sw_stage)
-                             << " local " << i << " lod_bias "
-                             << (stage->samplers[i].is_depth ? 0.0f : sampler_lod_bias)
-                             << " sharp";
-                    for (u32 word : words) metadata << ' ' << std::hex << word;
-                    metadata << std::dec << '\n';
-                    const bool aniso = instance.IsAnisotropicFilteringSupported() &&
-                        (AmdGpu::IsAnisoFilter(effective.xy_mag_filter) ||
-                         AmdGpu::IsAnisoFilter(effective.xy_min_filter));
-                    metadata << "sampler_host stage " << u32(stage->sw_stage) << " local " << i
-                             << " min " << u32(LiverpoolToVK::Filter(effective.xy_min_filter))
-                             << " mag " << u32(LiverpoolToVK::Filter(effective.xy_mag_filter))
-                             << " mip " << u32(LiverpoolToVK::MipFilter(effective.mip_filter))
-                             << " u " << u32(LiverpoolToVK::ClampMode(effective.clamp_x))
-                             << " v " << u32(LiverpoolToVK::ClampMode(effective.clamp_y))
-                             << " w " << u32(LiverpoolToVK::ClampMode(effective.clamp_z))
-                             << " bias " << std::clamp(
-                                    effective.LodBias() +
-                                        (stage->samplers[i].is_depth ? 0.0f : sampler_lod_bias),
-                                    -instance.MaxSamplerLodBias(), instance.MaxSamplerLodBias())
-                             << " min_lod " << effective.MinLod()
-                             << " max_lod " << effective.MaxLod()
-                             << " aniso " << (aniso ? std::clamp(effective.MaxAniso(), 1.0f,
-                                                                instance.MaxSamplerAnisotropy())
-                                                    : 1.0f)
-                             << " aniso_enable " << aniso
-                             << " compare_enable " << stage->samplers[i].is_depth
-                             << " compare_op "
-                             << u32(LiverpoolToVK::DepthCompare(effective.depth_compare_func))
-                             << " border "
-                             << u32(LiverpoolToVK::BorderColor(effective.border_color_type))
-                             << '\n';
-                }
-            }
-            if (!valid || total > 32 * 1024 * 1024) {
-                std::printf("%s capture: unsupported buffer layout; no dump written\n",
-                            capture_label);
-            } else {
-                std::error_code error;
-                static u32 sequence = 0;
-                std::filesystem::path directory;
-                bool created = false;
-                do {
-                    directory = std::filesystem::path(capture_dir) /
-                                ((capture_specular_match ? "specular-input-" :
-                                  capture_pom_patch == 3 ? "pom-material-" :
-                                  capture_pom_patch == 2 ? "pom-neighbor-" : "pom-patch-") +
-                                 std::to_string(sequence++));
-                    created = std::filesystem::create_directory(directory, error);
-                } while (!created && !error && sequence < 10000);
-                if (!created || error) {
-                    std::printf("%s capture: cannot create output directory (%s)\n",
-                                capture_label, error.message().c_str());
-                } else {
-                    VideoCore::Buffer readback(instance, 0, total, VideoCore::MemoryType::HostCached,
-                                               "POM patch explicit capture");
-                    scheduler.EndRendering();
-                    scheduler.Record([copies, dst = readback.Handle()](vk::CommandBuffer cmd) {
-                        const vk::MemoryBarrier2 before{
-                            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-                            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                            .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
-                        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
-                        for (const auto& copy : copies)
-                            cmd.copyBuffer(copy.source, dst,
-                                           vk::BufferCopy{copy.offset, copy.destination, copy.size});
-                        const vk::MemoryBarrier2 after{
-                            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-                            .dstAccessMask = vk::AccessFlagBits2::eHostRead};
-                        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
-                    });
-                    scheduler.Finish();
-                    readback.Invalidate(0, total);
-                    bool written = true;
-                    for (const auto& copy : copies) {
-                        std::ofstream file(directory / copy.name, std::ios::binary);
-                        file.write(reinterpret_cast<const char*>(readback.mapped_data.data()) +
-                                       copy.destination, std::streamsize(copy.size));
-                        file.close();
-                        written &= bool(file);
-                    }
-                    if (((capture_pom_patch == 3 && capture_patch_match) ||
-                         capture_specular_match) && written) {
-                        const u32 image_count = capture_specular_match ? 5 : 3;
-                        if (image_infos.size() < image_count) written = false;
-                        for (u32 local = 0; written && local < image_count; ++local) {
-                            VideoCore::Image* image = nullptr;
-                            const VideoCore::ImageViewInfo* view = nullptr;
-                            for (const auto id : bound_images) {
-                                if (!id) continue;
-                                auto& candidate = texture_cache.GetImage(id);
-                                for (const auto view_id : candidate.backing->image_view_ids) {
-                                    const auto& candidate_view = texture_cache.GetImageView(view_id);
-                                    if (*candidate_view.image_view == image_infos[local].imageView) {
-                                        image = &candidate;
-                                        view = &candidate_view.info;
-                                        break;
-                                    }
-                                }
-                                if (image) break;
-                            }
-                            const bool format_ok = image &&
-                                (capture_specular_match
-                                     ? (image->info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
-                                        image->info.pixel_format == vk::Format::eR32Sfloat)
-                                     : (image->info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
-                                        image->info.pixel_format == vk::Format::eBc4UnormBlock));
-                            if (!image || !view || image->info.resources.layers != 1 ||
-                                image->info.num_samples != 1 ||
-                                !format_ok ||
-                                view->range.base.layer != 0 || view->range.extent.layers != 1) {
-                                std::printf("%s capture: unsupported bound image %u\n",
-                                            capture_label, local);
-                                written = false;
-                                break;
-                            }
-                            std::vector<vk::BufferImageCopy> regions;
-                            u64 image_bytes = 0;
-                            for (u32 mip = 0; mip < image->info.resources.levels; ++mip) {
-                                const u32 width = std::max(1u, image->info.size.width >> mip);
-                                const u32 height = std::max(1u, image->info.size.height >> mip);
-                                const u64 bytes = capture_specular_match
-                                                      ? u64(width) * height * 4
-                                                      : u64((width + 3) / 4) * ((height + 3) / 4) * 8;
-                                regions.push_back({
-                                    .bufferOffset = image_bytes,
-                                    .imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
-                                    .imageExtent = {width, height, 1}});
-                                metadata << "gpu_mip " << local << " level " << mip << " width "
-                                         << width << " height " << height << " offset "
-                                         << image_bytes << " bytes " << bytes << '\n';
-                                image_bytes += bytes;
-                            }
-                            if (image_bytes > (capture_specular_match ? 32u : 8u) * 1024 * 1024) {
-                                std::printf("%s capture: image %u exceeds size limit\n",
-                                            capture_label, local);
-                                written = false;
-                                break;
-                            }
-                            if (capture_specular_match && written) {
-                                std::ofstream push_file(directory / "push-data.bin", std::ios::binary);
-                                push_file.write(reinterpret_cast<const char*>(&push_data),
-                                                sizeof(push_data));
-                                push_file.close();
-                                written = bool(push_file) &&
-                                          capture_specular_targets(directory, "before");
-                            }
-                            metadata << "gpu_image " << local << " format "
-                                     << u32(image->info.pixel_format) << " view_format "
-                                     << u32(view->format) << " base_mip " << view->range.base.level
-                                     << " mip_count " << view->range.extent.levels << " mapping "
-                                     << u32(view->mapping.r) << ' ' << u32(view->mapping.g) << ' '
-                                     << u32(view->mapping.b) << ' ' << u32(view->mapping.a) << '\n';
-                            VideoCore::Buffer texture_readback(
-                                instance, 0, image_bytes, VideoCore::MemoryType::HostCached,
-                                "POM material texture readback");
-                            runtime.DownloadImage(image, &texture_readback, regions);
-                            runtime.Transit(image, image_infos[local].imageLayout,
-                                            vk::PipelineStageFlagBits2::eFragmentShader,
-                                            vk::AccessFlagBits2::eShaderSampledRead);
-                            runtime.FlushBarriers();
-                            scheduler.Record([](vk::CommandBuffer cmd) {
-                                const vk::MemoryBarrier2 barrier{
-                                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                                    .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-                                    .dstAccessMask = vk::AccessFlagBits2::eHostRead};
-                                cmd.pipelineBarrier2(
-                                    {.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-                            });
-                            scheduler.Finish();
-                            texture_readback.Invalidate(0, image_bytes);
-                            std::ofstream file(
-                                directory / ("gpu-texture-" + std::to_string(local) + ".bin"),
-                                std::ios::binary);
-                            file.write(reinterpret_cast<const char*>(
-                                           texture_readback.mapped_data.data()),
-                                       std::streamsize(image_bytes));
-                            file.close();
-                            written &= bool(file);
-                        }
-                        if (capture_specular_match && written) specular_capture_directory = directory;
-                    }
-                    if (written) {
-                        std::ofstream file(directory / "metadata.txt");
-                        file << metadata.str();
-                        file.close();
-                        written &= bool(file);
-                    }
-                    std::printf("%s capture: %s in %s\n", capture_label,
-                                written ? "written" : "write failed; dump incomplete",
-                                directory.string().c_str());
-                    FrameCapture::Note(written ? "\n  captured explicit GPU draw inputs"
-                                               : "\n  explicit GPU draw capture failed");
-                    EmitVertexBuffers();
-                    EmitIndexBuffer();
-                }
-            }
-        }
+    if (effects_wanted) {
+        const auto [effect_first_vertex, effect_first_instance] =
+            GetDrawOffsets(regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
+        EffectsBeforeBind(regs, pipeline, is_indexed, index_offset, effect_first_vertex);
     }
     pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
                             {buffer_infos.data(), buffer_infos.size()});
-    if (pipeline->GetGraphicsKey().motion_vectors) {
+    if (capture_draw) {
+        rt_shadow->BindAddresses(pipeline->GetLayout(), pipeline->GetGraphicsKey().motion_vectors);
+    } else if (motion_draw) {
         object_motion->BindAddresses(pipeline->GetLayout());
     }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
@@ -2822,75 +2548,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
-    if (!specular_capture_directory.empty()) {
-        const auto& dynamic = scheduler.GetDynamicState();
-        std::ofstream metadata(specular_capture_directory / "metadata.txt", std::ios::app);
-        metadata << std::setprecision(9);
-        if (dynamic.viewports.size() == 1 && dynamic.scissors.size() == 1) {
-            const auto& viewport = dynamic.viewports.front();
-            const auto& scissor = dynamic.scissors.front();
-            metadata << "host_viewport " << viewport.x << ' ' << viewport.y << ' '
-                     << viewport.width << ' ' << viewport.height << ' '
-                     << viewport.minDepth << ' ' << viewport.maxDepth << "\nhost_scissor "
-                     << scissor.offset.x << ' ' << scissor.offset.y << ' '
-                     << scissor.extent.width << ' ' << scissor.extent.height << '\n';
-        }
-        metadata << "host_raster " << u32(dynamic.front_face) << ' ' << u32(dynamic.cull_mode)
-                 << ' ' << dynamic.rasterizer_discard_enable << ' '
-                 << dynamic.primitive_restart_enable << ' ' << dynamic.depth_bias_enabled
-                 << ' ' << dynamic.line_width << "\nhost_depth "
-                 << dynamic.depth_test_enabled << ' ' << dynamic.depth_write_enabled << ' '
-                 << u32(dynamic.depth_compare_op) << ' ' << dynamic.depth_bounds_test_enabled
-                 << ' ' << dynamic.stencil_test_enabled << "\nhost_color_masks";
-        for (auto mask : dynamic.color_write_masks) metadata << ' ' << u32(mask);
-        metadata << "\nhost_render_area " << state.width << ' ' << state.height << '\n';
-        metadata.close();
-        if (!metadata) {
-            std::printf("Specular capture: actual draw state write failed; dump incomplete\n");
-            specular_capture_directory.clear();
-        }
-    }
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
-
-    const auto* effect_hs = pipeline->GetStages()[u32(Shader::SwStage::TessellationControl)];
-    const auto* effect_ds = pipeline->GetStages()[u32(Shader::SwStage::TessellationEval)];
-    const auto* effect_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    if (!effect_hs && !effect_ds && effect_ps && is_indexed &&
-        pipeline->GetGraphicsKey().patch_control_points == 0 &&
-        regs.depth_control.depth_enable && regs.depth_control.depth_write_enable &&
-        HidePomDraw(effect_ps->pgm_hash, regs.num_indices)) {
-        if (FrameCapture::Active()) {
-            char note[128];
-            std::snprintf(note, sizeof(note), "\n  diagnostic omitted POM ps %08x idx %u",
-                          u32(effect_ps->pgm_hash), regs.num_indices);
-            FrameCapture::Note(note);
-        }
-        ResetBindings(false);
-        scheduler.KickRecording();
-        return;
-    }
-    if (effect_hs && effect_ds && effect_ps &&
-        pipeline->GetGraphicsKey().patch_control_points == 1 &&
-        regs.depth_control.depth_enable && !regs.depth_control.depth_write_enable &&
-        regs.blend_control[0].enable &&
-        HideTessellationEffect(effect_hs->pgm_hash, effect_ds->pgm_hash, effect_ps->pgm_hash)) {
-        if (FrameCapture::Active()) {
-            char note[160];
-            std::snprintf(note, sizeof(note),
-                          "\n  diagnostic omitted tess effect hs %08x ds %08x ps %08x idx %u",
-                          u32(effect_hs->pgm_hash), u32(effect_ds->pgm_hash),
-                          u32(effect_ps->pgm_hash), regs.num_indices);
-            FrameCapture::Note(note);
-        }
-        ResetBindings(false);
-        scheduler.KickRecording();
-        return;
-    }
 
     // bbport (docs/pipeline_compiles.md): a pipeline still compiling does not hold this thread
     // (nor the GPU command thread and the guest threads that drain behind it): the draw is left
@@ -2937,308 +2600,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.endQuery(query.pool, query.index);
         }
     });
-    const auto draw_region = [&]() -> std::optional<vk::Rect2D> {
-        const auto& dynamic = scheduler.GetDynamicState();
-        if (dynamic.scissors.size() != 1 || dynamic.viewports.size() != 1) return std::nullopt;
-        const auto& vp = dynamic.viewports[0];
-        const auto& scissor = dynamic.scissors[0];
-        const s32 left = std::max(scissor.offset.x, s32(std::ceil(std::min(vp.x, vp.x + vp.width))));
-        const s32 top = std::max(scissor.offset.y, s32(std::ceil(std::min(vp.y, vp.y + vp.height))));
-        const s32 right = std::min<s32>(state.width, std::min<s32>(
-            scissor.offset.x + scissor.extent.width,
-            s32(std::floor(std::max(vp.x, vp.x + vp.width)))));
-        const s32 bottom = std::min<s32>(state.height, std::min<s32>(
-            scissor.offset.y + scissor.extent.height,
-            s32(std::floor(std::max(vp.y, vp.y + vp.height)))));
-        return vk::Rect2D{{left, top}, {u32(std::max(right - left, 0)),
-                                         u32(std::max(bottom - top, 0))}};
-    };
-    if (spatial_ao->UpscalePending()) {
-        // bbport: the draw right after the HQ gather is the game's bilateral upscale to the
-        // internal resolution (R8, sampling the gather and the full-resolution depth). HQ AO
-        // recomputed at that resolution replaces its output.
-        const auto gather = spatial_ao->GatherTarget();
-        s32 depth_index = -1;
-        bool reads_gather = false;
-        // bound_images lists the render target first, then the sampled images in binding order.
-        if (ps_info && cb_descs[0].first && state.num_color_attachments == 1 &&
-            state.num_layers == 1 && ps_info->images.size() == 2 &&
-            ps_info->buffers.size() == 2 && bound_images.size() == 3 &&
-            bound_images[0] == cb_descs[0].first && image_infos.size() >= 2 &&
-            buffer_infos.size() >= 2) {
-            for (s32 i = 0; i < 2; ++i) {
-                const auto id = bound_images[i + 1];
-                if (id == gather)
-                    reads_gather = true;
-                else if (texture_cache.GetImage(id).info.pixel_format == vk::Format::eR32Sfloat)
-                    depth_index = i;
-            }
-        }
-        const auto region = draw_region();
-        if (reads_gather && depth_index >= 0 && region && region->offset.x == 0 &&
-            region->offset.y == 0 && region->extent.width == state.width &&
-            region->extent.height == state.height) {
-            const float k = std::clamp(
-                BbSettings::Get().graphics_ao_strength.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            spatial_ao->FullResolution(cb_descs[0].first, cb_descs[0].second.view_info,
-                                       image_infos[depth_index], buffer_infos[0], buffer_infos[1],
-                                       k);
-        } else {
-            spatial_ao->SkipUpscale(fmt::format(
-                "next draw: colors={} ps_images={} ps_buffers={} bound={} gather={} depth={} "
-                "region={}", state.num_color_attachments, ps_info ? ps_info->images.size() : 0,
-                ps_info ? ps_info->buffers.size() : 0, bound_images.size(), reads_gather,
-                depth_index, region ? fmt::format("{},{} {}x{} of {}x{}", region->offset.x,
-                    region->offset.y, region->extent.width, region->extent.height, state.width,
-                    state.height) : std::string{"none"}));
-        }
-    }
-    if (BbSettings::Get().startup_ao_quality == 1 && ps_info &&
-        IsGtaoReplacement(ps_info->pgm_hash, Shader::HwStage::Fragment)) {
-        const auto& dynamic = scheduler.GetDynamicState();
-        // Descriptors are appended per stage with the fragment stage first, so its Cb0 and
-        // normals stay at the front while other stages may append their own buffers.
-        if (cb_descs[0].first && state.num_color_attachments == 1 && state.num_layers == 1 &&
-            ps_info->buffers.size() == 3 && ps_info->images.size() == 3 &&
-            buffer_infos.size() >= 3 && image_infos.size() >= 6 &&
-            dynamic.scissors.size() == 1 && dynamic.viewports.size() == 1) {
-            const auto region = *draw_region();
-            if (region.extent.width && region.extent.height) {
-                spatial_ao->Filter(cb_descs[0].first, cb_descs[0].second.view_info, image_infos[1],
-                    buffer_infos[0], push_data.scene_size, state.width, state.height, region);
-                spatial_ao->NoteGather(cb_descs[0].first, image_infos[1]);
-            } else {
-                spatial_ao->WarnUnsupported(fmt::format("empty region {},{} {}x{}",
-                    region.offset.x, region.offset.y, region.extent.width, region.extent.height));
-            }
-        } else {
-            spatial_ao->WarnUnsupported(fmt::format(
-                "cb={} colors={} layers={} ps_buffers={} ps_images={} images={} buffers={} "
-                "scissors={} viewports={}",
-                bool(cb_descs[0].first), state.num_color_attachments, state.num_layers,
-                ps_info->buffers.size(), ps_info->images.size(),
-                image_infos.size(), buffer_infos.size(), dynamic.scissors.size(),
-                dynamic.viewports.size()));
-        }
-    }
-    if (!specular_capture_directory.empty()) {
-        const bool written = capture_specular_targets(specular_capture_directory, "native");
-        if (written) {
-            std::ofstream complete(specular_capture_directory / "complete.txt");
-            complete << "native directional draw; GGX not active\n";
-            complete.close();
-            if (!complete)
-                std::printf("Specular capture: completion marker write failed\n");
-        } else {
-            std::printf("Specular capture: native output failed; dump incomplete\n");
-        }
-        FrameCapture::Note(written ? "\n  captured native directional lighting output"
-                                   : "\n  native directional lighting output capture failed");
-    }
-    if (sky_candidate && FrameCapture::Active() && cb_descs[0].first) {
-        const auto& sky = texture_cache.GetImage(cb_descs[0].first);
-        if (sky.info.pixel_format == vk::Format::eR16G16B16A16Sfloat) {
-            if (const char* dir = std::getenv("BB_CAPTURE_DIR")) {
-                // Read the rendered dome, not a cleared target or post-tonemap upscaler input.
-                scheduler.EndRendering();
-                texture_cache.DumpImagesAt(sky.info.guest_address, dir);
-                FrameCapture::Note("\n  captured sky HDR immediately after dome draw");
-            }
-        }
-    }
-    if (ps_info && cb_descs[0].first &&
-        (ps_info->pgm_hash == 0xf55643de || ps_info->pgm_hash == 0xfbe7c4b6 ||
-         ps_info->pgm_hash == 0xe80526cc || ps_info->pgm_hash == 0x9e1cb278)) {
-        const auto first_buffer = [&](const Shader::Info& info) {
-            u32 first = 0;
-            for (const auto* stage : pipeline->GetStages()) {
-                if (stage == &info) break;
-                if (stage) first += u32(stage->buffers.size());
-            }
-            return first;
-        };
-        const u32 pixel = first_buffer(*ps_info), vertex = first_buffer(vs_info);
-        if (!ps_info->buffers.empty() && pixel < buffer_infos.size()) {
-            const auto& constants = buffer_infos[pixel];
-            const u32 offset = push_data.buf_offsets[pixel];
-            if (ps_info->pgm_hash == 0xf55643de) {
-                depth_of_field->Camera(constants, offset);
-            } else if (ps_info->pgm_hash == 0xfbe7c4b6 &&
-                       ps_info->images.size() == 3 && image_infos.size() >= 3) {
-                depth_of_field->Encode(cb_descs[0].first, image_infos[1]);
-            } else if (ps_info->pgm_hash == 0xe80526cc &&
-                       vs_info.pgm_hash == 0x7e956bc3 &&
-                       !vs_info.buffers.empty() && vertex < buffer_infos.size()) {
-                depth_of_field->Kernel(
-                    texture_cache.GetImage(cb_descs[0].first).info.guest_address,
-                    constants, offset, buffer_infos[vertex], push_data.buf_offsets[vertex]);
-            } else if (ps_info->pgm_hash == 0x9e1cb278 &&
-                       vs_info.pgm_hash == 0xd3ca03f3 &&
-                       ps_info->images.size() == 2 && image_infos.size() >= 2 &&
-                       state.num_color_attachments == 1 && state.num_layers == 1) {
-                depth_of_field->Composite(
-                    cb_descs[0].first, ps_info->images[0].GetSharp(*ps_info).Address(),
-                    ps_info->images[1].GetSharp(*ps_info).Address(), image_infos[0],
-                    constants, offset);
-            }
-        }
-    }
-    // Run after the actual draw, while its descriptors still identify this camera and pass.
-    if (ps_info && ps_info->pgm_hash == 0xf55643de && cb_descs[0].first &&
-        buffer_infos.size() >= 2 && image_infos.size() >= 2) {
-        volumetric_light->Integrate(
-            cb_descs[0].first, image_infos[0],
-            {.constants = buffer_infos[0].buffer,
-             .constants_offset = buffer_infos[0].offset,
-             .constants_range = buffer_infos[0].range,
-             .uniforms = buffer_infos[1].buffer,
-             .uniforms_offset = buffer_infos[1].offset,
-             .uniforms_range = buffer_infos[1].range,
-             .shadow_map = image_infos[1].imageView,
-             .shadow_layout = image_infos[1].imageLayout,
-             .constants_offset_word = push_data.buf_offsets[0]});
-    }
-    if (ps_info && ps_info->pgm_hash == 0xd92266b9 &&
-        !buffer_infos.empty() && !image_infos.empty()) {
-        volumetric_light->Tint(buffer_infos[0], push_data.buf_offsets[0] & 255u, image_infos[0]);
-    }
-    if (ps_info && (pipeline->GetGraphicsKey().mrt_mask & 3) == 3 &&
-        cb_descs[0].first && cb_descs[1].first && buffer_infos.size() >= 2) {
-        const u32 count = [&]() -> u32 {
-            switch (ps_info->pgm_hash) {
-            case 0x370174f7: case 0x7cc2c044: return 1;
-            case 0x186d69d5: case 0x600f86b0: return 2;
-            case 0xd22cbfd1: return 3;
-            case 0x3105494c: return 4;
-            case 0xd75fe2ff: return 5;
-            case 0x07d07cf3: return 6;
-            case 0xf2531727: return 7;
-            case 0xc6edb19a: return 8;
-            case 0xb59b4c4e: return 9;
-            case 0x505ebdbe: return 10;
-            case 0x22b357f3: return 11;
-            case 0x9f9ef267: return 12;
-            default: return 0;
-            }
-        }();
-        if (count != 0) {
-            const auto& v = vertex_binds;
-            const auto position = std::ranges::find(
-                v.attributes, 0u, &vk::VertexInputAttributeDescription2EXT::location);
-            const bool valid_position = position != v.attributes.end() &&
-                position->format == vk::Format::eR32G32B32A32Sfloat &&
-                position->binding < v.num_buffers &&
-                v.host_buffers[position->binding] && v.host_strides[position->binding] >= 16;
-            if (vs_info.pgm_hash != 0x8747a367 || num_indices != 4 || num_instances != 1 ||
-                !valid_position ||
-                (is_indexed && index_bind.type != vk::IndexType::eUint16 &&
-                 index_bind.type != vk::IndexType::eUint32)) {
-                static bool reported = false;
-                if (!reported) {
-                    std::printf("Point volumetric lighting: unsupported light-grid "
-                                "quad; draw omitted\n");
-                    reported = true;
-                }
-            } else {
-                const u32 pi = position->binding;
-                const u64 alignment = instance.StorageMinAlignment();
-                const u64 vertex_aligned = v.host_offsets[pi] & ~(alignment - 1);
-                const u32 vertex_adjustment = u32(v.host_offsets[pi] - vertex_aligned);
-                const vk::DescriptorBufferInfo vertices{v.host_buffers[pi], vertex_aligned,
-                                                        v.host_sizes[pi] + vertex_adjustment};
-                const u32 index_size = !is_indexed ? 0u :
-                    index_bind.type == vk::IndexType::eUint16 ? 2u : 4u;
-                const u64 index_aligned = index_bind.offset & ~(alignment - 1);
-                const u32 index_adjustment = u32(index_bind.offset - index_aligned);
-                const vk::DescriptorBufferInfo indices =
-                    is_indexed ? vk::DescriptorBufferInfo{index_bind.handle, index_aligned,
-                                                          index_adjustment + 4u * index_size}
-                               : vertices;
-                const auto& vp = regs.viewports[0];
-                volumetric_light->PointLights(
-                    {.constants = buffer_infos[0].buffer,
-                     .constants_offset = buffer_infos[0].offset,
-                     .constants_range = buffer_infos[0].range,
-                     .lights = buffer_infos[1].buffer,
-                     .lights_offset = buffer_infos[1].offset,
-                     .lights_range = buffer_infos[1].range,
-                     .offsets = push_data.buf_offsets[0]},
-                    count,
-                    {vertices,
-                     indices,
-                     vertex_adjustment + position->offset,
-                     u32(v.host_strides[pi]),
-                     index_adjustment,
-                     index_size,
-                     s32(first_vertex),
-                     {vp.xscale * target_scale[0], vp.yscale * target_scale[1],
-                      vp.xoffset * target_scale[0] + target_offset[0],
-                      vp.yoffset * target_scale[1] + target_offset[1]},
-                     DrawScissor(0)});
-            }
-        }
-    }
-    if (ps_info && ps_info->pgm_hash == 0xdda49e89 && vs_info.pgm_hash == 0xb28f5a56 &&
-        is_indexed && num_indices == 1824 && num_instances == 1 && first_vertex == 0) {
-        const auto& v = vertex_binds;
-        const auto position = std::ranges::find(v.attributes, 0u,
-            &vk::VertexInputAttributeDescription2EXT::location);
-        const auto normal = std::ranges::find(v.attributes, 1u,
-            &vk::VertexInputAttributeDescription2EXT::location);
-        u32 first_buffer = 0;
-        for (const auto* stage : pipeline->GetStages()) {
-            if (stage == &vs_info) break;
-            if (stage) first_buffer += u32(stage->buffers.size());
-        }
-        if (position != v.attributes.end() && normal != v.attributes.end() &&
-            position->format == vk::Format::eR32G32B32Sfloat &&
-            vs_info.buffers.size() >= 3 && !vs_info.buffers[0].IsSpecial() &&
-            !vs_info.buffers[1].IsSpecial() && !vs_info.buffers[2].IsSpecial() &&
-            first_buffer + 3 <= buffer_infos.size()) {
-            const auto pi = size_t(position - v.attributes.begin());
-            const auto ni = size_t(normal - v.attributes.begin());
-            const bool packed = normal->format == vk::Format::eR8G8B8A8Uint ||
-                                normal->format == vk::Format::eR8G8B8A8Sint;
-            const bool wide = normal->format == vk::Format::eR32G32B32A32Uint ||
-                              normal->format == vk::Format::eR32G32B32A32Sint;
-            const u64 position_bytes = 392 * v.host_strides[pi] + 12;
-            const u64 normal_bytes = 392 * v.host_strides[ni] + (packed ? 4 : 16);
-            if ((packed || wide) && v.host_strides[pi] >= 12 &&
-                v.host_strides[ni] >= (packed ? 4u : 16u) &&
-                v.host_sizes[pi] >= position_bytes && v.host_sizes[ni] >= normal_bytes) {
-                volumetric_light->Celestial({
-                    .positions = {v.host_buffers[pi], v.host_offsets[pi], position_bytes},
-                    .normals = {v.host_buffers[ni], v.host_offsets[ni], normal_bytes},
-                    .model = buffer_infos[first_buffer],
-                    .transforms = buffer_infos[first_buffer + 1],
-                    .scene = buffer_infos[first_buffer + 2],
-                    .vertex_stride = u32(v.host_strides[pi]),
-                    .normal_stride = u32(v.host_strides[ni]),
-                    .normal_word = packed ? 0u : 3u,
-                    .model_offset = push_data.buf_offsets[first_buffer],
-                    .transform_offset = push_data.buf_offsets[first_buffer + 1],
-                    .scene_offset = push_data.buf_offsets[first_buffer + 2],
-                });
-            }
-        }
-    }
-    if (ps_info && ps_info->pgm_hash == 0x32e47788 && cb_descs[0].first) {
-        volumetric_light->Scene(cb_descs[0].first);
-    }
+    EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
+    DepthOfFieldAfterDraw(pipeline, state);
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         FrameCapture::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances);
-        {
-            char dn[160];
-            const auto* hs = pipeline->GetStages()[u32(Shader::SwStage::TessellationControl)];
-            const auto* ds = pipeline->GetStages()[u32(Shader::SwStage::TessellationEval)];
-            std::snprintf(dn, sizeof(dn), "\n  drawend ps %08x idx %u z%u%u tess hs %08x ds %08x cp %u",
-                          u32(ps ? ps->pgm_hash : 0), num_indices,
-                          u32(regs.depth_control.depth_enable),
-                          u32(regs.depth_control.depth_write_enable), u32(hs ? hs->pgm_hash : 0),
-                          u32(ds ? ds->pgm_hash : 0), pipeline->GetGraphicsKey().patch_control_points);
-            FrameCapture::Note(dn);
-        }
         if (const auto& bc = regs.blend_control[0]; bc.enable && regs.color_buffers[0]) {
             char note[128];
             std::snprintf(note, sizeof(note), "\n  blend ps %08x idx %u: src %u dst %u func %u z %u%u",
@@ -3308,6 +2674,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     // Indirect arguments may be GPU-written: leave these draws on camera fallback.
     motion_draw = false;
+    capture_draw = false;
     motion_geometry = 0;
     PrepareRenderState(pipeline);
     NotifyUiDraw(pipeline);
@@ -3360,9 +2727,14 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.xoffset = push_data.xoffset*target_scale[0]+target_offset[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset = push_data.yoffset*target_scale[1]+target_offset[1];
+    if (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexCapture) {
+        push_data.motion_param = 0;
+    }
     pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
                             {buffer_infos.data(), buffer_infos.size()});
-    if (pipeline->GetGraphicsKey().motion_vectors) {
+    if (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexCapture) {
+        rt_shadow->BindAddresses(pipeline->GetLayout(), pipeline->GetGraphicsKey().motion_vectors);
+    } else if (pipeline->GetGraphicsKey().motion_vectors) {
         object_motion->BindAddresses(pipeline->GetLayout());
     }
     draw_jitter = {};
@@ -3467,6 +2839,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         }
     };
     if (upscaler->Enabled()) {
+        EffectsBeforeUpscaler(cs.pgm_hash);
         upscaler->OnDispatch(cs.pgm_hash);
     }
     bool hle;
@@ -3964,6 +3337,18 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
     sampler_lod_bias = 0.0f;
     pipeline_is_compute = pipeline->IsCompute();
+    ui_movie_draw = !pipeline->IsCompute() &&
+                    (ui_pass.active ||
+                     UiComposition::MovieShader(static_cast<const GraphicsPipeline*>(pipeline)
+                                                    ->GetStage(Shader::SwStage::Vertex)
+                                                    .pgm_hash));
+    if (ui_movie_draw) {
+        const auto& blend = Regs().blend_control[0];
+        // Weighted by the texel's alpha, a transparent gap adds nothing.
+        ui_additive = blend.enable &&
+                      blend.color_dst_factor == AmdGpu::BlendControl::BlendFactor::One &&
+                      blend.color_src_factor != AmdGpu::BlendControl::BlendFactor::SrcAlpha;
+    }
     if (!pipeline->IsCompute() && !BbToggle::Disabled(BbToggle::SceneMipBias) &&
         std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
                       0xff) >= 5) {
@@ -4197,7 +3582,7 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         // If there are no bindings, there is nothing further to do.
         return;
     }
-    if (motion_draw && !guest_buffers.empty()) {
+    if ((motion_draw || capture_draw) && !guest_buffers.empty()) {
         // Include every stream: identical position buffers can be paired with different
         // skinning/instance data. Index topology and base offsets are matched separately.
         motion_geometry = ready ? ready->buffers_hash
@@ -4257,11 +3642,31 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         }
     }
 
-    // Map buffers for merged ranges
+    const auto key_of = [&](VAddr base) -> u64 {
+        for (u32 j = 0; j < packet_vsharps.size() && j < packet_vkeys.size(); ++j) {
+            if (packet_vsharps[j].base_address == base) {
+                return packet_vkeys[j];
+            }
+        }
+        return 0;
+    };
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        u64 key = packet_vkeys.empty() ? 0 : 0x9E3779B97F4A7C15ull;
+        for (const auto& buffer : guest_buffers) {
+            if (!key) {
+                break;
+            }
+            if (buffer.base_address == 0 || buffer.GetSize() == 0 ||
+                buffer.base_address < range.base_address || buffer.base_address >= range.end_address) {
+                continue;
+            }
+            const u64 part = key_of(buffer.base_address);
+            key = part ? (key ^ part) * 0x100000001B3ull | 1 : 0;
+        }
         std::tie(range.buffer, range.offset) =
-            buffer_cache.ObtainBuffer(range.base_address, size, false);
+            key ? BindByObject(key, range.base_address, size)
+                : buffer_cache.ObtainBuffer(range.base_address, size, false);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
     }
 
@@ -4294,6 +3699,34 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     v.num_buffers = static_cast<u32>(guest_buffers.size());
 }
 
+std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindByObject(u64 key, VAddr base, u64 size) {
+    const u64 slot_key = (key ^ base ^ (size << 32)) * 0x9E3779B97F4A7C15ull;
+    auto& bind = object_binds[slot_key >> 52];
+    if (bind.key == key && bind.base == base && bind.size == size &&
+        bind.generation == buffer_cache.BindGeneration()) {
+        if (!BbEngine::GxRecords::Compared() && (++object_bind_checks & 63) != 0) {
+            buffer_cache.NoteBound(base, size);
+            BbEngine::GxRecords::NoteBind(true, false, true, base, size);
+            return {bind.buffer, bind.offset};
+        }
+        const u64 uploads = VideoCore::BufferCache::obtain_paths[5];
+        const auto found = buffer_cache.ObtainBuffer(base, u32(size), false);
+        const bool same = found.first == bind.buffer && found.second == bind.offset &&
+                          VideoCore::BufferCache::obtain_paths[5] == uploads;
+        BbEngine::GxRecords::NoteBind(same, true, same, base, size);
+        if (!same) {
+            bind.key = 0;
+        }
+        return found;
+    }
+    const auto found = buffer_cache.ObtainBuffer(base, u32(size), false);
+    BbEngine::GxRecords::NoteBind(false, false, true, base, size);
+    if (buffer_cache.Persistent(found.first)) {
+        bind = {key, base, size, buffer_cache.BindGeneration(), found.first, found.second};
+    }
+    return found;
+}
+
 void Rasterizer::BindIndexBuffer(u32 index_offset) {
     ResolveIndexBuffer(index_offset);
     EmitIndexBuffer();
@@ -4320,7 +3753,8 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [buffer, offset] =
-        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+        packet_index_key ? BindByObject(packet_index_key, index_address, index_buffer_size)
+                         : buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
     index_bind = {buffer->Handle(), offset, index_type};
 }
@@ -4429,7 +3863,6 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
     runtime.CopyColorAndDepth(&src_image, &dst_image);
-    texture_cache.QueueImageDownload(desc0.is_written ? image0_id : image1_id);
     return true;
 }
 
@@ -4556,10 +3989,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
             if (!desc.IsSpecial()) {
-                if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
-                    FrameCapture::Buffer(stage.pgm_hash, binding.buffer, ring->address,
-                                         reinterpret_cast<const void*>(ring->address), ring->size);
-                }
                 if (ring->size == 864 && gbuffer_draw &&
                     memory->IsValidGpuMapping(ring->address, 0)) {
                     camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
@@ -4674,8 +4103,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                u64 view_key = 0;
+                if (!desc.is_written && !desc.is_formatted) {
+                    for (u32 k = 0; k + 1 < packet_view_keys.size(); k += 2) {
+                        if (packet_view_keys[k] == vsharp.base_address) {
+                            view_key = packet_view_keys[k + 1];
+                            break;
+                        }
+                    }
+                }
+                const auto [buffer, offset] =
+                    view_key ? BindByObject(view_key, vsharp.base_address, size)
+                             : buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                                         desc.is_formatted);
                 TraceShaderBinding(stage, vsharp.base_address, size, desc.is_written,
                                    buffer_cache.IsInPlace(vsharp.base_address, size),
                                    buffer_cache.IsAnyInPlace(vsharp.base_address, size));
@@ -4963,7 +4403,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             set_write.descriptorType = vk::DescriptorType::eSampledImage;
             set_write.pImageInfo = &image_infos[first_image_idx + i];
         }
-        BindSamplers(stage, prepared, binding, write_index);
+        BindSamplers(stage, prepared, binding, write_index, false);
         return;
     }
     BB_SECTION(TexFull);
@@ -4979,6 +4419,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     image_desc_overflow.clear();
     image_desc_storage.clear();
     ++bind_epoch;
+    bool ui_replaced = false; ///< a 4K menus replacement is bound (SmoothUiSampler)
+    bool ui_other = false;    ///< and a sampled image that isn't one
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
     // TextureSetMemo: what this call resolves, to remember when the set qualifies.
@@ -5202,6 +4644,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                     continue;
                 }
             }
+            if (image.ui_key && !is_storage && !binding.force_general && !binding.is_target) {
+                if (VideoCore::Image* ui = texture_cache.UiReplacement(image)) {
+                    barrier |= runtime.Transit(ui, vk::ImageLayout::eShaderReadOnlyOptimal,
+                                               vk::PipelineStageFlagBits2::eAllCommands,
+                                               vk::AccessFlagBits2::eShaderRead);
+                    VideoCore::ImageViewInfo ui_view = desc.view_info;
+                    ui_view.format = ui->info.pixel_format;
+                    ui_view.type = AmdGpu::ImageType::Color2D;
+                    ui_view.range = {};
+                    ui_view.range.extent.levels = ui->info.resources.levels;
+                    auto& view = ui->FindView(ui_view, false);
+                    image.usage.texture = 1u;
+                    image_infos.emplace_back(VK_NULL_HANDLE, *view.image_view, ui->backing->state.layout);
+                    set_ok = false;
+                    ui_replaced = true;
+                    continue;
+                }
+            }
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
             // storage and feedback loop doesn't make sense for them
@@ -5232,13 +4692,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             }
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
+            ui_other |= !is_storage;
             if (FrameCapture::Active()) {
                 FrameCapture::Sampled(image.info, is_storage);
-                char tn[96];
-                std::snprintf(tn, sizeof(tn), "\n  drawtex %llx %ux%u",
-                              static_cast<unsigned long long>(image.info.guest_address),
-                              image.info.size.width, image.info.size.height);
-                FrameCapture::Note(tn);
             }
 
             vk::ImageView view = *image_view.image_view;
@@ -5293,7 +4749,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         binding.unified += array_size;
     }
 
-    BindSamplers(stage, prepared, binding, write_index);
+    // The samplers aren't tied to the images here: with another image bound, its sampler may be
+    // the one changed, so the replacement is then sampled as the game's own textures are.
+    BindSamplers(stage, prepared, binding, write_index, ui_replaced && !ui_other);
 }
 
 // bbport: the PS4 build samples most scene textures with little or no anisotropic filtering.
@@ -5335,6 +4793,48 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
         sharp.xy_mag_filter.Assign(AmdGpu::Filter::AnisoLinear);
     }
     sharp.max_aniso.Assign(ratio);
+}
+
+// Scaleform samples its sheets and glyphs with point filtering and no mip filter, made for a 1080p
+// stage drawn texel for texel. With 4K menus the art it samples is four times larger and drawn at a
+// quarter of its size (and Sharp UI scales the stage to the output): point sampling skipped most of
+// its texels and the menus came out blocky. Draws of a replacement filter linearly, between mips
+// too. While 4K menus are loaded, the menu draws of the game's own textures (the HUD's sheet is
+// never replaced: key prompts are drawn into it) filter linearly as well, as Sharp UI scales them
+// up to the output, except additive ones: their sheets' transparent gaps carry colour, and
+// filtering read it past the sprite's edge (a faint box around the HUD bars' glows).
+// BB_UI_SMOOTH=0 keeps the game's.
+float Rasterizer::SmoothUiSampler(AmdGpu::Sampler& sharp, bool is_depth, bool ui_replaced) const {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_UI_SMOOTH");
+        return !(env && env[0] == '0');
+    }();
+    // The replacements' mip bias. A menu draws them at a fraction of their size, between two
+    // levels, and the linear mip filter blends in the smaller one, which has hardly more detail
+    // than the game's own texture; biased, the sharper level dominates.
+    static const float bias = [] {
+        const char* env = std::getenv("BB_UI_LOD_BIAS");
+        return env && *env ? std::clamp(std::strtof(env, nullptr), -2.0f, 0.0f) : -0.5f;
+    }();
+    const bool own_texture = ui_movie_draw && !ui_additive && VideoCore::TextureCache::UiReplacementsLoaded();
+    if (is_depth || !enabled || !(ui_replaced || own_texture)) {
+        return 0.0f;
+    }
+    const auto smooth = [](AmdGpu::Filter filter) {
+        return filter == AmdGpu::Filter::Point       ? AmdGpu::Filter::Bilinear
+               : filter == AmdGpu::Filter::AnisoPoint ? AmdGpu::Filter::AnisoLinear
+                                                      : filter;
+    };
+    sharp.xy_min_filter.Assign(smooth(sharp.xy_min_filter));
+    sharp.xy_mag_filter.Assign(smooth(sharp.xy_mag_filter));
+    if (ui_replaced) {
+        // The game's LOD range was set for a single level; the replacement's view bounds the chain.
+        sharp.mip_filter.Assign(AmdGpu::MipFilter::Linear);
+        sharp.min_lod.Assign(0);
+        sharp.max_lod.Assign(0xfff);
+        return bias;
+    }
+    return 0.0f;
 }
 
 vk::Sampler Rasterizer::CachedSampler(const AmdGpu::Sampler& sharp, bool is_depth,
@@ -5402,15 +4902,17 @@ bool Rasterizer::PointReadsNative(const Shader::Info& stage, const PreparedStage
 }
 
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
-                              Shader::Backend::Bindings& binding, u32& write_index) {
+                              Shader::Backend::Bindings& binding, u32& write_index,
+                              bool ui_replaced) {
     BB_SECTION(Samplers);
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
         ForceAnisotropy(ssharp, sampler.is_depth);
+        const float ui_bias = SmoothUiSampler(ssharp, sampler.is_depth, ui_replaced);
         const auto vk_sampler = CachedSampler(ssharp, sampler.is_depth,
-                                              sampler.is_depth ? 0.0f : sampler_lod_bias);
+                                              sampler.is_depth ? 0.0f : sampler_lod_bias + ui_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
@@ -5440,7 +4942,7 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
     }
     sig.mrt_mask = key.mrt_mask;
     sig.num_samples = key.num_samples;
-    sig.motion = key.motion_vectors;
+    sig.motion = (key.motion_vectors & Shader::MotionVectors::VertexOutputs) != 0;
     sig.scene_started = scene_started;
     sig.raster_scaling = upscaler->RasterScaling();
     sig.upscaler_state = upscaler->RedirectState();
@@ -6099,7 +5601,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto native = SceneResolution::Native();
+        target_scale = {float(size.width) / float(native.width), float(size.height) / float(native.height)};
         ui_pass.active = false; // the memo keeps this scale for the pass
     }
     if (FrameCapture::Active()) {
@@ -6114,7 +5617,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
     }
     // bbport: object motion vector attachment of G-buffer pipelines.
-    if (key.motion_vectors) {
+    if (key.motion_vectors & Shader::MotionVectors::VertexOutputs) {
         object_motion->Attach(state, state.width, state.height);
     }
     return state;
@@ -6475,9 +5978,9 @@ vk::Rect2D Rasterizer::DrawScissor(u32 i) const {
         scsr.top_left_x = std::max(scsr.top_left_x, s16(regs.viewport_scissors[i].top_left_x));
         scsr.top_left_y = std::max(scsr.top_left_y, s16(regs.viewport_scissors[i].top_left_y));
         scsr.bottom_right_x = std::min(AmdGpu::Scissor::Clamp(scsr.bottom_right_x),
-                                      regs.viewport_scissors[i].bottom_right_x);
+                                       regs.viewport_scissors[i].bottom_right_x);
         scsr.bottom_right_y = std::min(AmdGpu::Scissor::Clamp(scsr.bottom_right_y),
-                                      regs.viewport_scissors[i].bottom_right_y);
+                                       regs.viewport_scissors[i].bottom_right_y);
     }
     if (ui_full_scissor[0] && scsr.top_left_x <= 0 && scsr.top_left_y <= 0 &&
         scsr.top_left_x + s32(scsr.GetWidth()) >= s32(ui_full_scissor[0]) &&
@@ -6490,8 +5993,7 @@ vk::Rect2D Rasterizer::DrawScissor(u32 i) const {
         const s32 y0 = std::max(0, scale(scsr.top_left_y, target_scale[1]) + s32(target_offset[1]));
         const s32 x1 = scale(scsr.top_left_x + s32(scsr.GetWidth()), target_scale[0]) + s32(target_offset[0]);
         const s32 y1 = scale(scsr.top_left_y + s32(scsr.GetHeight()), target_scale[1]) + s32(target_offset[1]);
-        return {.offset = {x0, y0},
-                .extent = {u32(std::max(x1 - x0, 0)), u32(std::max(y1 - y0, 0))}};
+        return {.offset = {x0, y0}, .extent = {u32(std::max(x1 - x0, 0)), u32(std::max(y1 - y0, 0))}};
     }
     return {.offset = {scsr.top_left_x, scsr.top_left_y},
             .extent = {scsr.GetWidth(), scsr.GetHeight()}};
@@ -6499,6 +6001,7 @@ vk::Rect2D Rasterizer::DrawScissor(u32 i) const {
 
 void Rasterizer::UpdateViewportScissorState() const {
     const auto& regs = Regs();
+
     boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS> viewports;
     boost::container::static_vector<vk::Rect2D, AmdGpu::NUM_VIEWPORTS> scissors;
 
@@ -6699,18 +6202,9 @@ void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
                    regs.primitive_restart_index == 0xFFFFFFFF,
                "Primitive restart index other than -1 is not supported yet");
 
-    auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
-                         ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
-                         : vk::CullModeFlagBits::eNone;
-    // bbport: BB_SHADOW_NOCULL=1 draws both faces into the shadow map (the 4096x4096 depth pass).
-    static const bool shadow_no_cull = [] {
-        const char* env = std::getenv("BB_SHADOW_NOCULL");
-        return env && env[0] == '1';
-    }();
-    if (shadow_no_cull && regs.depth_buffer.DepthValid() && regs.depth_buffer.Pitch() == 4096 &&
-        regs.depth_buffer.Height() == 4096) {
-        cull_mode = vk::CullModeFlagBits::eNone;
-    }
+    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
+                               ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
+                               : vk::CullModeFlagBits::eNone;
     const auto front_face = LiverpoolToVK::FrontFace(regs.polygon_control.front_face);
 
     dynamic_state.SetPrimitiveRestartEnabled(prim_restart);
@@ -6885,4 +6379,142 @@ void Rasterizer::NoteFrameStart() {
     }
 }
 
+bool Rasterizer::SkyBeforeRendering(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline,
+                                    bool is_indexed, u32 index_offset,
+                                    const PreparedDraw* prepared, bool inputs_resolved) {
+    const auto* sky_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (!sky_seam->Enabled() || !sky_ps || sky_ps->pgm_hash != 0xdda49e89 ||
+        pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash != 0xb28f5a56 || !is_indexed ||
+        regs.num_indices != 1920 || regs.num_instances.NumInstances() != 1 ||
+        !instance.IsVertexInputDynamicState()) {
+        return false;
+    }
+    const auto [vertex, instance_index] = GetDrawOffsets(
+        regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
+    if (vertex != 0 || instance_index != 0) {
+        return false;
+    }
+    if (!inputs_resolved) {
+        ResolveVertexBuffers(pipeline, prepared);
+        ResolveIndexBuffer(index_offset);
+    }
+    auto& v = vertex_binds;
+    const auto position =
+        std::ranges::find(v.attributes, 0u, &vk::VertexInputAttributeDescription2EXT::location);
+    const auto uv =
+        std::ranges::find(v.attributes, 3u, &vk::VertexInputAttributeDescription2EXT::location);
+    if (position == v.attributes.end() || uv == v.attributes.end() ||
+        position->format != vk::Format::eR32G32B32Sfloat ||
+        uv->format != vk::Format::eR16G16Sint || position->offset != 0 || uv->offset != 0 ||
+        position->binding >= v.num_buffers || uv->binding >= v.num_buffers) {
+        return true;
+    }
+    const auto pi = position->binding, ui = uv->binding;
+    if (v.host_strides[pi] != 24 || v.host_strides[ui] != 24 ||
+        v.host_sizes[pi] != v.host_sizes[ui] || v.host_sizes[pi] != 1824 * 24 ||
+        !v.host_buffers[pi] || !v.host_buffers[ui]) {
+        return true;
+    }
+    const u32 count = u32(v.host_sizes[pi] / 24);
+    const auto result = sky_seam->Correct(
+        {v.host_buffers[pi], v.host_offsets[pi], 484 * 24 + 12},
+        {v.host_buffers[ui], v.host_offsets[ui], (count - 1) * 24 + 4}, 24, 24, count);
+    if (!result) {
+        return true;
+    }
+    if (sky_zenith->Enabled()) {
+        u32 first_image = 0;
+        for (const auto* stage : pipeline->GetStages()) {
+            if (stage == sky_ps) {
+                break;
+            }
+            if (stage) {
+                first_image += u32(stage->images.size());
+            }
+        }
+        for (u32 i = 0; i < sky_ps->images.size(); ++i) {
+            const auto sharp = sky_ps->images[i].GetSharp(*sky_ps);
+            const u32 index = first_image + i;
+            if (sharp.base_level != 0 || sharp.last_level != 11 || index >= image_infos.size()) {
+                continue;
+            }
+            const auto image = std::ranges::find_if(bound_images, [&](VideoCore::ImageId id) {
+                if (!id) {
+                    return false;
+                }
+                const auto& info = texture_cache.GetImage(id).info;
+                return info.guest_address == sharp.Address() &&
+                       info.pixel_format == vk::Format::eBc1RgbaSrgbBlock &&
+                       info.size.width == 2048 && info.size.height == 512 &&
+                       info.resources.layers == 1 && info.resources.levels == 12;
+            });
+            if (image == bound_images.end()) {
+                continue;
+            }
+            runtime.FlushBarriers();
+            if (const auto view =
+                    sky_zenith->Filter(image_infos[index], sky_seam->VerificationBuffer(), count)) {
+                image_infos[index].imageView = view;
+                image_infos[index].imageLayout = vk::ImageLayout::eGeneral;
+            }
+            break;
+        }
+    }
+    v.host_buffers[ui] = result;
+    v.host_offsets[ui] = 0;
+    v.host_sizes[ui] = count * 4;
+    v.host_strides[ui] = 4;
+    for (auto& binding : v.bindings) {
+        if (binding.binding == ui) {
+            binding.stride = 4;
+        }
+    }
+    return true;
+}
+
+void Rasterizer::DepthOfFieldAfterDraw(const GraphicsPipeline* pipeline, const RenderState& state) {
+    const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (!ps_info || !cb_descs[0].first ||
+        (ps_info->pgm_hash != 0xf55643de && ps_info->pgm_hash != 0xfbe7c4b6 &&
+         ps_info->pgm_hash != 0xe80526cc && ps_info->pgm_hash != 0x9e1cb278)) {
+        return;
+    }
+    const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+    const auto first_buffer = [&](const Shader::Info& info) {
+        u32 first = 0;
+        for (const auto* stage : pipeline->GetStages()) {
+            if (stage == &info) {
+                break;
+            }
+            if (stage) {
+                first += u32(stage->buffers.size());
+            }
+        }
+        return first;
+    };
+    const u32 pixel = first_buffer(*ps_info), vertex = first_buffer(vs_info);
+    if (ps_info->buffers.empty() || pixel >= buffer_infos.size()) {
+        return;
+    }
+    const auto& constants = buffer_infos[pixel];
+    const u32 offset = push_data.buf_offsets[pixel];
+    if (ps_info->pgm_hash == 0xf55643de) {
+        depth_of_field->Camera(constants, offset);
+    } else if (ps_info->pgm_hash == 0xfbe7c4b6 && ps_info->images.size() == 3 &&
+               image_infos.size() >= 3) {
+        depth_of_field->Encode(cb_descs[0].first, image_infos[1]);
+    } else if (ps_info->pgm_hash == 0xe80526cc && vs_info.pgm_hash == 0x7e956bc3 &&
+               !vs_info.buffers.empty() && vertex < buffer_infos.size()) {
+        depth_of_field->Kernel(texture_cache.GetImage(cb_descs[0].first).info.guest_address,
+                               constants, offset, buffer_infos[vertex],
+                               push_data.buf_offsets[vertex]);
+    } else if (ps_info->pgm_hash == 0x9e1cb278 && vs_info.pgm_hash == 0xd3ca03f3 &&
+               ps_info->images.size() == 2 && image_infos.size() >= 2 &&
+               state.num_color_attachments == 1 && state.num_layers == 1) {
+        depth_of_field->Composite(cb_descs[0].first,
+                                  ps_info->images[0].GetSharp(*ps_info).Address(),
+                                  ps_info->images[1].GetSharp(*ps_info).Address(), image_infos[0],
+                                  constants, offset);
+    }
+}
 } // namespace Vulkan

@@ -299,8 +299,6 @@ void CameraMotion::OnConstants(const float* data) {
     if (use_computed_inverse) {
         pass_camera.inv_view = computed_inverse;
     }
-    // bbport: BB_CAMERA_LOG=1 prints the camera position every 100 ms (scripted tests of how far
-    // the player moves in a given time at different frame rates).
     if (camera_log) {
         using Clock = std::chrono::steady_clock;
         static const auto start = Clock::now();
@@ -339,7 +337,11 @@ void CameraMotion::OnConstants(const float* data) {
                         pass_camera.proj[1] < 0.0f ? "-y" : "+y");
         }
     }
-    pass_camera.valid = pass_camera.proj[0] != 0.0f && pass_camera.proj[1] != 0.0f;
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); });
+    };
+    pass_camera.valid = pass_camera.proj[0] != 0.0f && pass_camera.proj[1] != 0.0f && finite(pass_camera.proj) &&
+                        finite(pass_camera.view) && finite(pass_camera.inv_view);
     const std::array<u32, 2> size{u32(data[4]), u32(data[5])};
     if (size != render_size) {
         std::printf("Camera motion: scene render size %ux%u\n", size[0], size[1]);

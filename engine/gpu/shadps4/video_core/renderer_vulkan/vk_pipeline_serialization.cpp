@@ -19,33 +19,21 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
-#include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
-#include "video_core/renderer_vulkan/vk_pom_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
 static constexpr u32 MotionShaderBinaryVersion = 8u; // runtime address descriptor, set 1
-static constexpr u32 PomShaderBinaryVersion = 9u; // valid upper bracket for dithered first hit
+static constexpr u32 CaptureShaderBinaryVersion = 9u;
 static constexpr u32 ShaderMetaVersion = 8u; // bbport: HwFragmentRuntimeInfo::depth_first
 static constexpr u32 PipelineKeyVersion = 6u; // pointer-free pipeline state + generated fragment
 } // namespace Serialization
 
 namespace Vulkan {
-
-static u32 ShaderBinaryVersion(const Shader::Info& info,
-                              const Shader::StageSpecialization& spec) {
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return Serialization::MotionShaderBinaryVersion;
-    }
-    if (info.hw_stage == Shader::HwStage::Fragment && Pom::IsSupportedShader(info.pgm_hash)) {
-        return Serialization::PomShaderBinaryVersion;
-    }
-    return Serialization::ShaderBinaryVersion;
-}
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
@@ -91,7 +79,12 @@ std::vector<u8> SerializeShaderMeta(const Shader::Info& info, const Shader::Stag
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(ShaderBinaryVersion(info, spec));
+    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
+                               spec.runtime_info.hw.vs.motion_vectors;
+    const bool vertex_capture = vertex_motion && (spec.runtime_info.hw.vs.motion_vectors & 2) != 0;
+    meta.Write(vertex_capture ? Serialization::CaptureShaderBinaryVersion
+                             : vertex_motion ? Serialization::MotionShaderBinaryVersion
+                             : Serialization::ShaderBinaryVersion);
     meta.Write(perm_hash);
     meta.Write(perm_idx);
     spec.Serialize(ar);
@@ -126,7 +119,12 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(ShaderBinaryVersion(info, spec));
+    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
+                               spec.runtime_info.hw.vs.motion_vectors;
+    const bool vertex_capture = vertex_motion && (spec.runtime_info.hw.vs.motion_vectors & 2) != 0;
+    meta.Write(vertex_capture ? Serialization::CaptureShaderBinaryVersion
+                             : vertex_motion ? Serialization::MotionShaderBinaryVersion
+                             : Serialization::ShaderBinaryVersion);
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -163,7 +161,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     meta.Read(binary_version);
     if (binary_version != Serialization::ShaderBinaryVersion &&
         binary_version != Serialization::MotionShaderBinaryVersion &&
-        binary_version != Serialization::PomShaderBinaryVersion) {
+        binary_version != Serialization::CaptureShaderBinaryVersion) {
         return false;
     }
 
@@ -179,8 +177,14 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
         return false;
     }
 
-    // Retain unrelated v7/v8 binaries; supported POM fragments must rebuild old patched binaries.
-    if (binary_version != ShaderBinaryVersion(info, spec)) {
+    // Only old motion vertex binaries embed process-local addresses. Other v7 shaders remain
+    // reusable; v8 motion binaries load the current addresses from a renderer-owned descriptor.
+    const bool vertex_motion = info.hw_stage == Shader::HwStage::Vertex &&
+                               spec.runtime_info.hw.vs.motion_vectors;
+    const bool vertex_capture = vertex_motion && (spec.runtime_info.hw.vs.motion_vectors & 2) != 0;
+    if (binary_version != (vertex_capture ? Serialization::CaptureShaderBinaryVersion
+                             : vertex_motion ? Serialization::MotionShaderBinaryVersion
+                                        : Serialization::ShaderBinaryVersion)) {
         return false;
     }
 
@@ -382,6 +386,24 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar, bool legacy
           vs_runtime.hw_stage == Shader::HwStage::Vertex && vs_runtime.hw.vs.motion_vectors)) {
         return false;
     }
+    static const bool motion_layout_guard = [] {
+        const char* env = std::getenv("BB_WARMUP_MOTION_GUARD");
+        return !(env && env[0] == '0');
+    }();
+    if (motion_layout_guard && !sel.graphics_key.motion_vectors &&
+        sel.graphics_key.stage_hashes[u32(Shader::SwStage::Vertex)] &&
+        vs_runtime.hw_stage == Shader::HwStage::Vertex && vs_runtime.hw.vs.motion_vectors) {
+        static std::atomic<u32> left_out{0};
+        const u32 count = left_out.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 20) {
+            std::printf("GPU cache: pipeline key %u left out, a motion vertex shader without motion in "
+                        "its key: vs 0x%016llx, fs 0x%016llx (BB_WARMUP_MOTION_GUARD=0: built)\n",
+                        count,
+                        (unsigned long long)sel.graphics_key.stage_hashes[u32(Shader::SwStage::Vertex)],
+                        (unsigned long long)sel.graphics_key.stage_hashes[u32(Shader::SwStage::Fragment)]);
+        }
+        return false;
+    }
 
     if (graphics_pipelines.contains(sel.graphics_key)) {
         return true;
@@ -407,15 +429,6 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     if (!LoadShaderMeta(ar, program->info, fetch, spec, perm_idx, expected_hash)) {
         return false;
     }
-    // Standalone modules include the ordinary variants inspected before selecting
-    // object-motion pipelines, even though no final pipeline references those variants.
-    // Compute pipelines use selection slot zero, not SwStage::Compute.
-    const size_t record_stage = program->info.hw_stage == Shader::HwStage::Compute ?
-        0u : u32(program->info.sw_stage);
-    if (stage == MaxShaderStages) stage = record_stage;
-    if (stage >= MaxShaderStages || record_stage != stage) {
-        return false;
-    }
 
     std::vector<u32> spv;
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
@@ -424,31 +437,21 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
         return false;
     }
     // Reject truncated instructions before passing cached SPIR-V to the driver.
+    bool discards = false;
     for (size_t word = 5; word < spv.size();) {
         const u32 count = spv[word] >> 16;
         if (!count || count > spv.size() - word) {
             return false;
         }
+        const u32 opcode = spv[word] & 0xffff;
+        discards |= opcode == 252u || opcode == 5380u;
         word += count;
     }
 
-    const bool fragment = program->info.sw_stage == Shader::SwStage::Fragment;
-    if (fragment) {
-        PatchSsrComposite(program->info.pgm_hash, Shader::HwStage::Fragment, spv);
-        Pom::PatchPom(program->info.pgm_hash, true, spv);
-        auto ggx = DirectionalGgxModule(program->info.pgm_hash, true, spv);
-        if (!ggx.empty()) spv = std::move(ggx);
-    }
-    const bool gtao_stage = fragment &&
-                            IsGtaoReplacement(program->info.pgm_hash, Shader::HwStage::Fragment);
-    if (gtao_stage) {
-        LOG_WARNING(Render_Vulkan, "SSAO shader {:#x} replaced with GTAO (cached pipeline)",
-                    program->info.pgm_hash);
-    }
-    const bool ssr_stage = fragment &&
-                           IsSsrReplacement(program->info.pgm_hash, Shader::HwStage::Fragment);
     auto it = program_cache.find(program->info.pgm_hash);
     Program* target = it == program_cache.end() ? program.get() : it->second.get();
+    program->info.has_discard |= discards;
+    target->info.has_discard |= discards;
     vk::ShaderModule module;
     if (perm_idx < target->modules.size() && target->modules[perm_idx].module) {
         // The persisted index is part of the pipeline key. Equal specializations at other
@@ -458,22 +461,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
         }
         module = target->modules[perm_idx].module;
     } else {
-        const auto blur = NativeMotionBlurShader(program->info, profile, spec.start);
-        if (!blur.empty()) {
-            LOG_WARNING(Render_Vulkan, "Motion blur {:#x}: high-quality native filtering (cached)",
-                        program->info.pgm_hash);
-        }
-        CaptureSpecularModule(program->info.pgm_hash, perm_idx, spv);
+        const auto effect_shader = EffectShaders::Replacement(program->info, profile, spec.start);
+        const auto effect_patch =
+            effect_shader.empty() ? EffectShaders::Patched(program->info, spv) : std::nullopt;
+        const std::span<const u32> code = !effect_shader.empty() ? effect_shader
+                                          : effect_patch         ? std::span<const u32>(*effect_patch)
+                                                                 : std::span<const u32>(spv);
         const auto [result, compiled] = instance.GetDevice().createShaderModule(
-            gtao_stage
-                ? vk::ShaderModuleCreateInfo{.codeSize = GtaoFragmentShader().size_bytes(),
-                                             .pCode = GtaoFragmentShader().data()}
-            : !blur.empty()
-                ? vk::ShaderModuleCreateInfo{.codeSize = blur.size_bytes(), .pCode = blur.data()}
-            : ssr_stage
-                ? vk::ShaderModuleCreateInfo{.codeSize = sizeof(SSR_FRAG), .pCode = SSR_FRAG}
-                : vk::ShaderModuleCreateInfo{.codeSize = spv.size() * sizeof(u32),
-                                             .pCode = spv.data()});
+            {.codeSize = code.size_bytes(), .pCode = code.data()});
         if (result != vk::Result::eSuccess) {
             throw Serialization::CorruptData{"cached SPIR-V rejected by the driver"};
         }
@@ -784,46 +779,6 @@ void PipelineCache::WarmUp() {
         database.Save(Storage::BlobType::ShaderProfile, "profile", std::move(profile_data));
         std::scoped_lock lock{progress_mutex};
         precache_progress.loaded = 0;
-    }
-    if (!damaged) {
-        u32 restored = 0, rejected = 0;
-        const auto module_count = [&] {
-            size_t count = 0;
-            for (const auto& [_, program] : program_cache) {
-                for (const auto& module : program->modules) {
-                    count += bool(module.module);
-                }
-            }
-            return count;
-        };
-        const size_t before = module_count();
-        for (const auto& name : database.ListBlobs(Storage::BlobType::ShaderMeta)) {
-            sel = {.regs = regs};
-            try {
-                size_t used = 0;
-                const u64 hash = std::stoull(name, &used, 16);
-                if (used != name.size()) {
-                    ++rejected;
-                    LOG_WARNING(Render, "Skipping shader record with invalid name {}", name);
-                    continue;
-                }
-                std::vector<u8> data;
-                database.Load(Storage::BlobType::ShaderMeta, name, data);
-                Serialization::Archive ar{std::move(data)};
-                if (LoadPipelineStage(ar, MaxShaderStages, hash)) {
-                    ++restored;
-                } else {
-                    ++rejected;
-                    LOG_WARNING(Render, "Skipping incompatible shader record {}", name);
-                }
-            } catch (const std::exception& error) {
-                ++rejected;
-                LOG_WARNING(Render, "Skipping shader record {}: {}", name, error.what());
-            }
-        }
-        std::printf("GPU cache: %u shader records restored, %zu additional modules not referenced "
-                    "by pipelines (%u left out)\n", restored, module_count() - before, rejected);
-        sel = {.regs = regs};
     }
     const auto status = GetPrecacheProgress();
     LOG_INFO(Render, "Preloaded {} of {} pipelines ({} rejected)", status.loaded, status.total,

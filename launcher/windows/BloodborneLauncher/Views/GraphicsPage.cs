@@ -21,11 +21,8 @@ namespace BloodborneLauncher.Views
                 SmallButton(L.T("Recommend…"), SymbolRegular.Sparkle24, (_, _) => MainWindow.Instance!.OfferBestSettings(firstRun: false)), out _));
 
             Group(L.T("Upscaler"));
-            // FSR 4.1.1 runs through fsr4vk (in the package) or an fsr4_411 set built from the player's
-            // own AMD DLL: offered when either is there. Without both the setting becomes FSR 4, the
-            // model it would fall back to (#22).
-            var fsr411 = Fsr4VkFound() || Directory.Exists(Fsr411Dir());
-            if (!fsr411 && Ini.Get("upscaler") == "fsr411") Ini.Set("upscaler", "fsr4");
+            var fsr411 = Fsr4VkFound() && !Amd();
+            if (Ini.Get("upscaler") is "fsr3" or "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411")) Ini.Set("upscaler", "fsr");
             IniCombo(SymbolRegular.Sparkle24, L.T("Upscaler"), null,
                 fsr411 ? Choices.Upscalers : Choices.Upscalers.Where(c => c.Value != "fsr411").ToArray(), "upscaler", changed: UpdateUpscaler);
             _upscalerHint = (TextBlock)((SettingRow)Body.Children[^1]).Tag;
@@ -78,6 +75,9 @@ namespace BloodborneLauncher.Views
                 L.T("Keeps the GPU's queue short for lower input lag. Always on while DLSS Frame Generation runs"),
                 Choices.Reflex, "reflex");
             _reflexCard = (SettingRow)Body.Children[^1];
+            IniToggle(SymbolRegular.Flash24, L.T("AMD Anti-Lag 2"),
+                L.T("Lower input lag on AMD drivers that offer it; does nothing on other GPUs. Turns itself off until the next start if the driver holds the game too long"),
+                "anti_lag");
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: even pacing (Uncapped)"),
                 L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_cap");
             _frameGenCapCard = (SettingRow)Body.Children[^1];
@@ -103,6 +103,25 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.WeatherFog24, L.T("Fog"), 0, 3, "graphics_fog", picture);
             Body.Children.Add(picture);
 
+            Group(L.T("Menus"));
+            _ui4k = ToggleRow(SymbolRegular.ZoomIn24, L.T("4K menus"),
+                L.T("Menus, icons and item pictures upscaled 4x on your PC from your own game files. Nothing is downloaded but the upscaler"),
+                () => UiUpscale.Ready && Ini.Get("ui_4k", "1") != "0", v =>
+                {
+                    Ini.Set("ui_4k", v ? "1" : "0");
+                    if (v && !UiUpscale.Ready) _ = BuildUi4kAsync();
+                });
+            _ui4kButton = SmallButton(L.T("Build"), SymbolRegular.ArrowDownload24, async (_, _) => await BuildUi4kAsync());
+            _ui4kRemove = SmallButton(L.T("Remove"), SymbolRegular.Delete24, (_, _) => RemoveUi4k());
+            var ui4kButtons = new StackPanel { Orientation = Orientation.Horizontal };
+            ui4kButtons.Children.Add(_ui4kButton);
+            ui4kButtons.Children.Add(_ui4kRemove);
+            Add(Card(SymbolRegular.Image24, L.T("4K menu textures"), null, ui4kButtons, out _ui4kHint));
+            _ui4kBar = new ProgressBar { Height = 4, Minimum = 0, Maximum = 1, Margin = new System.Windows.Thickness(24, 0, 24, 8), Visibility = System.Windows.Visibility.Collapsed };
+            Body.Children.Add(_ui4kBar);
+            Body.Children.Add(Text(L.F($"Upscaled with {UiUpscale.Credit}, downloaded once from its official release ({UiUpscale.Project}). It takes a while and uses the GPU; about 3.5 GB on disk."), "Faint"));
+            ShowUi4k();
+
             Group(L.T("Camera"));
             IniToggle(SymbolRegular.Camera24, L.T("Camera tuning"), L.T("Turns the three settings below on"), "camera_controls");
             IniSlider(SymbolRegular.ZoomOut24, L.T("Field of view"), 1, 1.5, "camera_fov_scale");
@@ -111,9 +130,6 @@ namespace BloodborneLauncher.Views
 
             Group(L.T("Game effects"));
             Body.Children.Add(Text(L.T("Patches to the game, applied when it starts."), "Faint"));
-            IniCombo(SymbolRegular.Color24, L.T("Ambient occlusion quality"),
-                L.T("Regular GTAO is unchanged. High traces three visibility-bitmask GTAO directions at the full internal render resolution (follows DLSS/FSR scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU cost; Ambient occlusion must also be enabled. Requires restarting Bloodborne."),
-                Choices.AoQualities, "graphics_ao_quality");
             IniCombo(SymbolRegular.Cube24, L.T("Model detail"), null, Choices.ModelLod, "model_lod");
             IniCombo(SymbolRegular.Camera24, L.T("Follow camera"), L.T("Original keeps the game's camera distance, angle and follow speed at 60 FPS and above"), Choices.CameraTuning, "camera_tuning");
             foreach (var effect in Choices.Effects)
@@ -123,7 +139,93 @@ namespace BloodborneLauncher.Views
                 if (motionBlur) _motionBlurHint = ((SettingRow)Body.Children[^1]).Hint;
             }
 
+            Group(L.T("Lighting"));
+            IniCombo(SymbolRegular.Lightbulb24, L.T("Sun shadow resolution"), L.T("Applied when the game starts"), Choices.ShadowResolution, "graphics_shadow_resolution");
+            IniCombo(SymbolRegular.Lightbulb24, L.T("Lamp shadow resolution"), L.T("Applied when the game starts"), Choices.LocalShadowResolution, "graphics_local_shadow_resolution");
+            IniCombo(SymbolRegular.Lightbulb24, L.T("Motion blur quality"), L.T("Applied when the game starts"), Choices.MotionBlurQuality, "graphics_motion_blur_quality");
+            IniSlider(SymbolRegular.Lightbulb24, L.T("Indirect lighting strength"), 0, 12, "graphics_gi_strength", fallback: 6);
+            IniSlider(SymbolRegular.Lightbulb24, L.T("Reflection strength"), 0, 3, "graphics_ssr_intensity");
+            IniSlider(SymbolRegular.Lightbulb24, L.T("Volumetric sunlight strength"), 0, 3, "graphics_volumetric_intensity");
+            IniSlider(SymbolRegular.Lightbulb24, L.T("Lamp fog strength"), 0, 3, "graphics_point_fog_intensity");
+
             Ws.PortChanged += UpdateUpscaler;
+        }
+
+        private readonly ToggleSwitch _ui4k;
+        private readonly Wpf.Ui.Controls.Button _ui4kButton, _ui4kRemove;
+        private readonly TextBlock _ui4kHint;
+        private readonly ProgressBar _ui4kBar;
+        private CancellationTokenSource? _ui4kBuild;
+
+        private void ShowUi4k(string? status = null)
+        {
+            var building = _ui4kBuild != null;
+            _ui4kButton.Content = building ? L.T("Cancel") : UiUpscale.Ready ? L.T("Rebuild") : L.T("Build");
+            _ui4kRemove.Visibility = !building && (UiUpscale.Ready || Directory.Exists(UiUpscale.PackDir))
+                ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+            _ui4kBar.Visibility = building ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+            _ui4k.IsChecked = UiUpscale.Ready && Ini.Get("ui_4k", "1") != "0";
+            SetHint(_ui4kHint, status ?? (UiUpscale.Ready
+                ? L.F($"Ready ({UiUpscale.PackBytes() / 1073741824.0:0.0} GB). Turn 4K menus off above to use the game's own")
+                : L.T("Not built yet. Build makes them from your game files")));
+        }
+
+        private async Task BuildUi4kAsync()
+        {
+            if (_ui4kBuild is { } running)
+            {
+                running.Cancel();
+                return;
+            }
+            if (Ws.Game.Running)
+            {
+                Prompt.Tell(L.T("4K menus"), L.T("Close the game first: the upscaler needs the GPU."));
+                return;
+            }
+            _ui4kBuild = new CancellationTokenSource();
+            ShowUi4k(L.T("Starting…"));
+            var progress = new Progress<UiUpscale.Step>(step =>
+            {
+                _ui4kBar.Value = step.Fraction;
+                SetHint(_ui4kHint, step.Text);
+            });
+            try
+            {
+                await UiUpscale.BuildAsync(GameEnvironment.GameDir(S), progress, _ui4kBuild.Token);
+                Ini.Set("ui_4k", "1");
+                Ws.SaveSoon();
+                Ws.Log(L.T("4K menus are ready: they show the next time the game starts"), LogLevel.Good);
+            }
+            catch (OperationCanceledException)
+            {
+                Ws.Log(L.T("4K menus: stopped. Build again to continue where it stopped"), LogLevel.Step);
+            }
+            catch (Exception e)
+            {
+                Ws.Log(L.F($"4K menus: {e.Message}"), LogLevel.Warn);
+                Prompt.Tell(L.T("4K menus"), e.Message);
+            }
+            finally
+            {
+                _ui4kBuild.Dispose();
+                _ui4kBuild = null;
+                ShowUi4k();
+            }
+        }
+
+        private void RemoveUi4k()
+        {
+            try
+            {
+                UiUpscale.Remove();
+                Ini.Set("ui_4k", "0");
+                Ws.SaveSoon();
+            }
+            catch (IOException e)
+            {
+                Prompt.Tell(L.T("4K menus"), e.Message);
+            }
+            ShowUi4k();
         }
 
         private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null,
@@ -157,18 +259,21 @@ namespace BloodborneLauncher.Views
             var value = Ini.Get("upscaler");
             string? hint = value switch
             {
-                "fsr4" => Directory.Exists(Path.Combine(Paths.EngineDir, "fsr4_shaders"))
-                    ? L.T("Assets found. GPUs without the needed shader features fall back to FSR 3.1")
-                    : L.T("fsr4_shaders is missing from the port folder: the game falls back to FSR 3.1"),
-                "fsr411" when Fsr4VkFound() =>
-                    L.T("Through fsr4vk (included, experimental): runs on any GPU with the needed Vulkan features. Prefer FSR 4 if it looks wrong"),
-                "fsr411" => Fsr411Problem() is { } problem
-                    ? L.F($"{problem}: the game falls back to FSR 4")
-                    : L.T("Assets for the chosen resolution and preset found"),
+                "fsr" when !FsrSdkFound() =>
+                    L.T("fsr_sdk is missing from the engine folder: the game falls back to FSR 3.1"),
+                "fsr" when Amd() =>
+                    L.T("AMD FSR SDK 2.4: FSR 4.1.2 on Radeon RX 6000 and newer and on supported Ryzen APUs, FSR 3.1.6 on older Radeons. The SDK picks the model"),
+                "fsr" =>
+                    L.T("AMD FSR SDK 2.4: FSR 3.1.6 on this GPU (AMD's FSR 4 runs on Radeon only). FSR 4.1.1 (fsr4vk, experimental) is the other choice here"),
+                "fsr411" =>
+                    L.T("Through fsr4vk (included, experimental): FSR 4.1.1 on NVIDIA and Intel GPUs with the needed Vulkan features. Choose FSR if it looks wrong"),
                 "dlss" => DlssFound()
                     ? L.T("Needs an NVIDIA GeForce RTX GPU; others fall back to FSR 3.1") +
                       (Ini.Get("preset", "0") == "0" ? L.T(". With Native AA this is DLAA: DLSS as anti-aliasing at full resolution") : "")
                     : L.T("DLSS files are missing: the game falls back to FSR 3.1"),
+                "xess" => XessFound()
+                    ? L.T("Intel XeSS Super Resolution: the XMX model on Intel Arc, the DP4a model on other GPUs. GPUs it does not support fall back to FSR 3.1")
+                    : L.T("xess (libxess.dll) is missing from the engine folder: the game falls back to FSR 3.1"),
                 "taa" => L.T("Anti-aliasing at the output resolution, without an FSR model. Softer than DLAA or FSR Native AA: add sharpening below"),
                 _ => null,
             };
@@ -215,37 +320,14 @@ namespace BloodborneLauncher.Views
         private static bool Fsr4VkFound() =>
             File.Exists(Path.Combine(Paths.EngineDir, "fsr4vk", "amd_fidelityfx_upscaler_vk.dll"));
 
-        private static string Fsr411Dir()
-        {
-            var env = Environment.GetEnvironmentVariable("BB_FSR411_DIR");
-            if (!string.IsNullOrEmpty(env)) return env;
-            var local = Path.Combine(Paths.EngineDir, "fsr4_411");
-            return Directory.Exists(local) ? local : Path.Combine(Paths.DataDir, "fsr4_411");
-        }
+        /// <summary>Intel's XeSS-SR library (tools/fetch_xess.sh, vk_xess.cpp).</summary>
+        private static bool XessFound() =>
+            File.Exists(Path.Combine(Paths.EngineDir, "xess", "libxess.dll"));
 
-        /// <summary>The FSR 4.1.1 model files the chosen output and preset need (fsr4_411\).</summary>
-        private static string? Fsr411Problem()
-        {
-            var (w, h) = Choices.OutputSize(Ini.Get("output_res", "1920x1080"));
-            var model = (w > 1920 || h > 1080 ? "t2160" : "t1080") + (Ini.Get("preset", "4") == "4" ? "_m1" : "_m0");
-            var passes = new List<string> { "spd", "prepass", "pass0_post" };
-            for (var i = 1; i <= 12; i++)
-            {
-                passes.Add($"pass{i}");
-                passes.Add($"pass{i}_post");
-            }
-            passes.Add("postpass");
-            passes.Add("rcas");
+        private static bool FsrSdkFound() =>
+            File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_loader_vk.dll")) &&
+            File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_upscaler_vk.dll"));
 
-            var dir = Path.Combine(Fsr411Dir(), model);
-            foreach (var name in passes)
-            {
-                var file = new FileInfo(Path.Combine(dir, name + ".spv"));
-                if (!file.Exists || file.Length < 20 || file.Length % 4 != 0)
-                    return L.F($"Missing or damaged fsr4_411\\{model}\\{name}.spv");
-            }
-            var init = new FileInfo(Path.Combine(dir, "initializer.bin"));
-            return init.Exists && init.Length == 131072 ? null : L.F($"Missing or damaged fsr4_411\\{model}\\initializer.bin");
-        }
+        private static bool Amd() => Hardware.Detect().Vendor == "AMD";
     }
 }

@@ -17,7 +17,6 @@ namespace Vulkan {
  * @param device The vulkan device handle
  */
 vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
-std::span<const u32> GtaoFragmentShader();
 
 void CaptureSpecularModule(u64 program_hash, u64 permutation, std::span<const u32> code);
 std::vector<u32> DirectionalGgxModule(u64 program_hash, bool fragment, std::span<const u32> code);

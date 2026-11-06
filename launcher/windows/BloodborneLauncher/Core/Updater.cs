@@ -31,7 +31,7 @@ namespace BloodborneLauncher.Core
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
-        public const string EngineId = "lantern-fps94";
+        public const string EngineId = "lantern-room16-b31";
 
 #if BBFSS_DISTRIBUTION
         public const string ExeName = "BBFSS.exe";
@@ -46,7 +46,8 @@ namespace BloodborneLauncher.Core
         private static readonly string[] Kept = { "lantern.ini", "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
 
         public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
-            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default)
+            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default,
+            string? ExeDigest = null, string? ZipDigest = null)
         {
             public bool IsNewerThan(Version version, int beta) => Compare(Version, Beta, version, beta) > 0;
             public bool IsCurrent => Compare(Version, Beta, Current, CurrentBeta) == 0;
@@ -208,22 +209,26 @@ namespace BloodborneLauncher.Core
             if (!TryVersion(tag, out var version, out var betaNumber))
                 return null;
 
-            string? exe = null, zip = null, package = null;
+            string? exe = null, zip = null, package = null, exeDigest = null, zipDigest = null;
             long exeSize = 0, zipSize = 0;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
                 var url = asset.GetProperty("browser_download_url").GetString();
                 var size = asset.GetProperty("size").GetInt64();
+                var digest = asset.TryGetProperty("digest", out var d) && d.ValueKind == JsonValueKind.String &&
+                             d.GetString() is { } sum && sum.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                    ? sum[7..].ToLowerInvariant()
+                    : null;
                 // GitHub stores "Lantern Engine.exe" as "Lantern.Engine.exe". A release before the
                 // rename has only the old name.
                 var spaced = name.Replace(".", " ").Replace(" exe", ".exe");
                 if (!OperatingSystem.IsLinux() &&
                     (spaced.Equals(ExeName, StringComparison.OrdinalIgnoreCase) ||
                      (exe == null && spaced.Equals(OldExeName, StringComparison.OrdinalIgnoreCase))))
-                    (exe, exeSize) = (url, size);
+                    (exe, exeSize, exeDigest) = (url, size, digest);
                 else if (IsPackageAsset(name) && zip == null)
-                    (zip, zipSize) = (url, size);
+                    (zip, zipSize, zipDigest) = (url, size, digest);
                 else if (name.Equals(PackageFile, StringComparison.OrdinalIgnoreCase))
                     package = url;
             }
@@ -234,7 +239,8 @@ namespace BloodborneLauncher.Core
                 root.TryGetProperty("published_at", out var p) && p.ValueKind == JsonValueKind.String &&
                 DateTime.TryParse(p.GetString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var when)
                     ? when.ToLocalTime()
-                    : default);
+                    : default,
+                exeDigest, zipDigest);
         }
 
         /// <summary>Reads "v0.9.7", "0.9.7-beta.2" or "0.9.7-beta2+abc123"; <paramref name="beta"/> is 0 for a stable build.</summary>
@@ -317,7 +323,7 @@ namespace BloodborneLauncher.Core
                     throw new InvalidOperationException("Close the game first: the update replaces the engine.");
                 var tarball = OperatingSystem.IsLinux();
                 var zip = Path.Combine(work, tarball ? "package.tar.gz" : "package.zip");
-                await DownloadAsync(release.ZipUrl!, zip, release.ZipSize, progress);
+                await DownloadAsync(release.ZipUrl!, zip, release.ZipSize, progress, release.ZipDigest);
                 var unpacked = Path.Combine(work, "unpacked");
                 if (tarball)
                     ExtractTarball(zip, unpacked);
@@ -333,7 +339,7 @@ namespace BloodborneLauncher.Core
             {
                 var url = release.ExeUrl ?? throw new InvalidOperationException("This release has no launcher download attached.");
                 var exe = Path.Combine(work, ExeName);
-                await DownloadAsync(url, exe, release.ExeSize, progress);
+                await DownloadAsync(url, exe, release.ExeSize, progress, release.ExeDigest);
                 if (new FileInfo(exe).Length < 100_000)
                     throw new InvalidOperationException("The download is too small to be the launcher.");
                 ReplaceSelf(self, exe);
@@ -440,6 +446,36 @@ namespace BloodborneLauncher.Core
             }
         }
 
+        private static readonly string[] OldEngineFiles =
+        {
+            "boot.bin", "boot-libc.bin", "analysis.json", "link.json", "libc-link.json", "entry.bin",
+            "content-profile.json", "patches-info.json",
+        };
+
+        private static readonly string[] OldEngineFolders = { "scripts", "tools", "fsr4_shaders" };
+
+        public static int CleanOldFiles(LauncherSettings s, string package)
+        {
+            const string marker = "cleaned_for_engine";
+            if (s.Str(marker) == EngineId || !Directory.Exists(Path.Combine(package, "engine", "out")) ||
+                !File.Exists(Path.Combine(package, "engine", "out", "bb-start.exe")) ||
+                Process.GetProcessesByName("bb-probe").Length > 0)
+                return 0;
+            var removed = 0;
+            foreach (var name in OldEngineFiles)
+            {
+                var file = Path.Combine(package, "engine", "out", name);
+                try { if (File.Exists(file)) { File.Delete(file); removed++; } } catch (Exception) { }
+            }
+            foreach (var name in OldEngineFolders)
+            {
+                var folder = Path.Combine(package, "engine", name);
+                try { if (Directory.Exists(folder)) { Directory.Delete(folder, recursive: true); removed++; } } catch (Exception) { }
+            }
+            s.Set(marker, EngineId);
+            return removed;
+        }
+
         private static void ReplaceSelf(string self, string replacement)
         {
             var aside = self + ".old";
@@ -456,7 +492,7 @@ namespace BloodborneLauncher.Core
             }
         }
 
-        private static async Task DownloadAsync(string url, string path, long expected, IProgress<double>? progress)
+        internal static async Task DownloadAsync(string url, string path, long expected, IProgress<double>? progress, string? sha256 = null)
         {
             using var http = Client(TimeSpan.FromMinutes(30));
             using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
@@ -464,15 +500,21 @@ namespace BloodborneLauncher.Core
             var total = response.Content.Headers.ContentLength ?? expected;
             await using var input = await response.Content.ReadAsStreamAsync();
             await using var output = File.Create(path);
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
             var buffer = new byte[81920];
             long done = 0;
             int read;
             while ((read = await input.ReadAsync(buffer)) > 0)
             {
                 await output.WriteAsync(buffer.AsMemory(0, read));
+                hash.AppendData(buffer, 0, read);
                 done += read;
                 if (total > 0) progress?.Report((double)done / total);
             }
+            if (expected > 0 && done != expected)
+                throw new InvalidOperationException($"The download stopped early ({done} of {expected} bytes). Try again.");
+            if (sha256 != null && !Convert.ToHexString(hash.GetHashAndReset()).Equals(sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The download is damaged: its SHA-256 does not match the release's. Try again.");
         }
 
 #if AVALONIA

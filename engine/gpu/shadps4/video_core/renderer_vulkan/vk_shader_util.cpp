@@ -5,8 +5,6 @@
 #include "common/hash.h"
 #include "common/logging/log.h"
 #include "bbport_settings.h"
-#include "video_core/host_shaders/gtao_frag.h"
-#include "video_core/host_shaders/gtao_hq_frag.h"
 #include "video_core/renderer_vulkan/vk_ggx_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include <cstdio>
@@ -18,11 +16,6 @@
 #include <unordered_set>
 
 namespace Vulkan {
-
-std::span<const u32> GtaoFragmentShader() {
-    return BbSettings::Get().startup_ao_quality == 1 ? std::span<const u32>{GTAO_HQ_FRAG}
-                                                   : std::span<const u32>{GTAO_FRAG};
-}
 
 std::vector<u32> DirectionalGgxModule(u64 program_hash, bool fragment, std::span<const u32> code) {
     if (!fragment || program_hash != Ggx::DirectionalHash ||

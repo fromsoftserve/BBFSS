@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// bbport: screen-space indirect lighting (vk_ssgi.h, ssgi.comp).
 
 #include "video_core/renderer_vulkan/vk_ssgi.h"
 
@@ -8,26 +7,24 @@
 #include <cstdlib>
 
 #include "common/assert.h"
-#include "core/emulator_settings.h"
 #include "bbport_settings.h"
 #include "video_core/host_shaders/ssgi_composite_comp.h"
 #include "video_core/host_shaders/ssgi_denoise_comp.h"
 #include "video_core/host_shaders/ssgi_gather_comp.h"
+#include "video_core/host_shaders/ssgi_gather_ray_comp.h"
 #include "video_core/host_shaders/ssgi_prep_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_rt_shadow.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
-
 namespace {
-
-/// Push constants of ssgi.comp.
 struct Params {
     std::array<float, 4> proj;
     std::array<float, 12> reproject;
@@ -46,7 +43,6 @@ struct Params {
 };
 static_assert(sizeof(Params) == 128);
 
-/// a * b for 3x4 affine matrices (rows).
 std::array<float, 12> Multiply(const std::array<float, 12>& a, const std::array<float, 12>& b) {
     std::array<float, 12> r{};
     for (int i = 0; i < 3; ++i) {
@@ -64,13 +60,6 @@ constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 constexpr auto SampledImage = vk::DescriptorType::eSampledImage;
 constexpr auto StorageImage = vk::DescriptorType::eStorageImage;
 
-float EnvFloat(const char* name, float fallback) {
-    const char* env = std::getenv(name);
-    return env && env[0] ? static_cast<float>(std::atof(env)) : fallback;
-}
-
-/// Everything before (the game's passes and transitions) finished and visible to the compute
-/// shaders.
 void BeforeCompute(vk::CommandBuffer cmdbuf) {
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = AllCommands,
@@ -81,7 +70,6 @@ void BeforeCompute(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
-/// One dispatch's writes visible to the next.
 void BetweenPasses(vk::CommandBuffer cmdbuf) {
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = Compute,
@@ -92,7 +80,6 @@ void BetweenPasses(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
-/// The compute shaders' writes visible to what follows; later writes to what they read wait.
 void AfterCompute(vk::CommandBuffer cmdbuf) {
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = Compute,
@@ -103,7 +90,6 @@ void AfterCompute(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
-/// A port image about to be rewritten whole (or never used yet): old contents go.
 vk::ImageMemoryBarrier2 ToGeneral(vk::Image image) {
     return {
         .srcStageMask = AllCommands,
@@ -127,24 +113,42 @@ vk::WriteDescriptorSet Write(u32 binding, vk::DescriptorType type,
             .pImageInfo = image};
 }
 
-} // namespace
+}
 
 ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
                              VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
-                             SceneTargets& scene_targets_, CameraMotion& camera_motion_)
+                             SceneTargets& scene_targets_, CameraMotion& camera_motion_,
+                             RtShadow& rt_shadow_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
-      runtime{runtime_}, scene_targets{scene_targets_}, camera_motion{camera_motion_} {
-    if (!EmulatorSettings.IsSsgiEnabled()) {
-        return;
+      runtime{runtime_}, scene_targets{scene_targets_}, rt_shadow{rt_shadow_},
+      camera_motion{camera_motion_} {
+}
+
+bool ScreenSpaceGI::Ready() {
+    if (tried) {
+        return !failed;
     }
-    CreatePass(prep, {SampledImage, StorageImage, SampledImage}, SSGI_PREP_COMP,
-               "ssgi.comp (prep)");
-    CreatePass(gather, {SampledImage, SampledImage, SampledImage, StorageImage, SampledImage},
-               SSGI_GATHER_COMP, "ssgi.comp (gather)");
-    CreatePass(denoise, {SampledImage, SampledImage, StorageImage}, SSGI_DENOISE_COMP,
-               "ssgi.comp (denoise)");
-    CreatePass(composite, {SampledImage, SampledImage, StorageImage, SampledImage, SampledImage},
-               SSGI_COMPOSITE_COMP, "ssgi.comp (composite)");
+    tried = true;
+    const bool made =
+        EffectPass::StorageFormat(instance, vk::Format::eR16G16B16A16Sfloat) &&
+        EffectPass::StorageFormat(instance, vk::Format::eR32G32B32A32Sfloat) &&
+        CreatePass(prep, {SampledImage, StorageImage, SampledImage}, SSGI_PREP_COMP,
+                   "SSGI prep") &&
+        CreatePass(gather, {SampledImage, SampledImage, SampledImage, StorageImage, SampledImage},
+                   SSGI_GATHER_COMP, "SSGI gather") &&
+        (!rt_shadow.Capturing() ||
+         CreatePass(gather_ray, {SampledImage, SampledImage, SampledImage, StorageImage, SampledImage,
+                                 vk::DescriptorType::eAccelerationStructureKHR},
+                    SSGI_GATHER_RAY_COMP, "Ray traced bounce")) &&
+        CreatePass(denoise, {SampledImage, SampledImage, StorageImage}, SSGI_DENOISE_COMP,
+                   "SSGI denoise") &&
+        CreatePass(composite, {SampledImage, SampledImage, StorageImage, SampledImage, SampledImage},
+                   SSGI_COMPOSITE_COMP, "SSGI composite");
+    if (!made) {
+        failed = true;
+        std::printf("SSGI: off - this GPU cannot run the passes\n");
+    }
+    return made;
 }
 
 ScreenSpaceGI::~ScreenSpaceGI() {
@@ -156,43 +160,10 @@ ScreenSpaceGI::~ScreenSpaceGI() {
     }
 }
 
-void ScreenSpaceGI::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorType> types,
+bool ScreenSpaceGI::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorType> types,
                                std::span<const u32> code, const char* name) {
-    const auto device = instance.GetDevice();
-    std::array<vk::DescriptorSetLayoutBinding, 5> bindings{};
-    u32 count = 0;
-    for (const vk::DescriptorType type : types) {
-        bindings[count] = {.binding = count,
-                           .descriptorType = type,
-                           .descriptorCount = 1,
-                           .stageFlags = vk::ShaderStageFlagBits::eCompute};
-        ++count;
-    }
-    pass.set_layout = Check<"create SSGI descriptor set layout">(
-        device.createDescriptorSetLayoutUnique({
-            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
-            .bindingCount = count,
-            .pBindings = bindings.data(),
-        }));
-    const vk::PushConstantRange push{
-        .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = sizeof(Params)};
-    pass.layout = Check<"create SSGI pipeline layout">(device.createPipelineLayoutUnique({
-        .setLayoutCount = 1,
-        .pSetLayouts = &*pass.set_layout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &push,
-    }));
-    const auto module = CompileSPV(code, device);
-    ASSERT(module);
-    SetObjectName(device, module, name);
-    pass.pipeline = Check<"create SSGI pipeline">(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *pass.layout,
-            }));
-    device.destroyShaderModule(module);
+    return EffectPass::Create(instance, pass.set_layout, pass.layout, pass.pipeline, types,
+                              sizeof(Params), code, name);
 }
 
 bool ScreenSpaceGI::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format format,
@@ -201,7 +172,6 @@ bool ScreenSpaceGI::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format
         return false;
     }
     if (own.image) {
-        // Recorded passes may still use the old size's image.
         scheduler.DeferOperation(
             [image = std::move(own.image), view = std::move(own.view)]() mutable {
                 view.reset();
@@ -288,19 +258,12 @@ void ScreenSpaceGI::OnFrameEnd() {
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
                                   std::array<float, 2> jitter) {
-    const bool gi_on = BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed);
-    static int last_gi_on = -1;
-    static int gi_frames = 0;
-    if (last_gi_on != int(gi_on)) {
-        std::printf("SSGI: indirect lighting %s (%d GI frames in the previous state)\n",
-                    gi_on ? "on" : "off", gi_frames);
-        last_gi_on = int(gi_on);
-        gi_frames = 0;
-    }
-    if (done_this_frame || failed || !prep.pipeline || !color_id || !depth_id || !gi_on) {
+    if (done_this_frame || failed || !color_id || !depth_id ||
+        (!BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed) &&
+         !rt_shadow.Wanted()) ||
+        !Ready()) {
         return;
     }
-    ++gi_frames;
     const auto proj = camera_motion.PassProjection();
     if (proj[0] == 0.0f || proj[1] == 0.0f) {
         return;
@@ -325,9 +288,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     }
 
     vk::ImageView color_view{}, depth_view{}, albedo_view{};
-    static const bool want_albedo = EnvFloat("BB_SSGI_ALBEDO", 1.0f) > 0.5f;
     VideoCore::Image* albedo = nullptr;
-    if (want_albedo && gbuffer_albedo && gbuffer_depth == depth_id) {
+    if (gbuffer_albedo && gbuffer_depth == depth_id) {
         albedo = &texture_cache.GetImage(gbuffer_albedo);
         if (albedo->info.pixel_format != vk::Format::eR8G8B8A8Srgb) {
             albedo = nullptr;
@@ -375,8 +337,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     }
     scheduler.EndRendering();
     vk::ImageView ao_view{};
-    static const float ao_amount = EnvFloat("BB_SSGI_AO", 1.0f);
-    if (ao_amount > 0.0f && ao_image) {
+    constexpr float ao_amount = 1.0f;
+    if (ao_image) {
         auto& ao = texture_cache.GetImage(ao_image);
         if (reduced && scene_targets.EligibleScene(ao)) {
             VideoCore::ImageViewInfo ao_info;
@@ -392,10 +354,9 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     const bool has_ao = ao_view != vk::ImageView{};
     const bool has_albedo = albedo_view != vk::ImageView{};
 
-    // The G-buffer's world normals (with normal-map detail) refine the depth-derived ones.
     vk::ImageView normal_view{};
-    static const float normal_amount = EnvFloat("BB_SSGI_NORMALS", 0.6f);
-    if (normal_amount > 0.0f && gbuffer_normal && gbuffer_depth == depth_id) {
+    constexpr float normal_amount = 0.6f;
+    if (gbuffer_normal && gbuffer_depth == depth_id) {
         auto& normal = texture_cache.GetImage(gbuffer_normal);
         if (normal.info.pixel_format == vk::Format::eR8G8B8A8Unorm) {
             if (reduced) {
@@ -415,6 +376,12 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     }
     const bool has_normal = normal_view != vk::ImageView{};
     const u32 half_width = (width + 1) / 2, half_height = (height + 1) / 2;
+    if ((!geo.image || geo.width != width || geo.height != height) &&
+        !EffectPass::HasRoom(instance, 16ull * width * height + 4ull * 8 * half_width * half_height)) {
+        failed = true;
+        std::printf("SSGI: off - not enough video memory\n");
+        return;
+    }
     bool created = EnsureImage(geo, width, height, vk::Format::eR32G32B32A32Sfloat, "geometry");
     for (auto& image : light) {
         created |= EnsureImage(image, half_width, half_height, vk::Format::eR16G16B16A16Sfloat,
@@ -427,27 +394,20 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         history_valid = false;
     }
 
-    static const float strength = EnvFloat("BB_SSGI_STRENGTH", want_albedo ? 8.0f : 4.0f);
-    static const float radius = EnvFloat("BB_SSGI_RADIUS", 3.0f);
-    static const float feedback = EnvFloat("BB_SSGI_BOUNCE", 0.8f);
-    static const bool reproject_on = EnvFloat("BB_SSGI_REPROJECT", 1.0f) > 0.5f;
-    static const bool denoise_on = EnvFloat("BB_SSGI_DENOISE", 1.0f) > 0.5f;
-    const bool debug = EmulatorSettings.IsSsgiDebug();
+    constexpr float strength = 8.0f;
+    constexpr float radius = 3.0f;
+    constexpr float feedback = 0.8f;
     static bool printed = false;
     if (!printed) {
         printed = true;
-        std::printf("SSGI: %ux%u (%s), strength %.2f, radius %.1f, bounce %.2f, albedo %s, "
-                    "reprojection %s, denoise %s, AO %s (%.2f), normals %s (%.2f)\n",
-                    width, height, reduced ? "reduced scene" : "native scene", strength, radius,
-                    feedback, has_albedo ? "G-buffer" : "approximated",
-                    reproject_on ? "on" : "off", denoise_on ? "on" : "off",
-                    has_ao ? "bound" : "not found", ao_amount,
-                    has_normal ? "G-buffer" : "from depth", normal_amount);
+        std::printf("SSGI: %ux%u (%s), albedo %s, AO %s, normals %s\n", width, height,
+                    reduced ? "reduced scene" : "native scene",
+                    has_albedo ? "G-buffer" : "approximated", has_ao ? "bound" : "not found",
+                    has_normal ? "G-buffer" : "from depth");
     }
 
-    // Last frame's light is read where this frame's surfaces were: previous view * inverse view.
     const auto camera = camera_motion.PassMatrices();
-    const bool use_previous = reproject_on && prev_camera_valid && camera.valid;
+    const bool use_previous = prev_camera_valid && camera.valid;
     constexpr std::array<float, 12> Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     Params params{
         .proj = proj,
@@ -457,8 +417,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         .prev_jitter = use_previous ? prev_jitter : jitter,
         .prev_proj = use_previous ? prev_proj : std::array<float, 2>{proj[0], proj[1]},
         .frame = frame,
-        .history = (history_valid && (use_previous || !reproject_on) ? 1u : 0u) |
-                   (debug ? 2u : 0u),
+        .history = history_valid && use_previous ? 1u : 0u,
         .strength = strength * std::clamp(BbSettings::Get().graphics_gi_strength.load(
                                               std::memory_order_relaxed),
                                           0.0f, 12.0f),
@@ -469,6 +428,13 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         .step_size = 1.0f,
     };
     const u32 current = frame & 1;
+    scheduler.EndRendering();
+    const bool use_rays = gather_ray.pipeline && rt_shadow.PrepareScene();
+    if (!use_rays &&
+        !BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed)) {
+        return;
+    }
+    EffectPass::Mark(1, "indirect light");
     scheduler.RecordCrumb(
         {.name = "SSGI"},
         [params, init_previous = !history_valid, width, height, half_width,
@@ -483,7 +449,9 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
          filtered_image = std::array{vk::Image(filtered[0].image), vk::Image(filtered[1].image)},
          filtered_view = std::array{*filtered[0].view, *filtered[1].view},
          prep_pipeline = *prep.pipeline, prep_layout = *prep.layout,
-         gather_pipeline = *gather.pipeline, gather_layout = *gather.layout,
+         gather_pipeline = use_rays ? *gather_ray.pipeline : *gather.pipeline,
+         gather_layout = use_rays ? *gather_ray.layout : *gather.layout, use_rays,
+         scene = rt_shadow.Scene(),
          denoise_pipeline = *denoise.pipeline, denoise_layout = *denoise.layout,
          composite_pipeline = *composite.pipeline,
          composite_layout = *composite.layout](vk::CommandBuffer cmdbuf) mutable {
@@ -514,8 +482,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                 const std::array writes{Write(0, SampledImage, &infos[0]),
                                         Write(1, StorageImage, &infos[1]),
                                         Write(2, SampledImage, &infos[2])};
-                // PREP has no use for the reprojection rows: they carry the world-to-view
-                // rotation, and step_size the share of the G-buffer normal.
+
                 const auto reproject = params.reproject;
                 std::memcpy(params.reproject.data(), normal_rows.data(), sizeof(normal_rows));
                 params.step_size = normal_amount;
@@ -532,24 +499,37 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                                         Write(2, SampledImage, &infos[2]),
                                         Write(3, StorageImage, &infos[3]),
                                         Write(4, SampledImage, &infos[4])};
-                run(gather_pipeline, gather_layout, writes, half_x, half_y);
+                if (use_rays) {
+                    const vk::WriteDescriptorSetAccelerationStructureKHR scene_info{
+                        .accelerationStructureCount = 1, .pAccelerationStructures = &scene};
+                    const std::array ray_writes{
+                        writes[0], writes[1], writes[2], writes[3], writes[4],
+                        vk::WriteDescriptorSet{
+                            .pNext = &scene_info,
+                            .dstBinding = 5,
+                            .descriptorCount = 1,
+                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
+                    run(gather_pipeline, gather_layout, ray_writes, half_x, half_y);
+                } else {
+                    run(gather_pipeline, gather_layout, writes, half_x, half_y);
+                }
             }
             BetweenPasses(cmdbuf);
             vk::ImageView result_view = cur_view;
-            if (denoise_on) {
-                // The accumulated light stays unfiltered as history; two wavelet iterations
-                // (taps 1 and 2 texels apart) make the copy that is composited.
-                for (u32 i = 0; i < 2; ++i) {
+            {
+                const u32 denoise_passes = use_rays ? 3u : 2u;
+                for (u32 i = 0; i < denoise_passes; ++i) {
                     params.step_size = float(1u << i);
-                    const std::array infos{Info(geo_view), Info(i == 0 ? cur_view : filtered_view[0]),
-                                           Info(filtered_view[i])};
+                    const std::array infos{Info(geo_view),
+                                           Info(i == 0 ? cur_view : filtered_view[(i - 1) & 1]),
+                                           Info(filtered_view[i & 1])};
                     const std::array writes{Write(0, SampledImage, &infos[0]),
                                             Write(1, SampledImage, &infos[1]),
                                             Write(2, StorageImage, &infos[2])};
                     run(denoise_pipeline, denoise_layout, writes, half_x, half_y);
                     BetweenPasses(cmdbuf);
                 }
-                result_view = filtered_view[1];
+                result_view = filtered_view[(denoise_passes - 1) & 1];
             }
             {
                 const std::array infos{Info(geo_view), Info(result_view), Info(color_view),
@@ -571,4 +551,4 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     ++frame;
 }
 
-} // namespace Vulkan
+}

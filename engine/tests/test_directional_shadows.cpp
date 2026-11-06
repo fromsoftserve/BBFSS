@@ -25,7 +25,7 @@ struct Push {
     float blend = 0;
     unsigned optimizations = 0;
 };
-static_assert(sizeof(Push) == 72); // Final word selects pipeline, not part of shader push constants.
+static_assert(sizeof(Push) == 72);
 constexpr unsigned PushBytes = 68;
 struct Buffer { VkBuffer buffer{}; VkDeviceMemory memory{}; void* data{}; };
 struct Image { VkImage image{}; VkDeviceMemory memory{}; VkImageView view{}; };
@@ -364,7 +364,7 @@ int main(int argc, char** argv) {
         for (unsigned y = 0; y < Atlas; ++y)
             for (unsigned x = 0; x < Atlas; ++x)
                 depths[y * Atlas + x] = (x / 32 + 2 * (y / 32)) == c ? 0.0f : 1.0f;
-        // Keep a finite nonzero gradient while the rightmost pixels straddle the tile edge.
+
         matrix[0] = 0.0005f;
         p.pcss = 0;
         assert(run(p, z) < 0.001f);
@@ -404,7 +404,7 @@ int main(int argc, char** argv) {
     }
     std::printf("Regular PCF fractional edge pixels: %u\n", fractional);
     assert(fractional >= 2 * H && fractional <= 5 * H);
-    // Quantify contact hardening using a straight edge and increasing separation.
+
     p.pcss = 1; p.bias = 0; p.light = 1; p.maximum = 2;
     const auto soft_pixels = [&] {
         unsigned count = 0;
@@ -427,8 +427,7 @@ int main(int argc, char** argv) {
     std::printf("PCSS edge widths (pixels): contact %u, middle %u, far %u\n",
                 contact_width, middle_width, far_width);
     assert(contact_width >= H && middle_width > contact_width && far_width > middle_width);
-    // A single shadow-map texel directly over the receiver must survive a
-    // large search disk. All screen pixels map to that texel.
+
     auto* first = constants + 16;
     first[0] = first[5] = 0.0001f;
     first[3] = first[7] = 16.5f / Atlas;
@@ -439,7 +438,7 @@ int main(int argc, char** argv) {
     assert(thin_visibility < 0.5f);
     first[0] = first[5] = 0.1f;
     first[3] = first[7] = 0.25f;
-    // No temporal noise is introduced by this upgrade.
+
     edge_at(0.2f);
     std::vector<unsigned> previous(static_cast<unsigned*>(result.data),
                                    static_cast<unsigned*>(result.data) + W * H);
@@ -453,7 +452,7 @@ int main(int argc, char** argv) {
     first[3] = 2;
     assert(std::abs(run(p, 0.4f) - 96.0f / 255) < 0.001f);
     first[3] = 0.25f;
-    // Non-identity, off-axis projection and all cascade blend bands.
+
     constants[0] = 0.8f; constants[5] = -0.7f;
     constants[3] = 0.03f; constants[7] = -0.02f;
     constants[10] = 0.9f; constants[14] = 0.07f;

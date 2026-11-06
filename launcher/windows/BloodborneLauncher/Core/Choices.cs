@@ -8,21 +8,25 @@
     /// <summary>Every list the launcher offers, in English, with the values bbport expects.</summary>
     public static class Choices
     {
-        public static readonly Choice[] AoQualities =
-        {
-            new(L.T("Regular GTAO"), "0"),
-            new(L.T("High (full-res bitmask GTAO, denoised, experimental)"), "1"),
-        };
-
-        public static readonly Choice[] Upscalers =
-        {
-            new("FSR 4", "fsr4"),
-            new("FSR 4.1.1", "fsr411"),
-            new("FSR 3", "fsr3"),
-            new("DLSS (NVIDIA RTX)", "dlss"),
-            new(L.T("TAA (native anti-aliasing)"), "taa"),
-            new(L.T("Off"), "off"),
-        };
+        public static readonly Choice[] Upscalers = OperatingSystem.IsWindows()
+            ? new Choice[]
+            {
+                new("FSR", "fsr"),
+                new(L.T("FSR 4.1.1 (fsr4vk, experimental)"), "fsr411"),
+                new("DLSS (NVIDIA RTX)", "dlss"),
+                new("XeSS (Intel)", "xess"),
+                new(L.T("TAA (native anti-aliasing)"), "taa"),
+                new(L.T("Off"), "off"),
+            }
+            : new Choice[]
+            {
+                new("FSR 4", "fsr4"),
+                new("FSR 4.1.1", "fsr411"),
+                new("FSR 3", "fsr3"),
+                new("DLSS (NVIDIA RTX)", "dlss"),
+                new(L.T("TAA (native anti-aliasing)"), "taa"),
+                new(L.T("Off"), "off"),
+            };
 
         /// <summary>frame_gen in lantern.ini: generated frames between the game's own (the engine's
         /// vk_frame_generation.h; DLSS through NVIDIA Streamline, vk_streamline.h). Off by default.</summary>
@@ -117,20 +121,44 @@
             new("effect_chromatic_aberration", L.T("Chromatic aberration"), false),
             new("effect_dof", L.T("Depth of field"), false),
             new("effect_motion_blur", L.T("Motion blur"), false),
-            new("effect_ssao", L.T("Ambient occlusion (GTAO)"), true),
+            new("effect_ssao", L.T("Ambient occlusion (SSAO)"), true),
             new("effect_game_aa", L.T("Game's own anti-aliasing"), false),
-            new("effect_gi", L.T("Indirect lighting (GI)"), true, L.T("Screen-space bounce light, applied live")),
             new("effect_dynamic_shadows", L.T("Shadows from dynamic lights"), true),
             new("effect_ssr", L.T("Screen-space reflections"), false, L.T("Not in the original game")),
-            new("effect_contact_shadows", L.T("Contact shadows"), true, L.T("Screen-space shadows that sharpen shadow detail at object bases, applied live")),
-            new("effect_pcss", L.T("Soft shadows (PCSS)"), false, L.T("NVIDIA percentage-closer soft shadows: shadows soften with distance from the caster, applied live")),
-            new("effect_point_shadows", L.T("Point light shadows"), true, L.T("Screen-space shadows from lamps and other point lights, applied live")),
+            new("effect_gtao", L.T("Better ambient occlusion (GTAO)") + L.T(" (experimental)"), false, L.T("Replaces the game's SSAO shader; needs Ambient occlusion on")),
+            new("effect_modern_ssr", L.T("Improved reflections"), false, L.T("Needs Screen-space reflections on")),
+            new("effect_pom_cavity", L.T("Deeper parallax surfaces"), false),
+            new("effect_contact_shadows", L.T("Contact shadows"), false),
+            new("effect_pcss", L.T("Soft sun shadows (PCSS)"), false),
+            new("effect_gi", L.T("Indirect lighting (GI)"), false, L.T("Heavy")),
+            new("effect_volumetric_light", L.T("Volumetric sunlight"), false, L.T("Heavy")),
+            new("effect_point_fog", L.T("Fog around lamps"), false, L.T("Heavy")),
+            new("effect_point_shadows", L.T("Point light shadows") + L.T(" (experimental)"), false, L.T("Heavy")),
+            new("effect_ray_tracing", L.T("Ray traced lighting") + L.T(" (experimental)"), false, L.T("Sun, lamps and bounced light. Needs a GPU with ray tracing and a restart")),
             new("skip_intro", L.T("Skip intro videos"), false),
             new("debug_camera", L.T("Free camera"), false, L.T("Toggle with Cross + L3 / Space + Z")),
             new("debug_menu", L.T("Debug menu"), false,
                 L.T("Left touchpad / Tab. Needs the adhoc folder from Nexus mod #253 (adhoc/font) in the game's dvdroot_ps4 or as a mod; without it the patch is not applied")),
-            new("effect_volumetric_light", L.T("Volumetric lighting (prototype)"), true,
-                L.T("Shadowed directional light shafts; preserves the game's fog, applied live")),
+        };
+
+        public static readonly Choice[] ShadowResolution =
+        {
+            new(L.T("Game's own"), "0"),
+            new("4096", "1", L.T("Needs more video memory")),
+            new("8192", "2", L.T("Needs much more video memory")),
+        };
+
+        public static readonly Choice[] LocalShadowResolution =
+        {
+            new(L.T("Game's own"), "0"),
+            new(L.T("High"), "1", L.T("Needs more video memory")),
+            new(L.T("Very high"), "2", L.T("Needs much more video memory")),
+        };
+
+        public static readonly Choice[] MotionBlurQuality =
+        {
+            new(L.T("Game's own"), "0"),
+            new(L.T("High"), "1"),
         };
 
         public static readonly Choice[] CameraTuning =
@@ -150,9 +178,9 @@
         {
             new("60 FPS", "60"),
             new("90 FPS", "90", L.T("Includes the sprint fix for high frame rates")),
-            new("120 FPS", "120", L.T("The 90 FPS patch made for 120")),
-            new("144 FPS", "144", L.T("The 90 FPS patch made for 144")),
-            new(L.T("Uncapped"), "uncap", L.T("The community uncapped patch, no limit. It can freeze at the end of a boss intro (Vicar Amelia's); 120 and 144 use another patch")),
+            new("120 FPS", "120", L.T("For 120 Hz screens")),
+            new("144 FPS", "144", L.T("For 144 Hz screens")),
+            new(L.T("Uncapped"), "uncap", L.T("No frame-rate limit: the game's timing follows its frame rate. It can freeze at the end of a boss intro (Vicar Amelia's)")),
             new(L.T("30 FPS (as on PS4)"), "30"),
         };
 
@@ -216,6 +244,7 @@
             new(L.T("Spanish"), "3"),
             new(L.T("German"), "4"),
             new(L.T("Italian"), "5"),
+            new("Português (Brasil)", "17"),
         };
 
         public static readonly Choice[] HdrPaperWhite =
@@ -269,7 +298,22 @@
 
         public static readonly Choice[] OnlineServers =
         {
-            new(L.T("The Hunter's Dream"), "huntersdream"),
+            new(L.T("The Hunter's Dream"), "huntersdream"), new("SuperMedo", SuperMedo.Id),
+        };
+
+        public static readonly Choice[] NamePlates =
+        {
+            new(L.T("Name only"), "name"), new(L.T("Role and name"), "role"),
+        };
+
+        public static readonly Choice[] SeamlessConnections =
+        {
+            new(L.T("Server"), "server"), new(L.T("Direct P2P"), "direct"),
+        };
+
+        public static readonly Choice[] SeamlessRoles =
+        {
+            new(L.T("Join"), "guest"), new(L.T("Host"), "host"),
         };
 
         public static readonly Choice[] SignTimeout =

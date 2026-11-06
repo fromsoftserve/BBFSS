@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum/magic_enum.hpp>
+#include "engine/gx_objects.h"
 #include "bbport_copy.h"
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
@@ -448,6 +449,16 @@ static u32 DynamicRetrySeconds() {
         return env && env[0] ? u32(std::strtoul(env, nullptr, 10)) : 10u;
     }();
     return seconds;
+}
+
+/// LANTERN_MEMORY_RETRY_LIMIT (Engine switches, on by default; 0: no limit): a block the CPU moved
+/// back in place three times stays in place for good, so the retries do not grow with every area seen.
+static u32 DynamicRetryStrikes() {
+    static const u32 strikes = [] {
+        const char* env = std::getenv("LANTERN_MEMORY_RETRY_LIMIT");
+        return env && env[0] == '0' ? 0u : 3u;
+    }();
+    return strikes;
 }
 
 /// bbport BB_DYNAMIC_RETRY_MB=<MiB a second> (default 8): blocks retried at most, so a retry of
@@ -1084,6 +1095,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             }
             TraceBinding(device_addr, size, is_written, is_written ? 0 : 2);
             note_hle(0);
+            ++obtain_paths[is_written ? 1 : 0];
             if (!is_written && !is_texel_buffer) {
                 if (const auto shadow = ShadowCopy(device_addr, size)) {
                     return *shadow;
@@ -1103,6 +1115,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
         BB_SECTION(ObtainStream);
         note_hle(1);
+        ++obtain_paths[2];
         if (stats) {
             auto& region = Stats().regions[RegionKey(device_addr)];
             ++region.stream_count;
@@ -1137,6 +1150,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     EnsureResident(arena, first_block, last_block);
     BB_SECTION(ObtainVram);
     note_hle(2);
+    ++obtain_paths[is_written ? 4 : 3];
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
     if (GuestInPlace()) {
         BbStats::bound_vram_bytes.fetch_add(size, std::memory_order_relaxed);
@@ -2259,6 +2273,11 @@ void BufferCache::NoteDynamic(u64 block) {
     auto& retry = dynamic_retry[block];
     // Long in VRAM since its last retry (four times its wait): what the CPU writes there now is
     // new, and it starts over.
+    const u32 limit = DynamicRetryStrikes();
+    if (limit != 0 && retry.strikes >= limit) {
+        retry.since = now;
+        return;
+    }
     if (retry.strikes != 0 &&
         now - retry.since > 4 * (DynamicRetrySeconds() << std::min<u32>(retry.strikes - 1, 5))) {
         retry.strikes = 0;
@@ -2280,7 +2299,9 @@ void BufferCache::ProcessDynamicRetries(u32 now) {
         if (budget == 0) {
             break;
         }
-        if (now - retry.since < (base << std::min<u32>(retry.strikes - 1, 5))) {
+        if (gx_upload_blocks.Contains(block) ||
+            now - retry.since < (base << std::min<u32>(retry.strikes - 1, 5)) ||
+            (DynamicRetryStrikes() != 0 && retry.strikes >= DynamicRetryStrikes())) {
             continue;
         }
         const u64 group = std::min<u64>((block << block_shift) >> USE_GROUP_BITS, group_use.size() - 1);
@@ -3024,8 +3045,26 @@ void BufferCache::UnmapInPlace(VAddr addr, u64 size) {
     unmaps_pending.store(true, std::memory_order_release);
 }
 
+void BufferCache::ProcessGxUploadArena() {
+    u64 base = 0, bytes = 0;
+    if (!BbEngine::GxObjects::BuffersOwned() || !GuestInPlace() ||
+        !BbEngine::GxObjects::TakeUploadArena(&base, &bytes) || bytes == 0) {
+        return;
+    }
+    const u64 first = base >> block_shift, last = (base + bytes - 1) >> block_shift;
+    gx_upload_blocks.Add({first, last + 1});
+    dynamic_blocks.Add({first, last + 1});
+    for (u64 block = first; block <= last; ++block) {
+        demotions_waiting.push_back({block, scheduler.CurrentTick(), true});
+    }
+    std::printf("GX buffers: the upload arena %#llx, %llu MiB, %llu blocks, stays in place\n",
+                static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes >> 20),
+                static_cast<unsigned long long>(last - first + 1));
+}
+
 void BufferCache::Maintain() {
     maintained_epoch = packet_epoch;
+    ProcessGxUploadArena();
     ProcessPendingUnmaps();
     ProcessIdleBlocks();
     ProcessDemotions();
@@ -3086,6 +3125,11 @@ void BufferCache::ProcessPendingUnmaps() {
             EvictVramBlock(block);
         }
     }
+}
+
+u64 BufferCache::BindGeneration() const noexcept {
+    return ResidencyGeneration() ^ (u64(arenas.size()) << 48) ^
+           (MemoryTracker::cpu_writes.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull);
 }
 
 bool BufferCache::IsInPlace(VAddr addr, u64 size) const {
@@ -3203,6 +3247,9 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         });
     track_scope.End();
 
+    if (src_buffer || !chunk_copies.empty()) {
+        ++obtain_paths[5];
+    }
     if (src_buffer) {
         runtime.CopyBuffer(src_buffer, arena, copies);
     }

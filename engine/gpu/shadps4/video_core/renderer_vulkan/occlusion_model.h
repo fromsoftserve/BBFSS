@@ -57,10 +57,15 @@ constexpr bool QueryFresh(std::uint64_t frame, std::uint64_t now, std::uint64_t 
     return now >= frame && now - frame <= max_lag;
 }
 
-constexpr std::uint64_t VisibilityCount(std::uint64_t samples, std::uint64_t queries,
-                                       bool complete, bool fresh) {
-    // A small positive sample count is not permission to discard partially visible geometry.
+constexpr std::uint64_t VisibilityCount(std::uint64_t samples, std::uint64_t queries, bool complete,
+                                        bool fresh) {
     return complete && fresh && queries != 0 && samples == 0 ? 0 : PlainlyVisible;
+}
+
+constexpr bool LateAnswerWritable(std::uint64_t frame, std::uint64_t now, std::uint64_t max_lag,
+                                  bool answered_before) {
+    return QueryFresh(frame, now, max_lag) ||
+           (answered_before && QueryFresh(frame, now, 2 * max_lag));
 }
 
 constexpr bool DrawPredicated(bool any_seen, bool any_unknown, bool draw_when_seen) {

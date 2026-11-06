@@ -87,9 +87,6 @@ try {
         'engine/gpu/shim/engine/exposure_policy.h',
         'engine/gpu/shim/engine/auto_exposure.h',
         'engine/gpu/shim/engine/auto_exposure.cpp',
-        'engine/tests/test_volumetric_tilt.cpp',
-        'engine/gpu/shadps4/video_core/host_shaders/volumetric_tilt.glsl',
-        'engine/gpu/shadps4/video_core/host_shaders/volumetric_tilt_test.comp',
         'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur.glsl',
         'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur.frag',
         'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur_test.comp')

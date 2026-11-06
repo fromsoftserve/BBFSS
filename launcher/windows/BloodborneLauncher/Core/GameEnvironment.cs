@@ -177,6 +177,7 @@ namespace BloodborneLauncher.Core
             var output = s.Bool("safe_mode_next") ? "" : s.Str("sound_output");
             if (output.StartsWith("directsound")) env["SDL_AUDIO_DRIVER"] = "directsound";
             if (output == "directsound_large") env["SDL_AUDIO_DEVICE_SAMPLE_FRAMES"] = "2048";
+            if (s.Bool("mute_unfocused")) env["LANTERN_MUTE_UNFOCUSED"] = "1";
             if (s.Bool("exp_fast_loading")) env["BB_FAST_LOADING"] = "1";
             if (s.Bool("exp_hot_pages")) env["BB_HOT_PAGES"] = "2";
             // The PC memory model (the GPU reads the game's memory in place; the engine checks the
@@ -215,6 +216,8 @@ namespace BloodborneLauncher.Core
                 env["BB_GC_PRESSURE_SECONDS"] = "0";
                 env["BB_GPU_THREAD_PRIORITY"] = "0";
                 env["BB_NATIVE_SHADERS"] = "0";
+                foreach (var native in EngineSwitches.NativeSwitches)
+                    env[native] = "0";
                 env["BB_SLEEP_SPIN_US"] = "600";
                 env["BB_ASYNC_PIPELINES"] = "0";
                 env["BB_OCCLUSION"] = "0";
@@ -234,6 +237,9 @@ namespace BloodborneLauncher.Core
                 env["BB_THD_TOKEN"] = token;
                 env["BB_THD_ONLINE_ID"] = name;
             }
+            if (s.OnlinePassword is { Length: > 0 } shadnetPassword) env["BB_SHADNET_PASSWORD"] = shadnetPassword;
+            env["BB_ROOM_PASSWORD"] = s.SeamlessPassword;
+            env["BB_ROOM_HOST_PASSWORD"] = s.SeamlessHostPassword;
             // The client version the online backend reports to the server.
             env["BB_CLIENT_VERSION"] = "shadPS4 Awakenchan/v0.20.0";
 

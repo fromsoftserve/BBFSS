@@ -15,15 +15,15 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
-#include "video_core/renderer_vulkan/vk_ssgi.h"
-#include "video_core/renderer_vulkan/vk_ao_spatial.h"
-#include "video_core/renderer_vulkan/vk_ssr_temporal.h"
 #include "video_core/renderer_vulkan/vk_contact_shadow.h"
+#include "video_core/renderer_vulkan/vk_depth_of_field.h"
+#include "video_core/renderer_vulkan/vk_rt_shadow.h"
 #include "video_core/renderer_vulkan/vk_point_shadow.h"
-#include "video_core/renderer_vulkan/vk_volumetric_light.h"
 #include "video_core/renderer_vulkan/vk_sky_seam.h"
 #include "video_core/renderer_vulkan/vk_sky_zenith.h"
-#include "video_core/renderer_vulkan/vk_depth_of_field.h"
+#include "video_core/renderer_vulkan/vk_ssgi.h"
+#include "video_core/renderer_vulkan/vk_ssr_temporal.h"
+#include "video_core/renderer_vulkan/vk_volumetric_light.h"
 #include "video_core/renderer_vulkan/vk_constant_ring.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
@@ -75,7 +75,8 @@ public:
         return texture_cache;
     }
 
-    void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr);
+    void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr,
+              u64 gx_record = 0);
 
     /// bbport: draw preparation workers (vk_draw_prep.h), fed and consumed by Liverpool.
     DrawPreparation& GetDrawPreparation() {
@@ -392,6 +393,24 @@ private:
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
     vk::Rect2D DrawScissor(u32 viewport) const;
+    void EffectsOnFrameEnd();
+    void EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
+                            u32 index_offset);
+    void EffectsBeforeTargets(const GraphicsPipeline* pipeline);
+    void EffectsAfterTargets(const GraphicsPipeline* pipeline);
+    void EffectsBlendedScene();
+    void EffectsBeforeUpscaler(u64 compute_hash);
+    void EffectsBeforeResources(const GraphicsPipeline* pipeline);
+    void EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
+                           u32 index_offset, u32 first_vertex);
+    vk::Rect2D EffectTile(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
+                          u32 index_offset, u32 first_vertex) const;
+    void EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed, u32 num_indices,
+                          u32 num_instances, u32 first_vertex);
+    /// Sky dome seam/zenith correction before the dome draw; true when it resolved the inputs.
+    bool SkyBeforeRendering(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
+                            u32 index_offset, const PreparedDraw* prepared, bool inputs_resolved);
+    void DepthOfFieldAfterDraw(const GraphicsPipeline* pipeline, const RenderState& state);
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
@@ -402,6 +421,16 @@ private:
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                     bool is_indexed, u32 index_offset);
+    struct GxRegister {
+        u16 index;
+        u32 value;
+    };
+    std::array<GxRegister, 160> gx_registers{};
+    u32 num_gx_registers = 0;
+    const void* gx_state = nullptr;
+    void ApplyGxRecord(const GraphicsPipeline* pipeline, const PreparedDraw*& used_prepared, u64 gx_record,
+                       bool is_indexed_draw);
+    static void SwapGxRegisters(AmdGpu::Regs& regs, GxRegister* list, u32 count);
     static bool DrawPipeWanted();
     bool UseDrawPipe() const;
     bool OnStageA() const;
@@ -459,8 +488,9 @@ private:
                                std::span<const u64> pass2);
     bool BindResources(const Pipeline* pipeline);
     void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
+    float SmoothUiSampler(AmdGpu::Sampler& sharp, bool is_depth, bool ui_replaced) const;
     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
-                      Shader::Backend::Bindings& binding, u32& write_index);
+                      Shader::Backend::Bindings& binding, u32& write_index, bool ui_replaced);
     /// bbport: whether stage reads reduced scene proxies through their native images instead:
     /// it has a point-filtered sampler and its pass is at the native size (BindTextures).
     bool PointReadsNative(const Shader::Info& stage, const PreparedStage* prepared) const;
@@ -570,20 +600,25 @@ private:
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
-    std::unique_ptr<ScreenSpaceGI> ssgi; // bbport: screen-space indirect lighting
-    std::unique_ptr<SpatialAo> spatial_ao;
-    std::unique_ptr<SsrTemporal> ssr_temporal; // bbport: temporal accumulation of the SSR
-    std::unique_ptr<ContactShadow> contact_shadow; // bbport: screen-space contact shadows
-    std::unique_ptr<PointShadow> point_shadow;     // bbport: screen-space point light shadows
+    std::unique_ptr<ScreenSpaceGI> ssgi;
+    std::unique_ptr<SsrTemporal> ssr_temporal;
+    std::unique_ptr<RtShadow> rt_shadow;
+    std::unique_ptr<ContactShadow> contact_shadow;
+    std::unique_ptr<PointShadow> point_shadow;
     std::unique_ptr<VolumetricLight> volumetric_light;
     std::unique_ptr<SkySeam> sky_seam;
     std::unique_ptr<SkyZenith> sky_zenith;
     std::unique_ptr<DepthOfField> depth_of_field;
+    bool effects_wanted = false;
+    u32 ssr_frame = 0;
+    u32 shadow_frame = 0;
+    vk::Rect2D effect_tile{};
     bool scene_started = false;
     /// bbport: the scene depth of the frame before (SkipUncompiledDraw).
     VideoCore::ImageId previous_scene_depth{};
     std::unique_ptr<ObjectMotion> object_motion;
     bool motion_draw = false;
+    bool capture_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;
     std::unique_ptr<HdrNative> hdr_native; // bbport: native HDR output (docs/hdr.md); before
@@ -832,13 +867,33 @@ private:
             return newest;
         }
     };
+    static constexpr u32 WaitedGranuleShift = 16;
+    static constexpr u64 WaitedScanLimit = 4096;
+    static bool ReadTrackingFiltered();
+    bool WaitedOnBefore(VAddr address, u64 size) const;
+    bool NoteWaitedOn(VAddr address, u64 size);
+    std::array<u64, 1u << 16> waited_on{};
+    u64 newest_pending_write = 0;
     PendingReads pending_reads;
+    struct ConstantCopy {
+        VAddr address;
+        u32 size;
+        u32 version;
+        u64 at;
+        u64 offset;
+        u64 hash;
+    };
+    std::array<ConstantCopy, 4096> constant_copies{};
+    std::vector<u64> gpu_written_granules = std::vector<u64>(1u << 14);
+    u64 constant_checks = 0;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool pipeline_is_compute = false; ///< bbport: the bound pipeline of BindResources
+    bool ui_movie_draw = false; ///< a Scaleform draw, or one of the UI pass (SmoothUiSampler)
+    bool ui_additive = false;   ///< ui_movie_draw blends additively (SmoothUiSampler)
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     u32 preupload_frame = ~0u; ///< bbport: frame of the last background pre-upload
     bool PendingWriteOverlaps(VAddr address, u64 size);
@@ -852,6 +907,20 @@ private:
     u32 num_ring_stages = 0;
     /// bbport: the vertex stream V#s of the packet being recorded (stage B; empty elsewhere).
     std::span<const AmdGpu::Buffer> packet_vsharps;
+    std::span<const u64> packet_vkeys;
+    std::span<const u64> packet_view_keys;
+    u64 packet_index_key = 0;
+    struct ObjectBind {
+        u64 key;
+        VAddr base;
+        u64 size;
+        u64 generation;
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+    };
+    std::array<ObjectBind, 4096> object_binds{};
+    u64 object_bind_checks = 0;
+    std::pair<const VideoCore::Buffer*, u64> BindByObject(u64 key, VAddr base, u64 size);
     const RingBinding* FindRingBinding(const Shader::Info& stage, u32 index) const {
         for (u32 i = 0; i < num_ring_stages; ++i) {
             if (ring_stages[i].info == &stage) {

@@ -1,9 +1,8 @@
-"""Verify the generated SSR composite's live RGB multiplier and environment fallback."""
+# SPDX-License-Identifier: GPL-2.0-or-later
 import re
 import struct
 import unittest
 from pathlib import Path
-
 
 class SsrIntensityTest(unittest.TestCase):
     def test_composite_multiplier(self):
@@ -22,7 +21,7 @@ class SsrIntensityTest(unittest.TestCase):
         constants = {args[1]: args[2] for op, args in instructions if op == 43}
         push_variables = {args[1] for op, args in instructions
                           if op == 59 and args[2] == 9}
-        # OpAccessChain to AuxData member 11, whose offset must be byte 120.
+
         accesses = [args for op, args in instructions if op == 65 and
                     args[2] in push_variables and len(args) == 4 and
                     constants.get(args[3]) == 11]
@@ -38,12 +37,12 @@ class SsrIntensityTest(unittest.TestCase):
         intensity = next(args[1] for op, args in instructions
                          if op == 124 and args[2] == loaded)
         uses = [args for op, args in instructions if op == 133 and intensity in args[2:]]
-        self.assertEqual(len(uses), 3)  # RGB only; confidence is not scaled.
+        self.assertEqual(len(uses), 3)
         definitions = {args[1]: (op, args) for op, args in instructions
                        if op in (129, 133)}
         for multiply in uses:
             delta = multiply[2] if multiply[3] == intensity else multiply[3]
-            self.assertEqual(definitions[delta][0], 133)  # Already confidence weighted.
+            self.assertEqual(definitions[delta][0], 133)
             adds = [args for op, args in instructions
                     if op == 129 and multiply[1] in args[2:]]
             self.assertEqual(len(adds), 1)
@@ -61,7 +60,6 @@ class SsrIntensityTest(unittest.TestCase):
                         result, background + strength * confidence * (reflection - background))
                     if strength == 0 or confidence == 0:
                         self.assertEqual(result, background)
-
 
 if __name__ == "__main__":
     unittest.main()

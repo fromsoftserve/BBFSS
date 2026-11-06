@@ -17,6 +17,12 @@
             <Line Type="bytes" Address="0x01fb5190" Value="4531c090"/>
         </PatchList>
     </Metadata>
+    <Metadata Title="Bloodborne" Name="Lamp2Lamp (warp between lamps)" Note="Lit lamps offer the other lamps of the same Headstone region, and the Hunter's Dream, without going through the Dream first. Changes the game's event and lamp scripts, so a mod that changes those files takes their place. The new lamp text is English only. Lamp2Lamp by Disschorde: https://www.nexusmods.com/bloodborne/mods/455" Author="Disschorde" PatchVer="1.1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+        <PatchList/>
+    </Metadata>
+    <Metadata Title="Bloodborne" Name="Lamp2Lamp: warp to bosses" Note="Includes Lamp2Lamp, so it needs no other switch. Moves most boss lamps to the front of their arena, so you can warp to a boss once you have found it, except Rom, Amy, Mico, Celestial Emissary and Orphan. A mod that changes the same map files takes their place. Lamp2Lamp by Disschorde: https://www.nexusmods.com/bloodborne/mods/455" Author="Disschorde" PatchVer="1.0.1" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+        <PatchList/>
+    </Metadata>
     <Metadata Title="Bloodborne" Name="Performance Patch (perf increase)" Note="Lighter settings for the renderer and its debug parameters, shorter waits in worker threads, sleeps capped at a few milliseconds and profiling skipped. Changes some visuals." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
         <PatchList>
             <Line Type="bytes" Address="0x0547aed0" Value="09"/>
@@ -1104,6 +1110,11 @@
             <Line Type="bytes" Address="0x03abc480" Value="c6413001488b41284889c7be17000000e8cb578dfd84c00f840c00000031ffbe28000000e8671921fe4183bc24c400000001e90865ebfd"/>
             <Line Type="bytes" Address="0x019729ab" Value="e9d09a140290"/>
             <Line Type="bytes" Address="0x019729b6" Value="e9cd9a14020f1f4000"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Bloodborne" Name="Enable Extra Messenger Skins" Note="The game treats its hidden pre-order messenger skins as installed and offers them in the Hunter's Dream: they are in the game's own files, only the licence flags kept them out." Author="distpade (NexusMods)" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x023b67b3" Value="49c7460801010101"/>
         </PatchList>
     </Metadata>
     <Metadata Title="Bloodborne" Name="1280x800 Light Grid For SteamDeck (READ NOTES)" Note="The light grid's tiles at 1280x800, a single tile for a window of that size: far fewer light draw calls. Use the one that matches your window size, not the render size." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">

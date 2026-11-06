@@ -26,6 +26,7 @@
 
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_optiscaler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #endif
 
@@ -299,7 +300,13 @@ struct Fsr4Vk::Impl {
             return true;
         }
         const auto path = Fsr4Vk::Directory() / LibraryName;
-        module = LoadLibraryW(path.c_str());
+        const auto own = OptiScaler::PrivateFfxLibrary(path, "lantern_fsr4vk.dll");
+        if (!own.empty()) {
+            module = LoadLibraryW(own.c_str());
+        }
+        if (!module) {
+            module = LoadLibraryW(path.c_str());
+        }
         if (!module) {
             Fail("cannot load " + Fsr4Vk::LibraryPathUtf8() + " (error " + std::to_string(GetLastError()) + ")",
                  true);
@@ -360,7 +367,6 @@ struct Fsr4Vk::Impl {
         version.header.next = &backend.header;
         backend.header.next = &api.header;
         api.header.next = nullptr;
-        // The device snapshot is optional: a provider that does not know it gets none.
         if (query(nullptr, &features_query.header) == ReturnOk && features_query.version >= 1) {
             api.header.next = &features.header;
         }
@@ -565,7 +571,7 @@ struct Fsr4Vk::Impl {
         Transition(f.cmdbuf, f, false);
         if (result != ReturnOk) {
             Fail(std::string{"dispatch failed: "} + ReturnName(result) + " (" +
-                     std::to_string(result) + ")",
+                     std::to_string(result) + ")" + OptiScaler::FfxFailureHint(),
                  true);
             return false;
         }

@@ -33,6 +33,8 @@ namespace BloodborneLauncher
             ws.GameCrashed += OnGameCrashed;
             ws.SignInRefused += OnSignInRefused;
             ws.Initialise();
+            // The settings are read by Initialise: the saved window placement comes after it.
+            RestoreWindowPlacement(ws.Settings);
             KeyDown += Window_KeyDown;
             PreviewMouseDown += Window_PreviewMouseDown;
             Deactivated += (_, _) => SearchResults.Visibility = Visibility.Collapsed;
@@ -104,6 +106,8 @@ namespace BloodborneLauncher
                         ? L.F($"Lantern Engine ready. Engine: {Paths.PortDir}")
                         : L.T("Lantern Engine ready. Choose the engine folder in Settings."),
                     Paths.IsPortDir(Paths.PortDir) ? LogLevel.Good : LogLevel.Warn);
+                if (Updater.CleanOldFiles(ws.Settings, Paths.PortDir) is > 0 and var cleaned)
+                    ws.Log(L.F($"Removed {cleaned} leftover files from older versions."), LogLevel.Step);
                 // Once: the settings that suit this PC, shown before anything changes.
                 if (_directPlay)
                     _ = Dispatcher.BeginInvoke(async () => await PlayDirectAsync(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
@@ -115,11 +119,16 @@ namespace BloodborneLauncher
                     _ = Dispatcher.BeginInvoke(() => SetupGuide.Open(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 else if (!ws.Settings.Bool("hardware_offered") && Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
                     _ = Dispatcher.BeginInvoke(() => OfferBestSettings(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                else if (ws.Settings.Bool("hardware_offered") && !ws.Settings.Bool("thanks_maximilian_dood") && Prompt.SnapshotPath == null)
+                    _ = Dispatcher.BeginInvoke(ShowThanks, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 // Once, after updating from an older launcher (a new install starts on New): the
                 // newer engine or the one 0.9.33 ran, the player's choice. Nothing changes unasked.
                 else if (ws.Settings.Bool("hardware_offered") && !ws.Settings.Bool("engine_preset_asked") &&
                          Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
                     _ = Dispatcher.BeginInvoke(AskEnginePreset, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                else if (ws.Settings.Bool("hardware_offered") && TestedSettings.ShouldAsk(ws.Ini, ws.Settings) &&
+                         Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
+                    _ = Dispatcher.BeginInvoke(AskTestedSettings, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             };
             Closing += OnClosing;
         }
@@ -220,6 +229,38 @@ namespace BloodborneLauncher
         /// <summary>Shows what would change to suit this PC, and applies it on Apply.</summary>
         /// <summary>Graphics › Engine preset, asked once: New or Legacy (0.9.33). Closed without a
         /// choice, it asks again at the next start.</summary>
+        private void ShowThanks()
+        {
+            var ws = Workspace.Current;
+            ws.Settings.Set("thanks_maximilian_dood", true);
+            ws.SaveSoon();
+            Prompt.Tell(L.T("Thank you, Maximilian Dood!"), L.T("Thank you to Maximilian Dood for covering Lantern Engine.") + "\n\n" + L.T("Maximilian Dood, I'd love to reach out. My Discord is @awakenkn."));
+        }
+
+        private void AskTestedSettings()
+        {
+            var ws = Workspace.Current;
+            var lines = string.Join("\n", TestedSettings.Differences(ws.Ini, ws.Settings).Select(d => TestedSettings.Describe(d, ws.Ini, ws.Settings)));
+            var choice = Prompt.Choose(L.T("This beta was tested with these settings"),
+                L.T("Some of yours are different, so your game may not run the way it did in testing. If you use the tested settings, yours are saved first, and Settings › Beta tested settings brings them back.\n\n") + lines,
+                L.T("Keep mine"), L.T("Use tested settings"));
+            if (choice < 0) return;
+            TestedSettings.MarkAsked(ws.Settings);
+            if (choice == 1)
+            {
+                try
+                {
+                    var file = TestedSettings.Use(ws.Ini, ws.Settings);
+                    ws.Log(L.F($"Using the settings this beta was tested with. Yours are saved in {file}"), LogLevel.Good);
+                }
+                catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                {
+                    Prompt.Tell(L.T("Your settings were not changed"), L.T("They could not be saved first: ") + e.Message);
+                }
+            }
+            ws.SaveSoon();
+        }
+
         private void AskEnginePreset()
         {
             var ws = Workspace.Current;
@@ -348,7 +389,9 @@ namespace BloodborneLauncher
             wash.Freeze(); // never changes: frozen brushes skip change tracking
             BackdropShade.Fill = wash;
             var mode = s.Str("ui_background");
-            if (mode == "none")
+            var mica = mode == "mica" && Environment.OSVersion.Version.Build >= 22000;
+            ApplyMica(mica, shade);
+            if (mode == "none" || mode == "mica")
             {
                 _backdropLoad++; // a picture still loading is not shown
                 BackdropImage.Visibility = Visibility.Collapsed;
@@ -372,6 +415,24 @@ namespace BloodborneLauncher
 
         private int _backdropLoad;
 
+        private void ApplyMica(bool on, Color shade)
+        {
+            if (on)
+            {
+                var tint = new SolidColorBrush(LauncherTheme.WithAlpha(shade, 0x66));
+                tint.Freeze();
+                BaseLayer.Background = tint;
+                Background = Brushes.Transparent;
+                if (WindowBackdropType != Wpf.Ui.Controls.WindowBackdropType.Mica)
+                    WindowBackdropType = Wpf.Ui.Controls.WindowBackdropType.Mica;
+                return;
+            }
+            if (WindowBackdropType != Wpf.Ui.Controls.WindowBackdropType.None)
+                WindowBackdropType = Wpf.Ui.Controls.WindowBackdropType.None;
+            BaseLayer.SetResourceReference(System.Windows.Controls.Panel.BackgroundProperty, "WindowBaseBrush");
+            SetResourceReference(BackgroundProperty, "WindowBaseBrush");
+        }
+
         /// <summary>Finds and decodes the background picture on a worker thread (the game folder may be
         /// on a slow or sleeping disk, and a big PNG takes a while to decode), then shows it.</summary>
         private async Task LoadBackdropAsync(string mode, string own, string game, int width)
@@ -382,7 +443,10 @@ namespace BloodborneLauncher
             {
                 image = await Task.Run(() =>
                 {
-                    string? art = mode == "custom" && System.IO.File.Exists(own)
+                    var builtIn = AppIcon.Backdrop(mode);
+                    string? art = builtIn != null
+                        ? $"pack://application:,,,/Assets/{builtIn}"
+                        : mode == "custom" && System.IO.File.Exists(own)
                         ? own
                         : new[] { "pic1.png", "pic0.png" }
                             .Select(n => System.IO.Path.Combine(game, "sce_sys", n))
@@ -501,8 +565,76 @@ namespace BloodborneLauncher
             DiscordPresence.Update(Workspace.Current.Settings, running, _gameStartedUtc);
         }
 
+        /// <summary>The size and position the window had when it was last closed (settings.json:
+        /// window_width, window_height, window_x, window_y, window_maximized), else the default size.
+        /// Either way it is made to fit the screen: 1040 x 780 does not fit a 1080p screen at 150% or
+        /// 200% Windows scaling. A saved position no screen shows any more (a monitor unplugged) is
+        /// dropped and the window opens centred.</summary>
+        private void RestoreWindowPlacement(LauncherSettings settings)
+        {
+            try
+            {
+                var work = SystemParameters.WorkArea;
+                double width = Width, height = Height;
+                int savedWidth = settings.Int("window_width"), savedHeight = settings.Int("window_height");
+                if (savedWidth >= 400 && savedHeight >= 300)
+                {
+                    width = savedWidth;
+                    height = savedHeight;
+                }
+                MinWidth = Math.Min(MinWidth, work.Width - 16);
+                MinHeight = Math.Min(MinHeight, work.Height - 16);
+                width = Math.Max(MinWidth, Math.Min(width, work.Width - 16));
+                height = Math.Max(MinHeight, Math.Min(height, work.Height - 16));
+                Width = width;
+                Height = height;
+                if (settings.Str("window_x").Length > 0 && settings.Str("window_y").Length > 0)
+                {
+                    double x = settings.Int("window_x"), y = settings.Int("window_y");
+                    double left = SystemParameters.VirtualScreenLeft, top = SystemParameters.VirtualScreenTop;
+                    double right = left + SystemParameters.VirtualScreenWidth, bottom = top + SystemParameters.VirtualScreenHeight;
+                    // The title bar must be on a screen, or the window could not be moved back.
+                    if (x + 120 >= left && x + 120 < right && y + 20 >= top && y + 20 < bottom)
+                    {
+                        WindowStartupLocation = WindowStartupLocation.Manual;
+                        Left = Math.Max(left, Math.Min(x, right - width));
+                        Top = Math.Max(top, Math.Min(y, bottom - height));
+                    }
+                }
+                if (settings.Bool("window_maximized"))
+                    WindowState = WindowState.Maximized;
+            }
+            catch (Exception)
+            {
+                // The default size, centred.
+            }
+        }
+
+        /// <summary>Called as the window closes. A maximised window keeps the size and position it
+        /// had before (RestoreBounds); a minimised one (the --play start) saves nothing.</summary>
+        private void SaveWindowPlacement()
+        {
+            try
+            {
+                if (_directPlay || WindowState == WindowState.Minimized || !IsVisible) return;
+                var bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, ActualWidth, ActualHeight) : RestoreBounds;
+                if (bounds.IsEmpty || double.IsNaN(bounds.Left) || double.IsNaN(bounds.Top) || bounds.Width < 1 || bounds.Height < 1) return;
+                var settings = Workspace.Current.Settings;
+                settings.Set("window_maximized", WindowState == WindowState.Maximized);
+                settings.Set("window_width", (int)Math.Round(bounds.Width));
+                settings.Set("window_height", (int)Math.Round(bounds.Height));
+                settings.Set("window_x", (int)Math.Round(bounds.Left));
+                settings.Set("window_y", (int)Math.Round(bounds.Top));
+            }
+            catch (Exception)
+            {
+                // The window closes without remembering where it was.
+            }
+        }
+
         private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
+            SaveWindowPlacement();
             Workspace.Current.SaveNow();
             DiscordPresence.Stop();
             if (_closing || !Workspace.Current.Game.Running)
@@ -531,6 +663,75 @@ namespace BloodborneLauncher
         private void MinimizeWindow_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
         private void MaximizeWindow_Click(object sender, RoutedEventArgs e) =>
             WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            if (System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle) is { } source)
+                source.AddHook(SnapLayoutHook);
+        }
+
+        private System.Windows.Controls.Button? VisibleMaximize()
+        {
+            if (WinButtons.IsVisible && WinMaximize.IsVisible) return WinMaximize;
+            if (!MacButtons.IsVisible) return null;
+            return MacButtons.Children.OfType<System.Windows.Controls.Button>()
+                .FirstOrDefault(b => (string)b.ToolTip == L.T("Maximize") && b.IsVisible);
+        }
+
+        private bool OverMaximize(IntPtr lParam)
+        {
+            if (VisibleMaximize() is not { } button) return false;
+            var x = unchecked((short)(long)lParam);
+            var y = unchecked((short)((long)lParam >> 16));
+            try
+            {
+                var p = button.PointFromScreen(new Point(x, y));
+                return p.X >= 0 && p.Y >= 0 && p.X < button.ActualWidth && p.Y < button.ActualHeight;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private void SetMaximizeHover(bool on)
+        {
+            if (on) WinMaximize.SetResourceReference(BackgroundProperty, "SidebarItemHoverBrush");
+            else WinMaximize.ClearValue(BackgroundProperty);
+        }
+
+        private IntPtr SnapLayoutHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            const int NcHitTest = 0x0084, NcMouseMove = 0x00A0, NcLButtonDown = 0x00A1, NcLButtonUp = 0x00A2,
+                NcMouseLeave = 0x02A2, HtMaxButton = 9;
+            switch (msg)
+            {
+                case NcHitTest:
+                    if (OverMaximize(lParam))
+                    {
+                        handled = true;
+                        return new IntPtr(HtMaxButton);
+                    }
+                    SetMaximizeHover(false);
+                    break;
+                case NcMouseMove:
+                    SetMaximizeHover(wParam.ToInt32() == HtMaxButton);
+                    break;
+                case NcMouseLeave:
+                    SetMaximizeHover(false);
+                    break;
+                case NcLButtonDown when wParam.ToInt32() == HtMaxButton:
+                    handled = true;
+                    break;
+                case NcLButtonUp when wParam.ToInt32() == HtMaxButton:
+                    handled = true;
+                    SetMaximizeHover(false);
+                    MaximizeWindow_Click(this, new RoutedEventArgs());
+                    break;
+            }
+            return IntPtr.Zero;
+        }
 
         // ---------------------------------------------------------------- navigation
 
@@ -566,6 +767,7 @@ namespace BloodborneLauncher
             var item = _sidebarNav
                 ? page switch
                 {
+                    "saves" => ClassicSaves,
                     "output" => ClassicOutput,
                     "online" => ClassicOnline,
                     "advanced" => ClassicSettings,
@@ -577,6 +779,7 @@ namespace BloodborneLauncher
                 }
                 : page switch
                 {
+                    "saves" => SavesItem,
                     "online" => OnlineItem,
                     "advanced" => SettingsItem,
                     "output" or "mods" or "engine" => MoreItem,
@@ -946,8 +1149,15 @@ namespace BloodborneLauncher
             var ini = ws.Ini;
             // A connected Hunter's Dream account plays in its own co-op pool (the engine's thd backend);
             // decided here, not only when the Online page is opened.
-            ini.Set("online_pool", s.HuntersDreamToken.Length > 0 && s.Str("hd_name").Length > 0 ? "huntersdream" : "");
-            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1" && ini.Get("online_pool") != "huntersdream")
+            SuperMedo.Apply(ini, s);
+            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1" && SuperMedo.Selected(ini) &&
+                ini.Get("seamless_enabled") != "1" && SuperMedo.Problem(ini, s) is { } medoProblem)
+            {
+                Prompt.Tell(L.T("Online"), medoProblem + L.T("\n\nOr turn \"Play online\" off to play offline."));
+                Show("online");
+                return;
+            }
+            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1" && !SuperMedo.Selected(ini) && ini.Get("online_pool") != "huntersdream")
             {
                 // Online play is The Hunter's Dream's: without its account the engine stays offline.
                 Prompt.Tell(L.T("Online"), L.T("Connect your Hunter's Dream account on the Online page first (with Discord, or without it).") +

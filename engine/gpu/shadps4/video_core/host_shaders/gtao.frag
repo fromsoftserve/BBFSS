@@ -1,44 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Ambient occlusion from a visibility bitmask (Therrien, Levesque, Gilet, "Screen Space Indirect
-// Lighting with Visibility Bitmask") on top of the GTAO slice setup (Jimenez et al., Activision
-// TR-16-01), in place of Bloodborne's ScreenSpaceAO2_WithNormal pixel shader (hash cbbca5dc). It
-// keeps that shader's resource interface (decoded from its IR dump), so the engine's
-// descriptors, targets and the later bilateral upscale stay as they are.
-//
-//   ubo_0 (binding 0)  constants: [0..15] inverse projection rows (depth -> view position),
-//                      [16,17] target size, [18,19] screen-space radius scale, [20..30] world ->
-//                      view normal rows, [36,37] strength scale and offset, [40..42] radius
-//                      scaling by distance (a, min, max)
-//   ubo_1 (binding 1)  the SSAO sample pattern (unused here, declared to keep the layout)
-//   ubo_2 (binding 2)  [2] far distance, for the packed depth output
-//   img0 / samp0       depth        img1 / samp1  normals        img2 / samp2  64x64 rotation noise
-//
-// Output RT0: R = visibility (1 = open), GBA = view depth packed for the bilateral upscale.
-//
-// GTAO_COMPUTE (compiled as a compute shader, HQ only) runs the same math at the full internal
-// resolution after the game's bilateral upscale: img0 is the full-resolution depth the upscale
-// samples, the rotation comes from a per-pixel hash and the result goes to a storage image.
-
 #version 450
 #extension GL_EXT_scalar_block_layout : require
 
-#ifdef GTAO_COMPUTE
-layout(local_size_x = 8, local_size_y = 8) in;
-layout(scalar, set = 0, binding = 0) uniform Cb0 { uint d[16384]; } ubo_0;
-layout(scalar, set = 0, binding = 1) uniform Cb2 { uint d[16384]; } ubo_2;
-layout(set = 0, binding = 2) uniform texture2D img0;
-layout(set = 0, binding = 3) uniform texture2D img1;
-layout(set = 0, binding = 4) uniform sampler samp0;
-#define samp1 samp0
-layout(rgba8, set = 0, binding = 5) uniform writeonly image2D ao_output;
-layout(push_constant) uniform BbPush {
-    uvec2 extent;
-    float ao_k;
-};
-#define FRAG_COORD (vec2(gl_GlobalInvocationID.xy) + 0.5)
-#else
-#define FRAG_COORD gl_FragCoord.xy
 layout(scalar, set = 0, binding = 0) uniform Cb0 { uint d[16384]; } ubo_0;
 layout(scalar, set = 0, binding = 1) uniform Cb1 { uint d[16384]; } ubo_1;
 layout(scalar, set = 0, binding = 2) uniform Cb2 { uint d[16384]; } ubo_2;
@@ -51,47 +15,39 @@ layout(set = 0, binding = 8) uniform sampler samp2;
 
 layout(location = 0) out vec4 frag_color0;
 
-// The strength slider: the host stores a float in PushData::motion_param (offset 120), which
-// this pass never uses for object motion.
 layout(push_constant) uniform BbPush {
+    layout(offset = 80) uint buf_off;
     layout(offset = 120) float ao_k;
-#ifdef GTAO_SPATIAL_HQ
     layout(offset = 124) uint scene_size;
-#endif
 };
-#endif
 
 const float PI = 3.14159265358979;
 const float HALF_PI = 1.57079632679490;
-#ifndef GTAO_SLICES
-#define GTAO_SLICES 1
-#endif
-#ifndef GTAO_STEPS
-#define GTAO_STEPS 5
-#endif
-const int SLICES = GTAO_SLICES;
-const int STEPS = GTAO_STEPS;
+const int SLICES = 1;
+const int STEPS = 5;
 const float MIN_RADIUS_PX = 28.0;
-const int SECTORS = 32; // bits in the visibility mask
-// Assumed thickness of every depth sample (view units): light passes behind anything thinner,
-// which is what keeps rails, wires and foliage from darkening their surroundings. It grows with
-// distance so far-away geometry is not over-attenuated.
+const int SECTORS = 32;
+const float SECTOR_WEIGHT[32] = float[32](
+    0.00240764, 0.00719972, 0.01192247, 0.01653040, 0.02097913, 0.02522583, 0.02922958, 0.03295184,
+    0.03635675, 0.03941153, 0.04208675, 0.04435665, 0.04619938, 0.04759718, 0.04853659, 0.04900857,
+    0.04900857, 0.04853659, 0.04759718, 0.04619938, 0.04435665, 0.04208675, 0.03941153, 0.03635675,
+    0.03295184, 0.02922958, 0.02522583, 0.02097913, 0.01653040, 0.01192247, 0.00719972, 0.00240764);
+
 const float THICKNESS_NEAR = 0.10;
 const float THICKNESS_FAR = 2.0;
-// World-space reach of the occlusion (view units, about metres). Occluders farther than this
-// from the surface are ignored, which keeps thin objects from darkening things well behind them.
-const float MAX_WORLD_RADIUS = 0.3;
-// Extra visibility exponent at the far plane; 0 = no distance boost.
-const float DISTANCE_BOOST = 2.0;
-// Strength of the visibility S-curve; 0 = off, 1 = full smoothstep.
-const float CONTRAST = 0.5;
-const float THICKNESS_BIAS = 0.02; // fraction of the reach, keeps flat surfaces from self-occluding
 
-float cb0(int i) { return uintBitsToFloat(ubo_0.d[i]); }
+const float MAX_WORLD_RADIUS = 0.3;
+
+const float DISTANCE_BOOST = 2.0;
+
+const float CONTRAST = 0.5;
+const float THICKNESS_BIAS = 0.02;
+
+float cb0(int i) { return uintBitsToFloat(ubo_0.d[((buf_off & 255u) >> 2u) + uint(i)]); }
+float cb2(int i) { return uintBitsToFloat(ubo_2.d[(((buf_off >> 16u) & 255u) >> 2u) + uint(i)]); }
 
 float readDepth(vec2 uv) { return textureLod(sampler2D(img0, samp0), uv, 0.0).x; }
 
-// inverse projection rows, loaded once per pixel
 vec4 gR0, gR1, gR2, gR3;
 
 vec3 viewPos(vec2 uv, float depth) {
@@ -106,17 +62,11 @@ float fastAcos(float x) {
     return x >= 0.0 ? r : PI - r;
 }
 
-// Sector bits covered by one depth sample treated as a slab of thickness `thick` along the view
-// ray (visibility bitmask, Therrien et al. 2023). A sector is taken when at least half covered.
 uint sectorMask(vec2 uvS, vec3 pos, vec3 v, float side, float lo, float thick, float reach, float bias) {
-#ifdef GTAO_SPATIAL_HQ
-    if (any(lessThan(uvS, vec2(0.0))) || any(greaterThanEqual(uvS, vec2(1.0)))) return 0u;
-#endif
     vec3 d = viewPos(uvS, readDepth(uvS)) - pos;
     float l = length(d);
     if (l > reach || l < bias) return 0u;
-    // occluders near the edge of the reach cover less, so contact shadows taper off instead of
-    // ending in a halo
+
     thick *= 1.0 - smoothstep(0.3, 1.0, l / reach);
     vec3 db = d - v * thick;
     float af = side * fastAcos(clamp(dot(d, v) / l, -1.0, 1.0));
@@ -135,17 +85,10 @@ void main() {
     gR1 = vec4(cb0(4), cb0(5), cb0(6), cb0(7));
     gR2 = vec4(cb0(8), cb0(9), cb0(10), cb0(11));
     gR3 = vec4(cb0(12), cb0(13), cb0(14), cb0(15));
-#ifdef GTAO_COMPUTE
-    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, extent))) return;
-    vec2 size = vec2(extent);
-#else
     vec2 size = vec2(cb0(16), cb0(17));
-#ifdef GTAO_SPATIAL_HQ
-    if (scene_size != 0u)
-        size *= vec2(scene_size & 65535u, scene_size >> 16) / vec2(1920.0, 1080.0);
-#endif
-#endif
-    vec2 uv = FRAG_COORD / size;
+    const uvec2 reduced = uvec2(scene_size & 65535u, scene_size >> 16u);
+    const vec2 raster = reduced.x != 0u && reduced.y != 0u ? vec2(reduced) : vec2(1920.0, 1080.0);
+    vec2 uv = gl_FragCoord.xy * (vec2(1920.0, 1080.0) / raster) / size;
     float depth = readDepth(uv);
 
     float visibility = 1.0;
@@ -162,40 +105,23 @@ void main() {
         vec3 v = -normalize(pos);
         float scale = max(cb0(41), min(cb0(42), cb0(40) / pos.z));
         vec2 texel = 1.0 / vec2(textureSize(sampler2D(img0, samp0), 0));
-#ifdef GTAO_COMPUTE
-        // The minimum footprint stays in AO-resolution texels so the occlusion scale matches.
-        vec2 minTexel = 1.0 / vec2(cb0(16), cb0(17));
-        float angle0 = 2.0 * PI * fract(52.9829189 * fract(dot(FRAG_COORD, vec2(0.00583715, 0.06711056))));
-        vec2 noise = vec2(cos(angle0), sin(angle0));
-#else
-        vec2 minTexel = texel;
-        vec2 noise = textureLod(sampler2D(img2, samp2), FRAG_COORD / 64.0, 0.0).xy * 2.0 - 1.0;
-        noise = normalize(noise + vec2(1e-5));
-#endif
-        // keep a minimum footprint so distant surfaces still get occlusion instead of fading out
-        vec2 radiusUv = max(vec2(cb0(18), cb0(19)) * scale, minTexel * MIN_RADIUS_PX);
 
-        float jitter = fract(52.9829189 * fract(dot(FRAG_COORD, vec2(0.06711056, 0.00583715))));
-        float thick = THICKNESS_NEAR + THICKNESS_FAR * clamp(pos.z / uintBitsToFloat(ubo_2.d[2]), 0.0, 1.0);
+        vec2 radiusUv = max(vec2(cb0(18), cb0(19)) * scale, texel * MIN_RADIUS_PX);
+
+        vec2 noise = textureLod(sampler2D(img2, samp2), gl_FragCoord.xy / 64.0, 0.0).xy * 2.0 - 1.0;
+        noise = normalize(noise + vec2(1e-5));
+        float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float thick = THICKNESS_NEAR + THICKNESS_FAR * clamp(pos.z / cb2(2), 0.0, 1.0);
 
         float accum = 0.0;
-#ifdef GTAO_SPATIAL_HQ
-        float projectedWeight = 0.0;
-#endif
         for (int s = 0; s < SLICES; ++s) {
-#ifdef GTAO_SPATIAL_HQ
-            float angle = PI * float(s) / float(SLICES);
-            vec2 dir = mat2(cos(angle), sin(angle), -sin(angle), cos(angle)) * noise;
-#else
-            // Preserve the Standard shader's sampling and arithmetic.
             vec2 dir = s == 0 ? noise : vec2(-noise.y, noise.x);
-#endif
             vec2 stepUv = dir * radiusUv;
 
-            // direction of the slice in view space, taken at this pixel's depth
             vec3 full = viewPos(uv + stepUv, depth) - pos;
             float radius = max(length(full), 1e-4);
             vec3 dirV = full / radius;
+            stepUv *= min(1.0, MAX_WORLD_RADIUS / radius);
 
             vec3 ortho = dirV - dot(dirV, v) * v;
             vec3 axis = normalize(cross(ortho, v));
@@ -203,16 +129,12 @@ void main() {
             float projLen = length(projN);
             if (projLen < 1e-4) {
                 accum += 1.0;
-#ifdef GTAO_SPATIAL_HQ
-                projectedWeight += 1.0;
-#endif
                 continue;
             }
             float cosN = clamp(dot(projN, v) / projLen, -1.0, 1.0);
             float sgn = dot(ortho, projN) < 0.0 ? -1.0 : 1.0;
             float nAng = sgn * fastAcos(cosN);
 
-            // the 32 sectors cover the hemisphere around the projected normal, one bit each
             float lo = nAng - HALF_PI;
             float reach = min(radius, MAX_WORLD_RADIUS);
             float bias = THICKNESS_BIAS * reach;
@@ -221,54 +143,33 @@ void main() {
             for (int i = 0; i < STEPS; ++i) {
                 float t = (float(i) + jitter) / float(STEPS);
                 t = t * t;
-#ifdef GTAO_SPATIAL_HQ
-                // A scalar minimum step retains the slice direction at subpixel distances.
-                vec2 off = stepUv * max(t, 1.0 / max(length(stepUv / texel), 1.0));
-#else
                 vec2 off = stepUv * t;
                 off = sign(off) * max(abs(off), texel);
-#endif
                 mask |= sectorMask(uv + off, pos, v, 1.0, lo, thick, reach, bias);
                 mask |= sectorMask(uv - off, pos, v, -1.0, lo, thick, reach, bias);
             }
 
-            // open sectors, weighted by the cosine around the normal
-            float open = 0.0;
-            float cPrev = 1.0; // cos(0)
-            for (int j = 0; j < SECTORS; ++j) {
-                float cNext = cos(PI * float(j + 1) / float(SECTORS));
-                if (((mask >> uint(j)) & 1u) == 0u) open += 0.5 * (cPrev - cNext);
-                cPrev = cNext;
+            float open = 1.0;
+            while (mask != 0u) {
+                open -= SECTOR_WEIGHT[findLSB(mask)];
+                mask &= mask - 1u;
             }
-            accum += clamp(projLen * open, 0.0, 1.0);
-#ifdef GTAO_SPATIAL_HQ
-            projectedWeight += projLen;
-#endif
+            accum += clamp(open, 0.0, 1.0);
         }
-#ifdef GTAO_SPATIAL_HQ
-        // Normalize the slice weights so an unobstructed hemisphere stays fully open.
-        visibility = accum / max(projectedWeight, 1e-4);
-#else
         visibility = accum / float(SLICES);
-#endif
-        // darken more with distance, where the pixel footprint hides detail
-        float farFrac = clamp(pos.z / uintBitsToFloat(ubo_2.d[2]), 0.0, 1.0);
+
+        float farFrac = clamp(pos.z / cb2(2), 0.0, 1.0);
         visibility = pow(clamp(visibility, 0.0, 1.0), 1.0 + DISTANCE_BOOST * sqrt(farFrac));
-        // S-curve: deepens partial occlusion, leaves fully open and fully closed unchanged
+
         visibility = mix(visibility, visibility * visibility * (3.0 - 2.0 * visibility), CONTRAST);
     }
 
     float ao = cb0(36) * ao_k * visibility + (cb0(37) * ao_k + (1.0 - ao_k));
 
-    // linear depth over far, in three 8-bit steps for the bilateral upscale
-    float lin = pos.z / uintBitsToFloat(ubo_2.d[2]);
+    float lin = pos.z / cb2(2);
     float p = fract(65025.0 * lin);
     float q = fract(255.0 * lin);
     float b = q - p * (1.0 / 255.0);
     float a = lin - q * (1.0 / 255.0);
-#ifdef GTAO_COMPUTE
-    imageStore(ao_output, ivec2(gl_GlobalInvocationID.xy), vec4(ao, p, b, a));
-#else
     frag_color0 = vec4(ao, p, b, a);
-#endif
 }
