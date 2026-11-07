@@ -98,8 +98,9 @@ namespace BloodborneLauncher.Core
             s.Str("patches_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "patches");
 
         /// <summary>30, 60 and 90 are the engine's fixed presets; 120 and uncapped use the uncapped
-        /// patch (scripts\run_windows.py turns them into BB_FPS=uncap with a limit).</summary>
-        public static string Fps(LauncherSettings s) => s.Str("fps_mode") is "30" or "90" or "120" or "144" or "uncap" ? s.Str("fps_mode") : "60";
+        /// patch (scripts\run_windows.py turns them into BB_FPS=uncap with a limit). 40 has no fixed
+        /// preset: it runs the uncapped (delta-time) patch limited to 40 FPS.</summary>
+        public static string Fps(LauncherSettings s) => s.Str("fps_mode") is "30" or "40" or "90" or "120" or "144" or "uncap" ? s.Str("fps_mode") : "60";
 
         /// <summary>This launch's answer about a region-changing patch while online ("keep" or
         /// "skip"; scripts/patches.py leaves it out unless "keep"), or null when none is on.</summary>
@@ -127,7 +128,7 @@ namespace BloodborneLauncher.Core
                 ["BB_PATCHES_DIR"] = PatchesDir(s),
                 ["BB_PATCHES_CONFIG"] = Path.Combine(Paths.DataDir, "patches.json"),
                 ["BB_LANGUAGE"] = s.Str("language"),
-                ["BB_FPS"] = fps,
+                ["BB_FPS"] = fps == "40" ? "uncap" : fps,
                 ["BB_FPS_LIMIT"] = fps == "uncap" ? "0" : fps,
                 ["BB_VBLANK_HZ"] = fps switch { "90" => "90", "30" or "60" => "60", _ => "0" },
                 ["PYTHONUNBUFFERED"] = "1",
