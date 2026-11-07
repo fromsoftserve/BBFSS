@@ -12,6 +12,7 @@
 #include "video_core/host_shaders/gtao_hq_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
 #include "video_core/host_shaders/ssr_frag.h"
+#include "video_core/renderer_vulkan/vk_ggx_lobes.h"
 #include "video_core/renderer_vulkan/vk_ggx_patch.h"
 #include "video_core/renderer_vulkan/vk_pom_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -25,6 +26,12 @@ constexpr size_t CompositeLiftedWords = 2606;
 constexpr u32 CompositeLiftedChecksum = 0xa5e815fc;
 
 std::atomic<bool> gtao_active{false}, ssr_active{false}, composite_active{false};
+
+bool PatchLobes(std::vector<u32>& spv) {
+    const auto& s = BbSettings::Get();
+    return GgxLobes::Patch(spv, {s.startup_local_ggx, s.startup_specular_aa, s.startup_env_ggx_tails})
+        .Changed();
+}
 
 bool Wanted(int effect) {
     return BbSettings::Get().startup_effects[effect];
@@ -170,8 +177,13 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         std::vector<u32> patched(spv.begin(), spv.end());
         Pom::PatchPom(info.pgm_hash, true, patched);
         if (patched.size() != spv.size()) {
+            PatchLobes(patched);
             return patched;
         }
+    }
+    std::vector<u32> lobes(spv.begin(), spv.end());
+    if (PatchLobes(lobes)) {
+        return lobes;
     }
     return std::nullopt;
 }

@@ -390,6 +390,8 @@ target_compile_options(ggx-directional-test PRIVATE -Wall -Wextra -Werror
 target_link_libraries(ggx-directional-test PRIVATE Vulkan::Vulkan)
 add_executable(ggx-patch-test EXCLUDE_FROM_ALL ../tests/test_ggx_patch.cpp)
 target_compile_options(ggx-patch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(ggx-lobes-test EXCLUDE_FROM_ALL ../tests/test_ggx_lobes.cpp)
+target_compile_options(ggx-lobes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(image-overlap-test EXCLUDE_FROM_ALL ../tests/test_image_overlap.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_compile_options(image-overlap-test PRIVATE -UNDEBUG)
 target_include_directories(image-overlap-test PRIVATE shim shadps4 third_party/gcn/include)

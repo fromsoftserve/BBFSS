@@ -196,6 +196,8 @@ struct Values {
     std::atomic<bool> graphics_smooth_normals{false}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
+    // Game-shader specular upgrades applied at shader compile time (restart required).
+    std::atomic<bool> graphics_local_ggx{true}, graphics_specular_aa{true}, graphics_env_ggx_tails{true};
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
@@ -249,6 +251,7 @@ struct Values {
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 0;
     bool startup_directional_ggx = false;
+    bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
     int startup_ao_quality = 0;
     int startup_shadow_resolution = 0;
     int startup_local_shadow_resolution = 0;

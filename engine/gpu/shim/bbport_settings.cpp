@@ -344,6 +344,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_native_sss=i!=0;
     } else if (key == "graphics_directional_ggx") {
         v.graphics_directional_ggx=i!=0;
+    } else if (key == "graphics_local_ggx") {
+        v.graphics_local_ggx=i!=0;
+    } else if (key == "graphics_specular_aa") {
+        v.graphics_specular_aa=i!=0;
+    } else if (key == "graphics_env_ggx_tails") {
+        v.graphics_env_ggx_tails=i!=0;
     } else if (key == "graphics_dof_intensity") {
         v.graphics_dof_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_shadow_resolution") {
@@ -597,6 +603,9 @@ void Load() {
     v.startup_upscaler = v.upscaler;
     v.startup_motion_blur_quality = v.graphics_motion_blur_quality;
     v.startup_directional_ggx = v.graphics_directional_ggx;
+    v.startup_local_ggx = v.graphics_local_ggx;
+    v.startup_specular_aa = v.graphics_specular_aa;
+    v.startup_env_ggx_tails = v.graphics_env_ggx_tails;
     v.startup_ao_quality = v.graphics_ao_quality;
     v.startup_shadow_resolution = v.graphics_shadow_resolution;
     v.startup_local_shadow_resolution = v.graphics_local_shadow_resolution;
@@ -781,6 +790,9 @@ void Save() {
     put("graphics_smooth_normals",flag(v.graphics_smooth_normals));
     put("graphics_native_sss",flag(v.graphics_native_sss));
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
+    put("graphics_local_ggx",flag(v.graphics_local_ggx));
+    put("graphics_specular_aa",flag(v.graphics_specular_aa));
+    put("graphics_env_ggx_tails",flag(v.graphics_env_ggx_tails));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));
     put("graphics_shadow_resolution",std::to_string(std::clamp(v.graphics_shadow_resolution.load(),0,2)));
     put("graphics_local_shadow_resolution",std::to_string(std::clamp(v.graphics_local_shadow_resolution.load(),0,2)));

@@ -937,6 +937,30 @@ void EffectsSection() {
             "Bloodborne. Неподдерживаемые шейдеры сохраняют нативные блики с предупреждением. "
             "Не является полной PBR-конверсией."));
     }
+    if (const char* label = Item("Point/spot light GGX", "GGX для точечных источников")) {
+        Checkbox(label, s.graphics_local_ggx);
+        Hint(BbSettings::MenuText(
+            "On by default. Replaces the game's Phong highlight from point and spot lights with "
+            "width-matched GGX: same highlight size and peak, softer natural falloff. Requires restart.",
+            "По умолчанию включено. Заменяет блик Фонга от точечных и прожекторных источников на GGX "
+            "той же ширины: тот же размер и яркость, мягкий естественный спад. Требуется перезапуск."));
+    }
+    if (const char* label = Item("Specular anti-aliasing", "Сглаживание бликов")) {
+        Checkbox(label, s.graphics_specular_aa);
+        Hint(BbSettings::MenuText(
+            "On by default. Widens glossy highlights where the surface curves faster than a pixel "
+            "(Kaplanyan/Tokuyoshi), reducing sparkle and shimmer while preserving energy. Requires restart.",
+            "По умолчанию включено. Расширяет блики там, где поверхность изгибается быстрее пикселя, "
+            "уменьшая мерцание с сохранением энергии. Требуется перезапуск."));
+    }
+    if (const char* label = Item("Environment reflection GGX tails", "GGX-хвосты отражений окружения")) {
+        Checkbox(label, s.graphics_env_ggx_tails);
+        Hint(BbSettings::MenuText(
+            "On by default. Blends a blurrier mip into the game's environment reflections to add "
+            "the soft halo of a GGX lobe. Requires restart.",
+            "По умолчанию включено. Подмешивает более размытый мип в отражения окружения, добавляя "
+            "мягкий ореол GGX. Требуется перезапуск."));
+    }
     if (const char* label = Item("Model detail", "Детализация моделей")) {
         const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
                               BbSettings::MenuText("Game default", "Как в игре"),
@@ -2314,6 +2338,9 @@ void Menu() {
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
         s.graphics_directional_ggx != s.startup_directional_ggx ||
+        s.graphics_local_ggx != s.startup_local_ggx ||
+        s.graphics_specular_aa != s.startup_specular_aa ||
+        s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||
         s.graphics_ao_quality != s.startup_ao_quality ||
         s.graphics_shadow_resolution != s.startup_shadow_resolution ||
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||
