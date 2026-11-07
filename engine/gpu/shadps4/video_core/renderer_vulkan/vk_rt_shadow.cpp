@@ -540,12 +540,10 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     }
     draw.camera_pass ? ++stats.camera_draws : ++stats.draws;
     if (!draw.solid) {
-        stats.shadow_not_solid += draw.shadow_pass ? 1 : 0;
         return 0;
     }
     // Bloodborne draws every sun shadow caster with a discarding shader; those are kept as
     // opaque casters (foliage then shadows as solid cards).
-    stats.shadow_alpha += draw.alpha && draw.shadow_pass ? 1 : 0;
     if (draw.alpha && !draw.shadow_pass) {
         ++stats.alpha;
         return 0;
@@ -640,7 +638,6 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
             ++missed;
             return 0u;
         }
-        ++stats.stale;
         entry.seen_frame = frame;
         frame_entries.push_back(&entry);
         return 0u;
@@ -683,11 +680,6 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
 void RtShadow::RecordBuilds() {
     if (builds.empty()) {
         return;
-    }
-    if (need_scene) {
-        EffectPass::Mark(12, "ray tracing BLAS builds");
-    } else {
-        EffectPass::Mark(16, "ray tracing capture (no BLAS)");
     }
     struct Job {
         std::vector<vk::AccelerationStructureGeometryKHR> geometries;
@@ -856,7 +848,6 @@ bool RtShadow::PrepareScene() {
     }
     tlas_count = count;
     slot_ticks[slot] = scheduler.CurrentTick();
-    EffectPass::Mark(13, "ray tracing scene");
     const u64 instances_address =
         instance_data.address + u64(slot) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR);
     scheduler.RecordCrumb(
@@ -955,7 +946,6 @@ bool RtShadow::Record(const Inputs& in) {
         stats.instances += frame_entries.size();
         ++stats.frames;
     }
-    ++stats.sun;
     bool use_vsm = false;
     if (BbSettings::Get().graphics_sun_vsm.load(std::memory_order_relaxed)) {
         if (!vsm_tried) {
@@ -967,14 +957,7 @@ bool RtShadow::Record(const Inputs& in) {
             std::vector<SunVsm::Caster> casters;
             casters.reserve(frame_entries.size());
             for (Entry* entry : frame_entries) {
-                if (entry->mask != ShadowMask) {
-                    ++stats.vsm_camera;
-                } else if (!entry->world.buffer) {
-                    ++stats.vsm_no_world;
-                } else if (!entry->copied) {
-                    ++stats.vsm_not_copied;
-                } else {
-                    ++stats.vsm_casters;
+                if (entry->mask == ShadowMask && entry->world.buffer && entry->copied) {
                     if (const auto* box = vsm->Box(entry->world.address)) {
                         entry->box = *box;
                         entry->has_box = true;
@@ -1057,16 +1040,11 @@ bool RtShadow::Record(const Inputs& in) {
                     }
                     const bool cascade = entry->has_box && in_cascade(entry->box);
                     if (cascade || (entry->has_box && in_view(entry->box))) {
-                        ++(cascade ? stats.vsm_kept_in_cascade : stats.vsm_kept_in_view);
                         continue;
                     }
-                    ++stats.vsm_kept;
                     casters.push_back({entry->world.address, entry->indices.address,
                                        entry->triangles, false, entry->copied_at > vsm_copies});
                 }
-            }
-            if (!in.depth || !raw_view) {
-                ++stats.vsm_no_views;
             }
             const SunVsm::Inputs vsm_in{
                 .constants = in.constants,
@@ -1191,51 +1169,21 @@ void RtShadow::OnFrameEnd() {
         vsm->OnFrameEnd();
     }
     need_scene = SceneWanted();
-    ++stats.ends;
-    for (const Entry* entry : frame_entries) {
-        stats.shadow_at_end += entry->mask == ShadowMask ? 1 : 0;
-    }
-    if (Wanted() && !Complete()) {
-        ++stats.incomplete;
-    }
     for (const Build& build : builds) {
         build.entry->built = build.entry->built && build.update;
     }
     builds.clear();
     if (stats.frames >= 600) {
         const double f = double(stats.frames);
-        std::printf("Ray tracing: sun pass in %llu of %llu frames, incomplete %llu (missed %u of "
-                    "%zu)\n",
-                    (unsigned long long)stats.sun, (unsigned long long)stats.ends,
-                    (unsigned long long)stats.incomplete, missed, frame_entries.size());
-        if (vsm) {
-            std::printf("Ray tracing: sun VSM entries %llu casters (+%llu kept, %llu kept dropped "
-                        "in view, %llu in cascades of %zu), %llu camera, %llu "
-                        "without world "
-                        "copy, %llu not copied; %llu passes without views; shadow draws %llu not "
-                        "solid, %llu alpha; %llu shadow entries at frame end\n",
-                        (unsigned long long)stats.vsm_casters, (unsigned long long)stats.vsm_kept,
-                        (unsigned long long)stats.vsm_kept_in_view,
-                        (unsigned long long)stats.vsm_kept_in_cascade, frame_volumes.size(),
-                        (unsigned long long)stats.vsm_camera,
-                        (unsigned long long)stats.vsm_no_world,
-                        (unsigned long long)stats.vsm_not_copied,
-                        (unsigned long long)stats.vsm_no_views,
-                        (unsigned long long)stats.shadow_not_solid,
-                        (unsigned long long)stats.shadow_alpha,
-                        (unsigned long long)stats.shadow_at_end);
-        }
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
-                    "frame; %zu BLAS (%llu MiB, evicted %.1f a frame); alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
-                    "many instances %.1f, over budget %.1f (kept stale %.1f), moving %.1f, copies "
-                    "rebuilt %.1f, strips %.1f a frame\n",
+                    "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
+                    "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
+                    "%.1f a frame\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
-                    (unsigned long long)(entry_bytes >> 20), double(stats.evicted) / f,
                     double(stats.alpha) / f, double(stats.not_ortho) / f, double(stats.no_camera) / f,
                     double(stats.unsupported) / f, double(stats.instanced) / f,
-                    double(stats.over_budget) / f, double(stats.stale) / f,
-                    double(stats.dynamic_draws) / f,
+                    double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
                     double(stats.shared_builds) / f, double(stats.strips) / f);
         stats = {};
     }
@@ -1271,7 +1219,6 @@ void RtShadow::OnFrameEnd() {
             const auto it = entries.find(key);
             Destroy(*it->second);
             entries.erase(it);
-            ++stats.evicted;
         }
     }
     const u32 slot = u32(frame % 4);

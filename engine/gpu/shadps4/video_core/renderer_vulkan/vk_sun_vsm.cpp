@@ -32,8 +32,6 @@ constexpr u32 BoundsWords = 12;
 // bytes, 16 bounds, 24 bytes per table entry and 12 per physical page.
 constexpr vk::DeviceSize StateBytes =
     16 + 16 + 32 + 32 + 6 * 16 + 16 * 32 + 16 * 16 + 24 * TableEntries + 12 * PhysicalPages;
-constexpr vk::DeviceSize CounterOffset = 32;
-constexpr vk::DeviceSize CounterBytes = 64;
 constexpr vk::DeviceSize ClearArgsOffset = 16;
 constexpr u32 ResetBit = 1u << 8;
 constexpr u32 CasterDynamic = 1, CasterFresh = 2, CasterRemoved = 4;
@@ -98,7 +96,7 @@ SunVsm::~SunVsm() {
     if (physical) {
         vmaDestroyImage(instance.GetAllocator(), physical, physical_allocation);
     }
-    for (Buffer* b : {&state, &items, &draws, &readback, &bounds, &bounds_readback}) {
+    for (Buffer* b : {&state, &items, &draws, &bounds, &bounds_readback}) {
         Free(*b);
     }
 }
@@ -166,14 +164,12 @@ bool SunVsm::Setup() {
         !Make(items, item_bytes, false, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
         !Make(draws, vk::DeviceSize(Slots) * SlotDraws * sizeof(Draw), true,
               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-        !Make(readback, Slots * CounterBytes, true, VK_BUFFER_USAGE_TRANSFER_DST_BIT) ||
         !Make(bounds, vk::DeviceSize(BoundsSlots) * BoundsWords * 4, false,
               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
         !Make(bounds_readback, vk::DeviceSize(Slots) * BoundsSlots * BoundsWords * 4, true,
               VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
         return false;
     }
-    std::memset(readback.mapped, 0, Slots * CounterBytes);
     free_slots.reserve(BoundsSlots);
     for (u32 s = BoundsSlots; s-- > 0;) {
         free_slots.push_back(s);
@@ -300,9 +296,7 @@ bool SunVsm::TakeSlot(u32& slot) {
 }
 
 bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
-    ++stats.calls;
     if (!ready || casters.empty() || !in.raw_view || !in.depth) {
-        ++stats.no_casters;
         return false;
     }
     const u32 slot = u32(frame % Slots);
@@ -310,18 +304,6 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         if (slot_ticks[slot]) {
             scheduler.Wait(slot_ticks[slot]);
             slot_ticks[slot] = 0;
-            const auto* counters =
-                static_cast<const u32*>(readback.mapped) + slot * (CounterBytes / 4);
-            stats.items += counters[0];
-            stats.pages += counters[1];
-            stats.item_overflow += counters[2];
-            stats.page_overflow += counters[3];
-            stats.drawn += counters[4];
-            stats.requested += counters[5];
-            stats.moved += counters[13];
-            stats.marked += counters[14];
-            stats.marked_max = std::max<u64>(stats.marked_max, counters[15]);
-            ++stats.samples;
             const auto* words = static_cast<const float*>(bounds_readback.mapped) +
                                 vk::DeviceSize(slot) * BoundsSlots * BoundsWords;
             for (const auto& [address, bounds_slot] : slot_casters[slot]) {
@@ -342,7 +324,6 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         recorded_frame = frame;
     } else {
         // A second sun pass in one frame would overwrite this slot's draw table in flight.
-        ++stats.repeats;
         return false;
     }
     auto* table = static_cast<Draw*>(draws.mapped) + slot * SlotDraws;
@@ -394,11 +375,9 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         }
     }
     if (!count) {
-        ++stats.no_casters;
         return false;
     }
     // Casters gone since the last frame clear their old pages, then give their slot back.
-    u32 removed = 0;
     for (const u64 address : previous) {
         const auto it = tracked.find(address);
         if (it == tracked.end() || it->second.seen == frame) {
@@ -409,17 +388,19 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         free_slots.push_back(it->second.slot);
         tracked.erase(it);
         boxes.erase(address);
-        ++removed;
     }
     std::swap(previous, current);
     drawn_frame = frame;
-    stats.casters += count;
-    stats.triangles += triangles;
-    stats.changed += changed_count - removed;
-    stats.removed += removed;
-    stats.resets += reset ? 1 : 0;
-    ++stats.frames;
     slot_ticks[slot] = scheduler.CurrentTick();
+    // Only the changed casters' kept bounds come back to the host.
+    const vk::DeviceSize bounds_bytes = vk::DeviceSize(BoundsWords) * 4;
+    std::vector<vk::BufferCopy> bounds_copies;
+    bounds_copies.reserve(slot_casters[slot].size());
+    for (const auto& [address, bounds_slot] : slot_casters[slot]) {
+        const vk::DeviceSize at = vk::DeviceSize(bounds_slot) * bounds_bytes;
+        bounds_copies.push_back(
+            {at, vk::DeviceSize(slot) * BoundsSlots * bounds_bytes + at, bounds_bytes});
+    }
 
     Push push{
         .mode = ModeSetup,
@@ -436,11 +417,12 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
     cleared = true;
     const vk::DeviceSize draws_offset = vk::DeviceSize(slot) * SlotDraws * sizeof(Draw);
     scheduler.EndRendering();
-    // Recorded as five stages, each its own profiler label.
-    auto body = 
-        [in, push, clear, reset, slot, draws_offset, changed_count, changed_triangles,
+    // Recorded in five stages (setup, caster bounds, binning, page draws, sampling).
+    auto body =
+        [in, push, clear, reset, draws_offset, changed_count, changed_triangles,
+         bounds_copies = std::move(bounds_copies),
          state = state.buffer, items = items.buffer, draws = draws.buffer,
-         readback = readback.buffer, bounds = bounds.buffer,
+         bounds = bounds.buffer,
          bounds_readback = bounds_readback.buffer, physical = physical,
          physical_view = physical_view, sampler = *sampler, compute_pipeline = *compute_pipeline,
          compute_layout = *compute_layout, draw_pipeline = *draw_pipeline,
@@ -554,15 +536,17 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                     run_linear(ModeBounds, changed_triangles);
                     run_linear(ModeDirty, changed_count);
                     push = main;
-                    // The kept bounds go back to the host, which drops kept casters the game
-                    // would have drawn.
-                    const vk::DeviceSize bytes = vk::DeviceSize(BoundsSlots) * BoundsWords * 4;
-                    memory(Compute, vk::AccessFlagBits2::eShaderWrite,
-                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
-                    cmdbuf.copyBuffer(bounds, bounds_readback,
-                                      vk::BufferCopy{0, vk::DeviceSize(slot) * bytes, bytes});
-                    memory(vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead,
-                           Compute, vk::AccessFlagBits2::eShaderWrite);
+                    // The changed casters' kept bounds go back to the host, which drops kept
+                    // casters the game would have drawn.
+                    if (!bounds_copies.empty()) {
+                        memory(Compute, vk::AccessFlagBits2::eShaderWrite,
+                               vk::PipelineStageFlagBits2::eCopy,
+                               vk::AccessFlagBits2::eTransferRead);
+                        cmdbuf.copyBuffer(bounds, bounds_readback, bounds_copies);
+                        memory(vk::PipelineStageFlagBits2::eCopy,
+                               vk::AccessFlagBits2::eTransferRead, Compute,
+                               vk::AccessFlagBits2::eShaderWrite);
+                    }
                 }
                 return;
             }
@@ -572,13 +556,8 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
             run_linear(ModeBin, push.triangle_count);
             run(ModeFinalize, 1, 1);
             memory(Compute, vk::AccessFlagBits2::eShaderWrite,
-                   vk::PipelineStageFlagBits2::eDrawIndirect | vk::PipelineStageFlagBits2::eVertexShader |
-                       vk::PipelineStageFlagBits2::eCopy,
-                   vk::AccessFlagBits2::eIndirectCommandRead | vk::AccessFlagBits2::eShaderRead |
-                       vk::AccessFlagBits2::eTransferRead);
-            cmdbuf.copyBuffer(state, readback,
-                              vk::BufferCopy{CounterOffset, vk::DeviceSize(slot) * CounterBytes,
-                                             CounterBytes});
+                   vk::PipelineStageFlagBits2::eDrawIndirect | vk::PipelineStageFlagBits2::eVertexShader,
+                   vk::AccessFlagBits2::eIndirectCommandRead | vk::AccessFlagBits2::eShaderRead);
             return;
             }
             if (stage == 3) {
@@ -627,17 +606,13 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
             bind_compute();
             run(ModeSample, width_groups, height_groups);
         };
-    const auto shared = std::make_shared<decltype(body)>(std::move(body));
-    const auto record_stage = [&](u64 key, const char* name, int stage) {
-        EffectPass::Mark(key, name);
-        scheduler.RecordCrumb({.name = "Sun virtual shadow map"},
-                              [shared, stage](vk::CommandBuffer cmdbuf) { (*shared)(cmdbuf, stage); });
-    };
-    record_stage(15, "sun virtual shadow map", 0);
-    record_stage(17, "sun VSM caster bounds", 1);
-    record_stage(18, "sun VSM page binning", 2);
-    record_stage(19, "sun VSM page draws", 3);
-    record_stage(20, "sun VSM sampling", 4);
+    EffectPass::Mark(15, "sun virtual shadow map");
+    scheduler.RecordCrumb({.name = "Sun virtual shadow map"},
+                          [body = std::move(body)](vk::CommandBuffer cmdbuf) mutable {
+                              for (int stage = 0; stage < 5; ++stage) {
+                                  body(cmdbuf, stage);
+                              }
+                          });
     // The guest pipelines' dynamic state must be emitted again after the page draw.
     scheduler.GetDynamicState().Invalidate();
     return true;
@@ -653,31 +628,6 @@ void SunVsm::OnFrameEnd() {
         return;
     }
     ++frame;
-    if (frame % 600 == 0) {
-        std::printf("Sun virtual shadow map: last 600 frames %llu sun passes, %llu drawn, %llu "
-                    "without casters, %llu repeats\n",
-                    (unsigned long long)stats.calls, (unsigned long long)stats.frames,
-                    (unsigned long long)stats.no_casters, (unsigned long long)stats.repeats);
-        if (!stats.frames) {
-            stats = {};
-        }
-    }
-    if (stats.frames >= 600) {
-        const double f = double(stats.frames);
-        const double s = double(std::max<u64>(stats.samples, 1));
-        std::printf("Sun virtual shadow map: %.0f casters (%.1f changed, %.2f removed), %.0f "
-                    "triangles, %.0f page draws; %.0f pages needed, %.1f new, %.1f drawn of 1024; "
-                    "dropped %.1f page draws, %.1f pages; %llu resets; %.1f casters moved marking "
-                    "%.0f pages (most by one %llu)\n",
-                    double(stats.casters) / f, double(stats.changed) / f,
-                    double(stats.removed) / f, double(stats.triangles) / f,
-                    double(stats.items) / s, double(stats.requested) / s, double(stats.pages) / s,
-                    double(stats.drawn) / s, double(stats.item_overflow) / s,
-                    double(stats.page_overflow) / s, (unsigned long long)stats.resets,
-                    double(stats.moved) / s, double(stats.marked) / s,
-                    (unsigned long long)stats.marked_max);
-        stats = {};
-    }
 }
 
 }

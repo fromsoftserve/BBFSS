@@ -85,7 +85,7 @@ private:
     vk::UniqueDescriptorSetLayout compute_set, draw_set;
     vk::UniquePipelineLayout compute_layout, draw_layout;
     vk::UniquePipeline compute_pipeline, draw_pipeline, clear_pipeline;
-    Buffer state, items, draws, readback, bounds, bounds_readback;
+    Buffer state, items, draws, bounds, bounds_readback;
     vk::Image physical;
     VmaAllocation physical_allocation{};
     vk::ImageView physical_view;
@@ -106,13 +106,6 @@ private:
     // Each frame slot's casters (world copy address, bounds slot), for the bounds readback.
     std::array<std::vector<std::pair<u64, u32>>, 4> slot_casters;
     std::unordered_map<u64, std::array<float, 6>> boxes;
-
-    struct Stats {
-        u64 frames = 0, casters = 0, triangles = 0, items = 0, pages = 0, item_overflow = 0,
-            page_overflow = 0, samples = 0, calls = 0, repeats = 0, no_casters = 0, drawn = 0,
-            requested = 0, resets = 0, changed = 0, removed = 0, moved = 0, marked = 0,
-            marked_max = 0;
-    } stats;
 };
 
 }

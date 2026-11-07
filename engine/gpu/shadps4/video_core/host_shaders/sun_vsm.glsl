@@ -49,10 +49,9 @@ struct VsmDraw {
     uint clear_args[4];                                                                         \
     uint item_count;                                                                            \
     uint page_count;                                                                            \
-    uint item_overflow;                                                                         \
-    uint page_overflow;                                                                         \
+    uint spare_counters[2];                                                                     \
     uint render_count;                                                                          \
-    uint request_count;                                                                         \
+    uint spare_count;                                                                           \
     uint reset;                                                                                 \
     uint frame;                                                                                 \
     uint free_front;                                                                            \
@@ -60,9 +59,7 @@ struct VsmDraw {
     float anchor;                                                                               \
     float height;                                                                               \
     uint anchor_set;                                                                            \
-    uint moved;                                                                                 \
-    uint marked;                                                                                \
-    uint marked_max;                                                                            \
+    uint spare[3];                                                                              \
     vec4 right;                                                                                 \
     vec4 up;                                                                                    \
     vec4 light;                                                                                 \

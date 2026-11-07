@@ -195,11 +195,7 @@ private:
     struct Stats {
         u64 draws = 0, camera_draws = 0, not_ortho = 0, no_camera = 0, alpha = 0, unsupported = 0,
             over_budget = 0, instanced = 0, dynamic_draws = 0, strips = 0, frames = 0, instances = 0,
-            triangles = 0, shared_builds = 0, sun = 0, incomplete = 0, ends = 0, stale = 0,
-            evicted = 0;
-        u64 vsm_casters = 0, vsm_camera = 0, vsm_no_world = 0, vsm_not_copied = 0,
-            vsm_no_views = 0, shadow_not_solid = 0, shadow_alpha = 0, shadow_at_end = 0,
-            vsm_kept = 0, vsm_kept_in_view = 0, vsm_kept_in_cascade = 0;
+            triangles = 0, shared_builds = 0;
     } stats;
 };
 

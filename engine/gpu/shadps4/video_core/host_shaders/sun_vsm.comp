@@ -146,15 +146,9 @@ void Setup() {
     st.clear_args = uint[4](0u, 1u, VSM_CLEAR_FIRST, 0u);
     st.item_count = 0u;
     st.page_count = 0u;
-    st.item_overflow = 0u;
-    st.page_overflow = 0u;
     st.render_count = 0u;
-    st.request_count = 0u;
     st.free_front = 0u;
     st.free_back = 0u;
-    st.moved = 0u;
-    st.marked = 0u;
-    st.marked_max = 0u;
     st.frame += 1u;
     uint reset = (mode >> 8) & 1u;
 
@@ -236,9 +230,6 @@ void Invalidate() {
         st.owner[entry - 1u] = 0u;
         st.table[id] = 0u;
     }
-    if (st.request[id] != 0u) {
-        atomicAdd(st.request_count, 1u);
-    }
 }
 
 // Free physical pages go to the front of the list; pages cached but not needed this frame to
@@ -268,7 +259,6 @@ void Allocate() {
     } else if (k - st.free_front < st.free_back) {
         slot = st.free_list[VSM_PHYSICAL_PAGES - 1u - (k - st.free_front)];
     } else {
-        atomicAdd(st.page_overflow, 1u);
         return;
     }
     // A taken cached page belongs to an entry not requested this frame, so no other invocation
@@ -373,10 +363,9 @@ void GatherBounds() {
     }
 }
 
-uint MarkRect(vec3 lo, vec3 hi) {
+void MarkRect(vec3 lo, vec3 hi) {
     vec2 plo, phi;
     PlaneRect(lo, hi, plo, phi);
-    uint marked = 0u;
     for (int c = 0; c < VSM_CASCADES; ++c) {
         ivec2 first, last;
         PageRange(c, plo, phi, first, last);
@@ -384,11 +373,9 @@ uint MarkRect(vec3 lo, vec3 hi) {
         for (int y = first.y; y <= last.y; ++y) {
             for (int x = first.x; x <= last.x; ++x) {
                 st.stamp[VsmIndex(c, ivec2(x, y), base)] = st.frame;
-                ++marked;
             }
         }
     }
-    return marked;
 }
 
 // Stamps the pages under a changed caster's old and new bounds, then keeps the new bounds.
@@ -420,16 +407,12 @@ void Dirty() {
         (old_valid && (any(greaterThan(abs(nlo - olo), vec3(MoveEpsilon))) ||
                        any(greaterThan(abs(nhi - ohi), vec3(MoveEpsilon)))));
     if (moved) {
-        uint marked = 0u;
         if (old_valid) {
-            marked += MarkRect(olo, ohi);
+            MarkRect(olo, ohi);
         }
         if (new_valid) {
-            marked += MarkRect(nlo, nhi);
+            MarkRect(nlo, nhi);
         }
-        atomicAdd(st.moved, 1u);
-        atomicAdd(st.marked, marked);
-        atomicMax(st.marked_max, marked);
     }
     for (uint k = 0u; k < 3u; ++k) {
         bnd.b[at + 6u + k] = floatBitsToUint(nlo[k]);
@@ -531,8 +514,6 @@ void Bin() {
                 const uint item = atomicAdd(st.item_count, 1u);
                 if (item < max_items) {
                     items[item] = uvec2(local, page | (lo << 14));
-                } else {
-                    atomicAdd(st.item_overflow, 1u);
                 }
             }
         }
