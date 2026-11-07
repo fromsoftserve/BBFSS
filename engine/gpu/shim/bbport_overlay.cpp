@@ -961,6 +961,19 @@ void EffectsSection() {
             "По умолчанию включено. Подмешивает более размытый мип в отражения окружения, добавляя "
             "мягкий ореол GGX. Требуется перезапуск."));
     }
+    if (const char* label = Item("Light specular sharpness", "Резкость бликов от источников")) {
+        const bool removed = s.graphics_light_sharpness >= BbSettings::LightSharpnessMax;
+        Slider(label, s.graphics_light_sharpness, 1.0f, BbSettings::LightSharpnessMax,
+               removed ? BbSettings::MenuText("Unlimited", "Без ограничения") : "%.1fx",
+               ImGuiSliderFlags_Logarithmic);
+        Hint(BbSettings::MenuText(
+            "1x by default (original). The game caps how tight sun and lamp highlights can get on "
+            "glossy surfaces; the sun is capped hardest. Higher values let glossy highlights become "
+            "smaller and brighter; the maximum removes the cap. Requires restart.",
+            "По умолчанию 1x (оригинал). Игра ограничивает, насколько узкими могут быть блики от "
+            "солнца и ламп на глянцевых поверхностях. Большие значения делают блики меньше и ярче; "
+            "максимум снимает ограничение. Требуется перезапуск."));
+    }
     if (const char* label = Item("Model detail", "Детализация моделей")) {
         const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
                               BbSettings::MenuText("Game default", "Как в игре"),
@@ -2341,6 +2354,7 @@ void Menu() {
         s.graphics_local_ggx != s.startup_local_ggx ||
         s.graphics_specular_aa != s.startup_specular_aa ||
         s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||
+        s.graphics_light_sharpness != s.startup_light_sharpness ||
         s.graphics_ao_quality != s.startup_ao_quality ||
         s.graphics_shadow_resolution != s.startup_shadow_resolution ||
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||

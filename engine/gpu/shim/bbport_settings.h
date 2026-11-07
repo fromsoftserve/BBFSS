@@ -20,6 +20,7 @@ enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, Frame
 inline constexpr const char* FrameGenNames[] = {"off", "fsr3", "dlss"};
 static_assert(sizeof(FrameGenNames) / sizeof(FrameGenNames[0]) == FrameGenCount);
 inline constexpr int FrameGenFramesMax = 5;
+inline constexpr float LightSharpnessMax = 100.0f; // Matches GgxLobes::SharpnessRemoved.
 enum Reflex : int { ReflexOff = 0, ReflexOn = 1, ReflexBoost = 2, ReflexCount };
 inline constexpr const char* ReflexNames[] = {"off", "on", "boost"};
 static_assert(sizeof(ReflexNames) / sizeof(ReflexNames[0]) == ReflexCount);
@@ -198,6 +199,8 @@ struct Values {
     std::atomic<bool> graphics_directional_ggx{false};
     // Game-shader specular upgrades applied at shader compile time (restart required).
     std::atomic<bool> graphics_local_ggx{true}, graphics_specular_aa{true}, graphics_env_ggx_tails{true};
+    // Multiplies each light's specular sharpness limit; LightSharpnessMax removes the limit.
+    std::atomic<float> graphics_light_sharpness{1.0f};
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
@@ -252,6 +255,7 @@ struct Values {
     int startup_motion_blur_quality = 0;
     bool startup_directional_ggx = false;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
+    float startup_light_sharpness = 1.0f;
     int startup_ao_quality = 0;
     int startup_shadow_resolution = 0;
     int startup_local_shadow_resolution = 0;

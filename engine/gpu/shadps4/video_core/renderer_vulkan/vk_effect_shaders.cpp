@@ -33,6 +33,10 @@ bool PatchLobes(std::vector<u32>& spv) {
         .Changed();
 }
 
+bool PatchSharpness(std::vector<u32>& spv) {
+    return GgxLobes::ScaleLightSharpness(spv, BbSettings::Get().startup_light_sharpness) != 0;
+}
+
 bool Wanted(int effect) {
     return BbSettings::Get().startup_effects[effect];
 }
@@ -170,6 +174,7 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
     if (info.pgm_hash == Ggx::DirectionalHash) {
         auto ggx = DirectionalGgxModule(info.pgm_hash, true, spv);
         if (!ggx.empty()) {
+            PatchSharpness(ggx);
             return ggx;
         }
     }
@@ -178,11 +183,13 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         Pom::PatchPom(info.pgm_hash, true, patched);
         if (patched.size() != spv.size()) {
             PatchLobes(patched);
+            PatchSharpness(patched);
             return patched;
         }
     }
     std::vector<u32> lobes(spv.begin(), spv.end());
-    if (PatchLobes(lobes)) {
+    const bool lobed = PatchLobes(lobes);
+    if (PatchSharpness(lobes) || lobed) {
         return lobes;
     }
     return std::nullopt;

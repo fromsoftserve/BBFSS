@@ -111,6 +111,7 @@ int main() {
     assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
     assert(s.graphics_local_ggx && s.graphics_specular_aa && s.graphics_env_ggx_tails);
     assert(s.startup_local_ggx && s.startup_specular_aa && s.startup_env_ggx_tails);
+    assert(s.graphics_light_sharpness == 1.0f && s.startup_light_sharpness == 1.0f);
     assert(s.graphics_dof_intensity == 1.0f && s.graphics_gi_reflection_strength == 1.0f);
     assert(s.graphics_gi_wet_ground == 0.5f && !s.graphics_smooth_normals);
     s.graphics_smooth_normals = true;
@@ -123,6 +124,7 @@ int main() {
     s.graphics_native_sss = true;
     s.graphics_directional_ggx = true;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = false;
+    s.graphics_light_sharpness = 250.0f;
     s.graphics_dof_intensity = 1.75f;
     s.graphics_gi_reflection_strength = 0.25f;
     s.graphics_gi_wet_ground = 0.75f;
@@ -146,6 +148,7 @@ int main() {
         assert(fork_keys.find("graphics_local_ggx=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_specular_aa=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_env_ggx_tails=0\n") != std::string::npos);
+        assert(fork_keys.find("graphics_light_sharpness=250.0\n") != std::string::npos);
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     }
     s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_directional_ggx = false;
@@ -172,6 +175,8 @@ int main() {
     assert(s.startup_directional_ggx);
     assert(!s.graphics_local_ggx && !s.graphics_specular_aa && !s.graphics_env_ggx_tails);
     assert(!s.startup_local_ggx && !s.startup_specular_aa && !s.startup_env_ggx_tails);
+    assert(s.graphics_light_sharpness == 100.0f && s.startup_light_sharpness == 100.0f);
+    s.graphics_light_sharpness = 1.0f;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = true;
     s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_sun_vsm = false;
     s.graphics_rt_point_shadows = false;

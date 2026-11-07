@@ -23,17 +23,30 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> malformed{0x07230203, 0x10600, 0, 10, 0, 0};
     const auto original = malformed;
     assert(!Patch(malformed, {}).Changed() && malformed == original);
+    assert(!ScaleLightSharpness(malformed, 4.0f) && malformed == original);
     if (argc == 3) {
         const std::filesystem::path out = argv[2];
         std::filesystem::create_directories(out);
         Stats total{};
-        uint32_t shaders = 0;
+        uint32_t shaders = 0, sharpened = 0, sharp_sites = 0;
         for (const auto& entry : std::filesystem::directory_iterator(argv[1])) {
             if (entry.path().extension() != ".spv") continue;
             const auto source = Read(entry.path());
             auto words = source;
             assert(!Patch(words, {false, false, false}).Changed() && words == source);
+            assert(!ScaleLightSharpness(words, 1.0f) && words == source);
             const auto stats = Patch(words, {});
+            // Sharpness runs after the lobe pass in game; check that order and the "removed" end.
+            auto sharp = words;
+            if (const auto sites = ScaleLightSharpness(sharp, 4.0f)) {
+                ++sharpened, sharp_sites += sites;
+                auto removed = source;
+                assert(ScaleLightSharpness(removed, SharpnessRemoved) == sites);
+                for (const auto& [name, data] : {std::pair{"_s4.spv", &sharp}, std::pair{"_sx.spv", &removed}}) {
+                    std::ofstream v(out / (entry.path().stem().string() + name), std::ios::binary);
+                    v.write(reinterpret_cast<const char*>(data->data()), std::streamsize(data->size() * 4));
+                }
+            }
             if (!stats.Changed()) {
                 assert(words == source);
                 continue;
@@ -58,7 +71,8 @@ int main(int argc, char** argv) {
             }
         }
         std::cout << shaders << " shaders: " << total.phong << " phong, " << total.blinn
-                  << " blinn, " << total.env << " env, " << total.filtered << " filtered\n";
+                  << " blinn, " << total.env << " env, " << total.filtered << " filtered; sharpness: " << sharpened << " shaders, " << sharp_sites
+                  << " sites\n";
     }
     std::cout << "GGX lobe patch passed\n";
 }

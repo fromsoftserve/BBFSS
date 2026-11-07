@@ -296,4 +296,67 @@ inline Stats Patch(std::vector<uint32_t>& spv, const Options& options) {
     return stats;
 }
 
+// The game limits each light's gloss exponent ("specular sharpness"):
+//   n = max(1, w * 2^(13g) / (2^(13g) * 0.0100021362 + w)),  i.e. 1/n = 1/2^(13g) + 0.01/w
+// with w a per-light sharpness. Scaling w by k equals dividing the 0.0100021362 constant by k,
+// so this rewrites only that operand of `exp2(13 * g) * 0.0100021362`. At SharpnessRemoved the
+// cap is effectively gone (n -> 2^(13g)); a tiny nonzero constant keeps w = 0 lights at 0/x = 0.
+constexpr float SharpnessCap = 0.01000213623046875f;
+constexpr float SharpnessRemoved = 100.0f;
+
+inline uint32_t ScaleLightSharpness(std::vector<uint32_t>& spv, float scale) {
+    if (!(scale > 1.0f) || spv.size() < 5 || spv[0] != 0x07230203) return 0;
+    std::unordered_map<uint32_t, size_t> defs;
+    std::unordered_map<uint32_t, uint32_t> constants;
+    uint32_t glsl = 0, f32 = 0;
+    size_t first_function = 0;
+    for (size_t i = 5; i < spv.size();) {
+        const uint32_t size = spv[i] >> 16, op = spv[i] & 0xffff;
+        if (!size || size > spv.size() - i) return 0;
+        if (op == 11 && size >= 3) {
+            const char* name = reinterpret_cast<const char*>(&spv[i + 2]);
+            if (std::string_view(name, strnlen(name, (size - 2) * 4)) == "GLSL.std.450")
+                glsl = spv[i + 1];
+        }
+        if (op == 22 && size == 3 && spv[i + 2] == 32) f32 = f32 ? ~0u : spv[i + 1];
+        if (op == 43 && size == 4) constants[spv[i + 2]] = spv[i + 3];
+        if ((op == 12 || op == 133) && size >= 3) defs[spv[i + 2]] = i;
+        if (op == 54 && !first_function) first_function = i;
+        i += size;
+    }
+    if (!glsl || !f32 || f32 == ~0u || !first_function) return 0;
+    const auto is_const = [&](uint32_t id, float value) {
+        const auto it = constants.find(id);
+        return it != constants.end() && it->second == std::bit_cast<uint32_t>(value);
+    };
+    // exp2(13 * g) or exp2(g * 13)
+    const auto gloss_base = [&](uint32_t id) {
+        const auto it = defs.find(id);
+        if (it == defs.end()) return false;
+        const uint32_t* e = &spv[it->second];
+        if ((e[0] & 0xffff) != 12 || (e[0] >> 16) != 6 || e[1] != f32 || e[3] != glsl || e[4] != 29)
+            return false;
+        const auto m = defs.find(e[5]);
+        if (m == defs.end()) return false;
+        const uint32_t* w = &spv[m->second];
+        return (w[0] & 0xffff) == 133 && (w[0] >> 16) == 5 && w[1] == f32 &&
+               (is_const(w[3], 13) || is_const(w[4], 13));
+    };
+    std::vector<size_t> sites;
+    for (const auto& [id, at] : defs) {
+        const uint32_t* w = &spv[at];
+        if ((w[0] & 0xffff) != 133 || (w[0] >> 16) != 5 || w[1] != f32) continue;
+        for (int side = 0; side < 2; ++side)
+            if (is_const(w[3 + side], SharpnessCap) && gloss_base(w[4 - side]))
+                sites.push_back(at + 3 + side);
+    }
+    if (sites.empty()) return 0;
+    const float cap = scale >= SharpnessRemoved ? SharpnessCap * 1e-5f : SharpnessCap / scale;
+    const uint32_t id = spv[3]++;
+    const uint32_t constant[] = {(4u << 16) | 43, f32, id, std::bit_cast<uint32_t>(cap)};
+    spv.insert(spv.begin() + first_function, std::begin(constant), std::end(constant));
+    for (const size_t at : sites) spv[at + 4] = id;
+    return uint32_t(sites.size());
+}
+
 } // namespace Vulkan::GgxLobes
