@@ -330,6 +330,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_rt_bounce=i!=0;
     } else if (key == "graphics_gi_probes") {
         v.graphics_gi_probes=i!=0;
+    } else if (key == "graphics_gi_reflections") {
+        v.graphics_gi_reflections=i!=0;
+    } else if (key == "graphics_gi_reflections_full_res") {
+        v.graphics_gi_reflections_full_res=i!=0;
+    } else if (key == "graphics_gi_reflection_strength") {
+        v.graphics_gi_reflection_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
+    } else if (key == "graphics_gi_wet_ground") {
+        v.graphics_gi_wet_ground=Clamp(std::isfinite(f)?f:0.5f,0.0f,1.0f);
     } else if (key == "graphics_native_sss") {
         v.graphics_native_sss=i!=0;
     } else if (key == "graphics_directional_ggx") {
@@ -764,6 +772,10 @@ void Save() {
     put("graphics_rt_point_shadows",flag(v.graphics_rt_point_shadows));
     put("graphics_rt_bounce",flag(v.graphics_rt_bounce));
     put("graphics_gi_probes",flag(v.graphics_gi_probes));
+    put("graphics_gi_reflections",flag(v.graphics_gi_reflections));
+    put("graphics_gi_reflections_full_res",flag(v.graphics_gi_reflections_full_res));
+    put("graphics_gi_reflection_strength",fixed(v.graphics_gi_reflection_strength,2));
+    put("graphics_gi_wet_ground",fixed(v.graphics_gi_wet_ground,2));
     put("graphics_native_sss",flag(v.graphics_native_sss));
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));

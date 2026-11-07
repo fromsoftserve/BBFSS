@@ -3,6 +3,8 @@
 #include "video_core/renderer_vulkan/vk_ssgi.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -14,6 +16,8 @@
 #include "video_core/host_shaders/ssgi_gather_ray_comp.h"
 #include "video_core/host_shaders/ssgi_prep_comp.h"
 #include "video_core/host_shaders/ssgi_probe_composite_comp.h"
+#include "video_core/host_shaders/ssgi_probe_reflect_comp.h"
+#include "video_core/host_shaders/ssgi_probe_resolve_comp.h"
 #include "video_core/host_shaders/ssgi_probe_trace_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_effect_pass.h"
@@ -151,10 +155,19 @@ bool ScreenSpaceGI::Ready() {
                     SampledImage, SampledImage, SampledImage, SampledImage, StorageImage,
                     StorageImage, StorageImage, StorageImage, StorageImage},
                    SSGI_PROBE_TRACE_COMP, "SSGI probe trace") &&
+        CreatePass(probe_reflect,
+                   {SampledImage, SampledImage, SampledImage, SampledImage, StorageImage,
+                    StorageImage},
+                   SSGI_PROBE_REFLECT_COMP, "SSGI glossy reflection rays") &&
+        CreatePass(probe_resolve,
+                   {SampledImage, SampledImage, SampledImage, SampledImage, SampledImage,
+                    StorageImage, SampledImage},
+                   SSGI_PROBE_RESOLVE_COMP, "SSGI glossy reflection resolve") &&
         CreatePass(probe_composite,
                    {SampledImage, SampledImage, SampledImage, SampledImage, SampledImage,
                     SampledImage, StorageImage, SampledImage, SampledImage, SampledImage,
-                    SampledImage, SampledImage, SampledImage, StorageImage, StorageImage},
+                    SampledImage, SampledImage, SampledImage, StorageImage, StorageImage,
+                    SampledImage},
                    SSGI_PROBE_COMPOSITE_COMP, "SSGI probe composite");
     if (!made) {
         failed = true;
@@ -463,6 +476,36 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         if (probes_created || created) {
             probe_history_valid = false;
         }
+        const bool use_rays =
+            has_material &&
+            BbSettings::Get().graphics_gi_reflections.load(std::memory_order_relaxed);
+        const bool full_res_rays =
+            BbSettings::Get().graphics_gi_reflections_full_res.load(std::memory_order_relaxed);
+        const u32 ray_width = full_res_rays ? width : half_width;
+        const u32 ray_height = full_res_rays ? height : half_height;
+        if (use_rays) {
+            if ((!probe_ray.image || probe_ray.width != ray_width ||
+                 probe_ray.height != ray_height) &&
+                !EffectPass::HasRoom(instance, 26ull * ray_width * ray_height)) {
+                std::printf("SSGI: glossy reflection rays off - not enough video memory\n");
+            } else {
+                bool rays_created = EnsureImage(probe_ray, ray_width, ray_height,
+                                                vk::Format::eR16G16B16A16Sfloat, "glossy rays");
+                rays_created |= EnsureImage(probe_ray_dist, ray_width, ray_height,
+                                            vk::Format::eR16Sfloat, "glossy ray distance");
+                for (auto& image : probe_reflection) {
+                    rays_created |= EnsureImage(image, ray_width, ray_height,
+                                                vk::Format::eR16G16B16A16Sfloat,
+                                                "glossy reflections");
+                }
+                if (rays_created) {
+                    reflection_history_valid = false;
+                }
+            }
+        }
+        const bool rays = use_rays && probe_ray.image && probe_ray.width == ray_width &&
+                          probe_ray.height == ray_height && probe_ray_dist.image &&
+                          probe_ray_dist.width == ray_width;
         static bool printed_probes = false;
         if (!printed_probes) {
             printed_probes = true;
@@ -476,6 +519,20 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         const auto camera = camera_motion.PassMatrices();
         const bool use_previous = prev_camera_valid && camera.valid;
         constexpr std::array<float, 12> Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        // World +y (Bloodborne is y-up) in view space, for wet ground.
+        const float wet =
+            rays && camera.valid
+                ? std::clamp(
+                      BbSettings::Get().graphics_gi_wet_ground.load(std::memory_order_relaxed),
+                      0.0f, 1.0f)
+                : 0.0f;
+        std::array<float, 3> up{camera.view[1], camera.view[5], camera.view[9]};
+        const float up_length = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+        for (float& c : up) c = up_length > 1e-6f ? c / up_length : 0.0f;
+        const auto unorm16 = [](float c) {
+            return static_cast<u32>(std::lround(std::clamp(c * 0.5f + 0.5f, 0.0f, 1.0f) * 65535.0f));
+        };
+        const float up_packed = std::bit_cast<float>(unorm16(up[0]) | (unorm16(up[1]) << 16));
         // Indirect lighting strength 3 gives a physically scaled bounce x4.5, close to the
         // brightness of the older screen-space GI at the same setting.
         Params params{
@@ -486,7 +543,17 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
             .prev_jitter = use_previous ? prev_jitter : jitter,
             .prev_proj = use_previous ? prev_proj : std::array<float, 2>{proj[0], proj[1]},
             .frame = frame,
-            .history = probe_history_valid && use_previous ? 1u : 0u,
+            .history = (probe_history_valid && use_previous ? 1u : 0u) | (rays ? 2u : 0u) |
+                       (rays && reflection_history_valid ? 4u : 0u) |
+                       (static_cast<u32>(std::lround(
+                            std::clamp(BbSettings::Get().graphics_gi_reflection_strength.load(
+                                           std::memory_order_relaxed),
+                                       0.0f, 1.0f) *
+                            255.0f))
+                        << 8) |
+                       (full_res_rays ? 0x10000u : 0u) |
+                       (static_cast<u32>(std::lround(wet * 255.0f)) << 18) |
+                       (up[2] < 0.0f ? 0x4000000u : 0u),
             .strength = gi * 1.5f,
             .radius = gi * (1.0f / 6.0f),
             .feedback = 0.8f,
@@ -506,7 +573,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         EffectPass::Mark(1, "indirect light");
         scheduler.RecordCrumb(
             {.name = "SSGI probes"},
-            [params, init_previous = !probe_history_valid, width, height, tiles_x, tiles_y,
+            [params, up_packed, init_previous = !probe_history_valid, width, height, tiles_x, tiles_y,
              color_view, depth_view, albedo_view = has_albedo ? albedo_view : *geo.view,
              ao_view = has_ao ? ao_view : *geo.view,
              normal_view = has_normal ? normal_view : *geo.view,
@@ -534,16 +601,38 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
              specular_out_view = *probe_specular[current].view,
              old_specular_image = vk::Image(probe_specular[current ^ 1].image),
              old_specular_view = *probe_specular[current ^ 1].view, prep_pipeline = *prep.pipeline,
+             rays, init_reflection = rays && !reflection_history_valid,
+             ray_image = rays ? vk::Image(probe_ray.image) : vk::Image{},
+             ray_view = rays ? *probe_ray.view : *geo.view,
+             ray_dist_image = rays ? vk::Image(probe_ray_dist.image) : vk::Image{},
+             ray_dist_view = rays ? *probe_ray_dist.view : *geo.view,
+             reflection_image = rays ? vk::Image(probe_reflection[current].image) : vk::Image{},
+             reflection_view = rays ? *probe_reflection[current].view : *geo.view,
+             old_reflection_image =
+                 rays ? vk::Image(probe_reflection[current ^ 1].image) : vk::Image{},
+             old_reflection_view = rays ? *probe_reflection[current ^ 1].view : *geo.view,
+             half_width = ray_width, half_height = ray_height,
+             reflect_pipeline = *probe_reflect.pipeline,
+             reflect_layout = *probe_reflect.layout, resolve_pipeline = *probe_resolve.pipeline,
+             resolve_layout = *probe_resolve.layout,
              prep_layout = *prep.layout, trace_pipeline = *probe_trace.pipeline,
              trace_layout = *probe_trace.layout, composite_pipeline = *probe_composite.pipeline,
              composite_layout = *probe_composite.layout](vk::CommandBuffer cmdbuf) mutable {
                 BeforeCompute(cmdbuf);
-                std::array<vk::ImageMemoryBarrier2, 16> barriers{};
+                std::array<vk::ImageMemoryBarrier2, 24> barriers{};
                 u32 count = 0;
                 for (const vk::Image image : {geo_image, probe_image, light_image, sh_image[0],
                                               sh_image[1], sh_image[2], diffuse_image,
                                               specular_out_image}) {
                     barriers[count++] = ToGeneral(image);
+                }
+                if (rays) {
+                    barriers[count++] = ToGeneral(ray_image);
+                    barriers[count++] = ToGeneral(ray_dist_image);
+                    barriers[count++] = ToGeneral(reflection_image);
+                    if (init_reflection) {
+                        barriers[count++] = ToGeneral(old_reflection_image);
+                    }
                 }
                 if (init_previous) {
                     for (const vk::Image image : {old_probe_image, old_light_image,
@@ -593,6 +682,33 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                     }
                     run(trace_pipeline, trace_layout, writes, tiles_x, tiles_y);
                 }
+                // Only the probe trace reads the feedback; later passes get the world up.
+                params.feedback = up_packed;
+                if (rays) {
+                    const u32 half_x = (half_width + 7) / 8, half_y = (half_height + 7) / 8;
+                    {
+                        const std::array infos{Info(depth_view), Info(geo_view), Info(color_view),
+                                               Info(roughness_view), Info(ray_view),
+                                               Info(ray_dist_view)};
+                        std::array<vk::WriteDescriptorSet, 6> writes;
+                        for (u32 i = 0; i < writes.size(); ++i) {
+                            writes[i] = Write(i, i < 4 ? SampledImage : StorageImage, &infos[i]);
+                        }
+                        run(reflect_pipeline, reflect_layout, writes, half_x, half_y);
+                    }
+                    BetweenPasses(cmdbuf);
+                    {
+                        const std::array infos{Info(geo_view), Info(roughness_view),
+                                               Info(ray_view), Info(old_reflection_view),
+                                               Info(old_diffuse_view), Info(reflection_view),
+                                               Info(ray_dist_view)};
+                        std::array<vk::WriteDescriptorSet, 7> writes;
+                        for (u32 i = 0; i < writes.size(); ++i) {
+                            writes[i] = Write(i, i == 5 ? StorageImage : SampledImage, &infos[i]);
+                        }
+                        run(resolve_pipeline, resolve_layout, writes, half_x, half_y);
+                    }
+                }
                 BetweenPasses(cmdbuf);
                 {
                     const std::array infos{
@@ -600,10 +716,12 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                         Info(sh_view[0]), Info(sh_view[1]),  Info(sh_view[2]),
                         Info(color_view), Info(albedo_view), Info(ao_view),
                         Info(roughness_view), Info(specular_view), Info(old_diffuse_view),
-                        Info(old_specular_view), Info(diffuse_view), Info(specular_out_view)};
-                    std::array<vk::WriteDescriptorSet, 15> writes;
+                        Info(old_specular_view), Info(diffuse_view), Info(specular_out_view),
+                        Info(reflection_view)};
+                    std::array<vk::WriteDescriptorSet, 16> writes;
                     for (u32 i = 0; i < writes.size(); ++i) {
-                        writes[i] = Write(i, i == 6 || i >= 13 ? StorageImage : SampledImage,
+                        writes[i] = Write(i, i == 6 || i == 13 || i == 14 ? StorageImage
+                                                                          : SampledImage,
                                           &infos[i]);
                     }
                     run(composite_pipeline, composite_layout, writes, full_x, full_y);
@@ -611,6 +729,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                 AfterCompute(cmdbuf);
             });
         probe_history_valid = true;
+        reflection_history_valid = rays;
         history_valid = false;
         prev_view = camera.view;
         prev_proj = {proj[0], proj[1]};
@@ -620,6 +739,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         return;
     }
     probe_history_valid = false;
+    reflection_history_valid = false;
     for (auto& image : light) {
         created |= EnsureImage(image, half_width, half_height, vk::Format::eR16G16B16A16Sfloat,
                                "light");

@@ -75,6 +75,7 @@ private:
     CameraMotion& camera_motion;
 
     Pass prep, gather, gather_ray, denoise, composite, probe_trace, probe_composite;
+    Pass probe_reflect, probe_resolve;
     OwnImage geo;
     std::array<OwnImage, 2> light;
     std::array<OwnImage, 2> filtered;
@@ -83,7 +84,11 @@ private:
     std::array<std::array<OwnImage, 3>, 2> probe_sh;
     std::array<OwnImage, 2> probe_diffuse;
     std::array<OwnImage, 2> probe_specular;
+    OwnImage probe_ray;
+    OwnImage probe_ray_dist;
+    std::array<OwnImage, 2> probe_reflection;
     bool probe_history_valid = false;
+    bool reflection_history_valid = false;
     std::array<float, 12> prev_view{};
     std::array<float, 2> prev_proj{};
     std::array<float, 2> prev_jitter{};

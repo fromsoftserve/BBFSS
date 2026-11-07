@@ -189,6 +189,10 @@ struct Values {
     std::atomic<bool> graphics_rt_point_shadows{false};
     std::atomic<bool> graphics_rt_bounce{true};
     std::atomic<bool> graphics_gi_probes{false};
+    std::atomic<bool> graphics_gi_reflections{false};
+    std::atomic<bool> graphics_gi_reflections_full_res{false};
+    std::atomic<float> graphics_gi_reflection_strength{1.0f};
+    std::atomic<float> graphics_gi_wet_ground{0.5f};
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_dof_intensity{1};

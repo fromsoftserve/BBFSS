@@ -106,17 +106,23 @@ int main() {
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
     assert(s.graphics_point_fog_glow_size == 0.15f);
     assert(!s.graphics_auto_exposure && !s.graphics_native_sss && !s.graphics_sun_vsm &&
-           !s.graphics_rt_point_shadows && s.graphics_rt_bounce && !s.graphics_gi_probes);
+           !s.graphics_rt_point_shadows && s.graphics_rt_bounce && !s.graphics_gi_probes &&
+           !s.graphics_gi_reflections && !s.graphics_gi_reflections_full_res);
     assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
-    assert(s.graphics_dof_intensity == 1.0f);
+    assert(s.graphics_dof_intensity == 1.0f && s.graphics_gi_reflection_strength == 1.0f);
+    assert(s.graphics_gi_wet_ground == 0.5f);
     s.graphics_auto_exposure = true;
     s.graphics_sun_vsm = true;
     s.graphics_rt_point_shadows = true;
     s.graphics_rt_bounce = false;
     s.graphics_gi_probes = true;
+    s.graphics_gi_reflections = true;
     s.graphics_native_sss = true;
     s.graphics_directional_ggx = true;
     s.graphics_dof_intensity = 1.75f;
+    s.graphics_gi_reflection_strength = 0.25f;
+    s.graphics_gi_wet_ground = 0.75f;
+    s.graphics_gi_reflections_full_res = true;
     assert(!s.startup_directional_ggx);
     BbSettings::Save();
     {
@@ -126,6 +132,10 @@ int main() {
         assert(fork_keys.find("graphics_rt_point_shadows=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_rt_bounce=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_gi_probes=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_gi_reflections=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_gi_reflection_strength=0.25\n") != std::string::npos);
+        assert(fork_keys.find("graphics_gi_wet_ground=0.75\n") != std::string::npos);
+        assert(fork_keys.find("graphics_gi_reflections_full_res=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_directional_ggx=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
@@ -135,10 +145,16 @@ int main() {
     s.graphics_rt_point_shadows = false;
     s.graphics_rt_bounce = true;
     s.graphics_gi_probes = false;
+    s.graphics_gi_reflections = false;
+    s.graphics_gi_reflection_strength = 1.0f;
+    s.graphics_gi_wet_ground = 0.5f;
+    s.graphics_gi_reflections_full_res = false;
     s.graphics_dof_intensity = 1.0f;
     BbSettings::Load();
+    assert(s.graphics_gi_wet_ground == 0.75f);
     assert(s.graphics_sun_vsm && s.graphics_rt_point_shadows && !s.graphics_rt_bounce &&
-           s.graphics_gi_probes);
+           s.graphics_gi_probes && s.graphics_gi_reflections &&
+           s.graphics_gi_reflection_strength == 0.25f && s.graphics_gi_reflections_full_res);
     assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
     assert(s.graphics_directional_ggx && s.startup_directional_ggx);
     s.graphics_directional_ggx = false;
@@ -147,6 +163,10 @@ int main() {
     s.graphics_rt_point_shadows = false;
     s.graphics_rt_bounce = true;
     s.graphics_gi_probes = false;
+    s.graphics_gi_reflections = false;
+    s.graphics_gi_reflection_strength = 1.0f;
+    s.graphics_gi_wet_ground = 0.5f;
+    s.graphics_gi_reflections_full_res = false;
     s.graphics_dof_intensity = 1.0f;
     BbSettings::Save();
     for (const auto& [input, expected] :
@@ -161,11 +181,12 @@ int main() {
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }
-    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\n    graphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
+    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\n    graphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_gi_reflection_strength=9\ngraphics_gi_wet_ground=-3\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();
     assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_ssr_intensity == 0.0f);
     assert(s.graphics_volumetric_intensity == 1.0f && s.graphics_shadow_resolution == 2);
-        assert(s.graphics_point_fog_glow_size == 0.20f);
+        assert(s.graphics_point_fog_glow_size == 0.20f && s.graphics_gi_reflection_strength == 1.0f);
+    assert(s.graphics_gi_wet_ground == 0.0f);
     assert(s.startup_motion_blur_quality == 1 && s.startup_effects[BbSettings::EffectGi]);
     BbSettings::Save();
     BbSettings::Load();

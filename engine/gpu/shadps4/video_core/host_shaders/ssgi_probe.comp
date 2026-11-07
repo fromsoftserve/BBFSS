@@ -2,7 +2,14 @@
 
 // Screen-space radiance probes: one probe per 16x16 tile stores 8x8 octahedral radiance (view
 // space), accumulated over frames. Diffuse and rough specular both read its L1 SH; the resolved
-// per-pixel lighting is then accumulated over frames as well.
+// per-pixel lighting is then accumulated over frames as well. Optionally, glossy surfaces trace
+// one GGX-sampled reflection ray per 2x2 pixels, or per pixel at full resolution (REFLECT),
+// filtered spatially and over frames (RESOLVE), which replaces the probe specular where it hits.
+//
+// history bits: 1 = probe history valid, 2 = glossy reflection rays on, 4 = ray history valid,
+// 8..15 = glossy reflection strength * 255, 16 = full-resolution reflection rays, 18..25 = wet
+// ground * 255, 26 = view-space world up has negative z. After the probe trace, `feedback` holds
+// the view-space world up (x, y) as two unorm16.
 
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
@@ -116,6 +123,67 @@ float rand(uint seed) {
 vec3 probePixel(ivec2 tile, vec4 probe) {
     const float o = probe.x;
     return vec3(vec2(tile * TILE) + vec2(mod(o, 16.0), floor(o / 16.0)) + 0.5, probe.y);
+}
+
+const float RAY_MAX_ROUGHNESS = 0.7;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Glossy reflection strength 1 = 3x the physically weighted reflection.
+const float REFLECTION_STRENGTH_SCALE = 3.0;
+
+bool fullResRays() {
+    return (history & 0x10000u) != 0u;
+}
+
+ivec2 raySize() {
+    return fullResRays() ? ivec2(size) : (ivec2(size) + 1) / 2;
+}
+
+// Each half-resolution reflection pixel traces from one pixel of its 2x2 block, cycling through
+// the block over four frames.
+ivec2 rayPixel(ivec2 ray_pixel) {
+    if (fullResRays()) {
+        return ray_pixel;
+    }
+    const ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 1), ivec2(1, 0), ivec2(0, 1));
+    return min(ray_pixel * 2 + offsets[frame & 3u], ivec2(size) - 1);
+}
+
+// Luminance-compressed colour: averaging in this space keeps a single very bright sample (a ray
+// that hit a fire) from dominating, which would otherwise sparkle.
+vec3 compressColor(vec3 c) {
+    return c / (1.0 + luminance(c));
+}
+
+vec3 expandColor(vec3 c) {
+    return c / max(1.0 - luminance(c), 1e-3);
+}
+
+// G-buffer specular exponent (material.r) to perceptual GGX roughness.
+float materialRoughness(float m) {
+    const float exponent = exp2(13.0 * m);
+    const float c2 = exp2(-2.0 / exponent);
+    const float a2 = clamp((1.0 - c2) / (1.41421356 * c2), 1e-6, 1.0);
+    return sqrt(sqrt(a2));
+}
+
+const float WET_ROUGHNESS = 0.08;
+
+// Wet ground: surfaces facing up (world +y) get smoother, like rain-wet stone, for the glossy
+// reflection rays.
+float wetRoughness(float roughness, vec3 n) {
+    const float wet = float((history >> 18u) & 255u) * (1.0 / 255.0);
+    if (wet <= 0.0) {
+        return roughness;
+    }
+    const vec2 xy = unpackUnorm2x16(floatBitsToUint(feedback)) * 2.0 - 1.0;
+    const vec3 up = vec3(xy, ((history & 0x4000000u) != 0u ? -1.0 : 1.0) *
+                                 sqrt(max(1.0 - dot(xy, xy), 0.0)));
+    const float facing = smoothstep(0.6, 0.9, dot(n, up));
+    return mix(roughness, min(roughness, WET_ROUGHNESS), wet * facing);
 }
 
 #if defined(TRACE)
@@ -367,6 +435,347 @@ void main() {
     }
 }
 
+#elif defined(REFLECT)
+
+layout(binding = 0) uniform texture2D depth_tex;
+layout(binding = 1) uniform texture2D geo_tex;
+layout(binding = 2) uniform texture2D color_tex;
+layout(binding = 3) uniform texture2D material_tex;
+layout(binding = 4, rgba16f) uniform writeonly image2D ray_img;
+layout(binding = 5, r16f) uniform writeonly image2D dist_img;
+
+const int RAY_STEPS = 32;
+const int RAY_STEPS_SMOOTH = 56;
+const int RAY_REFINE = 6;
+const float RAY_DISTANCE = 40.0;
+const float RAY_CLAMP = 10.0;
+// Drops the far tail of the GGX lobe: slightly narrower highlights for much less noise.
+const float GGX_TAIL_TRIM = 0.75;
+const float MIRROR_ROUGHNESS = 0.12;
+
+// Heitz 2018, sampling the GGX distribution of visible normals.
+vec3 sampleGgxReflection(vec3 v, vec3 n, float alpha, vec2 u) {
+    const vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 tx = normalize(cross(up, n));
+    const vec3 ty = cross(n, tx);
+    const vec3 ve = vec3(dot(v, tx), dot(v, ty), dot(v, n));
+    const vec3 vh = normalize(vec3(alpha * ve.x, alpha * ve.y, ve.z));
+    const float lensq = vh.x * vh.x + vh.y * vh.y;
+    const vec3 t1 = lensq > 0.0 ? vec3(-vh.y, vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    const vec3 t2 = cross(vh, t1);
+    const float r = sqrt(u.x);
+    const float phi = 2.0 * PI * u.y;
+    const float p1 = r * cos(phi);
+    const float s = 0.5 * (1.0 + vh.z);
+    const float p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * r * sin(phi);
+    const vec3 nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+    const vec3 h = normalize(vec3(alpha * nh.x, alpha * nh.y, max(nh.z, 0.0)));
+    const vec3 l = reflect(-v, tx * h.x + ty * h.y + n * h.z);
+    return dot(l, n) > 0.0 ? l : reflect(-v, n);
+}
+
+// Surface normal from the depth buffer, choosing the closer neighbour on each axis so edges do
+// not bend it.
+vec3 geometricNormal(ivec2 pixel, vec3 pos, vec3 fallback) {
+    const ivec2 lim = ivec2(size) - 1;
+    vec3 axes[2];
+    for (int a = 0; a < 2; ++a) {
+        const ivec2 o = a == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        const ivec2 pp = clamp(pixel + o, ivec2(0), lim), pm = clamp(pixel - o, ivec2(0), lim);
+        const float dp = texelFetch(depth_tex, pp, 0).r, dm = texelFetch(depth_tex, pm, 0).r;
+        const vec3 qp = viewPos(vec2(pp) + 0.5, viewZ(dp));
+        const vec3 qm = viewPos(vec2(pm) + 0.5, viewZ(dm));
+        const bool use_p = dm >= 1.0 || (dp < 1.0 && abs(qp.z - pos.z) < abs(qm.z - pos.z));
+        axes[a] = use_p ? qp - pos : pos - qm;
+    }
+    vec3 g = cross(axes[0], axes[1]);
+    if (dot(g, g) < 1e-12) {
+        return fallback;
+    }
+    g = normalize(g);
+    return dot(g, fallback) < 0.0 ? -g : g;
+}
+
+float rayDepthDiff(vec2 s0, vec2 delta, float inv0, float inv1, float u, out ivec2 q) {
+    q = clamp(ivec2(s0 + delta * u), ivec2(0), ivec2(size) - 1);
+    const float depth = texelFetch(depth_tex, q, 0).r;
+    if (depth >= 1.0) {
+        return -1e30;
+    }
+    return 1.0 / mix(inv0, inv1, u) - viewZ(depth);
+}
+
+// rgb = radiance, a = hit weight (0 on a miss, faded towards the screen edges); hit_dist = view
+// distance to the hit. `plane` is the geometric (depth-derived) surface normal: normal-mapped
+// normals tilt rays into the surface they start from, so hits lying on that surface are rejected
+// rather than reflecting itself.
+vec4 traceReflection(vec3 pos, vec3 plane, vec3 dir, float noise, int steps, out float hit_dist) {
+    hit_dist = 0.0;
+    const vec3 origin = pos + plane * (0.02 + 0.004 * pos.z);
+    float reach = RAY_DISTANCE;
+    if (dir.z < 0.0) {
+        reach = min(reach, (origin.z - 0.05) / -dir.z);
+    }
+    if (reach <= 0.02) {
+        return vec4(0.0);
+    }
+    const vec3 end = origin + dir * reach;
+    const vec2 s0 = projectPixel(origin);
+    const vec2 delta = projectPixel(end) - s0;
+    float u_max = 1.0;
+    for (int a = 0; a < 2; ++a) {
+        const float e = s0[a] + delta[a];
+        if (e < 0.0) {
+            u_max = min(u_max, -s0[a] / delta[a]);
+        } else if (e > size[a]) {
+            u_max = min(u_max, (size[a] - s0[a]) / delta[a]);
+        }
+    }
+    const float full = length(delta);
+    if (full * u_max < 1.5) {
+        return vec4(0.0);
+    }
+    const float u_min = 1.0 / full;
+    const float inv0 = 1.0 / origin.z, inv1 = 1.0 / end.z;
+    float last_u = u_min, last_z = origin.z;
+    for (int i = 0; i < steps; ++i) {
+        const float f = (float(i) + noise) / float(steps);
+        const float u = mix(u_min, u_max, f * f);
+        const float ray_z = 1.0 / mix(inv0, inv1, u);
+        const float thickness = max(0.15 + 0.02 * ray_z, abs(ray_z - last_z) * 1.5);
+        ivec2 q;
+        const float diff = rayDepthDiff(s0, delta, inv0, inv1, u, q);
+        if (diff > 0.0 && diff < thickness) {
+            float lo = last_u, hi = u;
+            for (int k = 0; k < RAY_REFINE; ++k) {
+                const float mid = 0.5 * (lo + hi);
+                ivec2 qm;
+                if (rayDepthDiff(s0, delta, inv0, inv1, mid, qm) > 0.0) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            rayDepthDiff(s0, delta, inv0, inv1, hi, q);
+            const vec4 g = texelFetch(geo_tex, q, 0);
+            if (g.w <= 0.0 || dot(g.xyz, dir) > 0.1) {
+                return vec4(0.0);
+            }
+            const vec3 hit_pos = viewPos(vec2(q) + 0.5, g.w);
+            if (dot(hit_pos - pos, plane) < 0.05 + 0.01 * pos.z ||
+                distance(vec2(q), s0) < 3.0) {
+                // Hit the surface the ray left from: keep marching past it.
+                last_u = u;
+                last_z = ray_z;
+                continue;
+            }
+            const vec2 uv = (vec2(q) + 0.5) / size;
+            const vec2 edge = min(uv, 1.0 - uv);
+            const float fade = smoothstep(0.0, 0.06, min(edge.x, edge.y));
+            const vec3 c = texelFetch(color_tex, q, 0).rgb;
+            hit_dist = distance(hit_pos, pos);
+            return vec4(min(c, vec3(RAY_CLAMP)), fade);
+        }
+        last_u = u;
+        last_z = ray_z;
+    }
+    return vec4(0.0);
+}
+
+void main() {
+    const ivec2 hp = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(hp, raySize()))) {
+        return;
+    }
+    const ivec2 pixel = rayPixel(hp);
+    const vec4 geo = texelFetch(geo_tex, pixel, 0);
+    if (geo.w <= 0.0) {
+        imageStore(ray_img, hp, vec4(0.0));
+        imageStore(dist_img, hp, vec4(0.0));
+        return;
+    }
+    const float roughness =
+        wetRoughness(materialRoughness(texelFetch(material_tex, pixel, 0).r), geo.xyz);
+    if (roughness > RAY_MAX_ROUGHNESS) {
+        imageStore(ray_img, hp, vec4(0.0));
+        imageStore(dist_img, hp, vec4(0.0));
+        return;
+    }
+    const vec3 n = geo.xyz;
+    const vec3 pos = viewPos(vec2(pixel) + 0.5, geo.w);
+    const vec3 v = -normalize(pos);
+    const vec3 plane = geometricNormal(pixel, pos, n);
+    // Per-pixel random offset advanced along the R2 low-discrepancy sequence each frame, so the
+    // samples a pixel accumulates over time cover the lobe evenly instead of clumping.
+    // Near-mirror surfaces (wet ground) trace the exact reflection with a fixed per-pixel step
+    // offset: their lobe is too narrow for sampling noise to matter, and a ray that is identical
+    // every frame needs no temporal accumulation to be stable in motion.
+    const bool mirror = roughness < MIRROR_ROUGHNESS;
+    const uint seed = hash(uint(hp.x) * 73856093u ^ uint(hp.y) * 19349663u);
+    const float k = mirror ? 0.0 : float(frame & 4095u);
+    vec2 u = fract(vec2(rand(seed), rand(seed ^ 0x9e3779b9u)) +
+                   k * vec2(0.75487766624669276, 0.56984029099805327));
+    u.x *= GGX_TAIL_TRIM;
+    const float noise = fract(rand(seed ^ 0x85ebca6bu) + k * 0.61803398875);
+    const float alpha = max(roughness * roughness, 0.002);
+    vec3 dir = mirror ? reflect(-v, n) : sampleGgxReflection(v, n, alpha, u);
+    const float below = dot(dir, plane);
+    if (below < 0.02) {
+        dir = normalize(dir + plane * (0.02 - below));
+    }
+    const int steps = roughness < 0.35 ? RAY_STEPS_SMOOTH : RAY_STEPS;
+    float hit_dist;
+    imageStore(ray_img, hp, traceReflection(pos, plane, dir, noise, steps, hit_dist));
+    imageStore(dist_img, hp, vec4(hit_dist));
+}
+
+#elif defined(RESOLVE)
+
+layout(binding = 0) uniform texture2D geo_tex;
+layout(binding = 1) uniform texture2D material_tex;
+layout(binding = 2) uniform texture2D ray_tex;
+layout(binding = 3) uniform texture2D prev_reflection_tex;
+layout(binding = 4) uniform texture2D prev_diffuse_tex;
+layout(binding = 5, rgba16f) uniform writeonly image2D reflection_img;
+layout(binding = 6) uniform texture2D dist_tex;
+
+const int FILTER_RADIUS = 2;
+const float REFLECTION_BLEND = 0.07;
+const float MIRROR_BLEND = 0.3;
+const float HIT_BLEND = 0.1;
+const float HISTORY_CLAMP = 1.75;
+const float REFLECTION_DEPTH_TOLERANCE = 0.05;
+const float VIRTUAL_DEPTH_TOLERANCE = 0.15;
+const float VIRTUAL_MAX_ROUGHNESS = 0.45;
+
+// Previous resolved reflection at full-resolution previous-frame pixel `pp`, validated against
+// the previous view z kept in the probe diffuse history.
+bool fetchHistory(vec2 pp, float expected_z, float tolerance, out vec4 hist) {
+    hist = vec4(0.0);
+    const ivec2 full = ivec2(floor(pp));
+    if (any(lessThan(full, ivec2(0))) || any(greaterThanEqual(full, ivec2(size)))) {
+        return false;
+    }
+    const float prev_z = texelFetch(prev_diffuse_tex, full, 0).a;
+    if (prev_z <= 0.0 || abs(prev_z - expected_z) > tolerance * expected_z) {
+        return false;
+    }
+    const vec2 hf = fullResRays() ? pp - 0.5 : pp * 0.5 - 0.5;
+    const ivec2 b = ivec2(floor(hf));
+    const vec2 f = hf - vec2(b);
+    const ivec2 hi = raySize() - 1;
+    const vec4 h00 = texelFetch(prev_reflection_tex, clamp(b, ivec2(0), hi), 0);
+    const vec4 h10 = texelFetch(prev_reflection_tex, clamp(b + ivec2(1, 0), ivec2(0), hi), 0);
+    const vec4 h01 = texelFetch(prev_reflection_tex, clamp(b + ivec2(0, 1), ivec2(0), hi), 0);
+    const vec4 h11 = texelFetch(prev_reflection_tex, clamp(b + ivec2(1, 1), ivec2(0), hi), 0);
+    hist = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    return true;
+}
+
+// Smooth reflections move with the reflected object, not the reflecting surface: reproject the
+// virtual image point (behind the mirror, hit distance along the view ray) when it lands on the
+// same surface, otherwise fall back to the surface motion.
+bool reflectionHistory(vec3 pos, float roughness, float hit_dist, out vec4 hist) {
+    const vec3 surface = toPrevious(pos);
+    if (surface.z < 1e-3) {
+        hist = vec4(0.0);
+        return false;
+    }
+    if (hit_dist > 0.0 && roughness < VIRTUAL_MAX_ROUGHNESS) {
+        const vec3 virt = toPrevious(pos + normalize(pos) * hit_dist);
+        if (virt.z > 1e-3 &&
+            fetchHistory(prevPixel(virt), surface.z, VIRTUAL_DEPTH_TOLERANCE, hist)) {
+            return true;
+        }
+    }
+    return fetchHistory(prevPixel(surface), surface.z, REFLECTION_DEPTH_TOLERANCE, hist);
+}
+
+void main() {
+    const ivec2 hp = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 rsize = raySize();
+    if (any(greaterThanEqual(hp, rsize))) {
+        return;
+    }
+    const ivec2 pixel = rayPixel(hp);
+    const vec4 geo = texelFetch(geo_tex, pixel, 0);
+    const float roughness =
+        geo.w > 0.0
+            ? wetRoughness(materialRoughness(texelFetch(material_tex, pixel, 0).r), geo.xyz)
+            : 1.0;
+    if (roughness > RAY_MAX_ROUGHNESS) {
+        imageStore(reflection_img, hp, vec4(0.0));
+        return;
+    }
+    const vec3 n = geo.xyz;
+    const vec3 pos = viewPos(vec2(pixel) + 0.5, geo.w);
+
+    // Smoother surfaces share rays with fewer neighbours, keeping their reflections sharper.
+    const float sigma = mix(0.8, 2.0, roughness / RAY_MAX_ROUGHNESS) *
+                        (fullResRays() ? 1.5 : 1.0);
+    vec3 sum = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0);
+    float color_w = 0.0, hit_sum = 0.0, wsum = 0.0, moments = 0.0, dist_sum = 0.0;
+    for (int y = -FILTER_RADIUS; y <= FILTER_RADIUS; ++y) {
+        for (int x = -FILTER_RADIUS; x <= FILTER_RADIUS; ++x) {
+            const ivec2 q = hp + ivec2(x, y);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, rsize))) {
+                continue;
+            }
+            const ivec2 qp = rayPixel(q);
+            const vec4 g = texelFetch(geo_tex, qp, 0);
+            if (g.w <= 0.0) {
+                continue;
+            }
+            const vec3 qpos = viewPos(vec2(qp) + 0.5, g.w);
+            const float w = exp(-float(x * x + y * y) / (2.0 * sigma * sigma)) *
+                            pow(max(dot(n, g.xyz), 0.0), 8.0) *
+                            exp(-abs(dot(n, qpos - pos)) / (0.03 + 0.01 * geo.w));
+            if (w < 1e-4) {
+                continue;
+            }
+            const vec4 ray = texelFetch(ray_tex, q, 0);
+            wsum += w;
+            hit_sum += ray.a * w;
+            if (ray.a > 0.0) {
+                const vec3 c = compressColor(ray.rgb);
+                const float cw = w * ray.a;
+                sum += c * cw;
+                color_w += cw;
+                dist_sum += texelFetch(dist_tex, q, 0).r * cw;
+                m1 += c;
+                m2 += c * c;
+                moments += 1.0;
+            }
+        }
+    }
+    const vec3 current = color_w > 0.0 ? sum / color_w : vec3(0.0);
+    const float hit = wsum > 0.0 ? hit_sum / wsum : 0.0;
+    const float hit_dist = color_w > 0.0 ? dist_sum / color_w : 0.0;
+
+    vec3 result = current;
+    float result_hit = hit;
+    vec4 hist;
+    if ((history & 5u) == 5u && reflectionHistory(pos, roughness, hit_dist, hist)) {
+        vec3 hist_c = compressColor(hist.rgb);
+        if (moments > 0.0) {
+            const vec3 mean = m1 / moments;
+            const vec3 sd = sqrt(max(m2 / moments - mean * mean, vec3(0.0)));
+            hist_c = clamp(hist_c, mean - HISTORY_CLAMP * sd - 0.01,
+                           mean + HISTORY_CLAMP * sd + 0.01);
+        }
+        // Weight each side by its hit coverage, so a frame that misses (or a history that had
+        // missed) neither wipes nor ignores the other; a hard reset here flickers at hit edges.
+        // Mirror rays are identical every frame, so they need little history: follow motion faster.
+        const float blend =
+            mix(MIRROR_BLEND, REFLECTION_BLEND, smoothstep(0.08, 0.2, roughness));
+        const float wh = hist.a * (1.0 - blend);
+        const float wc = (color_w > 0.0 ? hit : 0.0) * blend;
+        result = wh + wc > 1e-5 ? (hist_c * wh + current * wc) / (wh + wc) : current;
+        result_hit = mix(hist.a, hit, HIT_BLEND);
+    }
+    imageStore(reflection_img, hp, vec4(expandColor(result), result_hit));
+}
+
 #elif defined(COMPOSITE)
 
 layout(binding = 0) uniform texture2D geo_tex;
@@ -384,6 +793,7 @@ layout(binding = 11) uniform texture2D prev_diffuse_tex;
 layout(binding = 12) uniform texture2D prev_specular_tex;
 layout(binding = 13, rgba16f) uniform writeonly image2D diffuse_img;
 layout(binding = 14, rgba16f) uniform writeonly image2D specular_img;
+layout(binding = 15) uniform texture2D reflection_tex;
 
 const float MAX_RESOLVE_HISTORY = 16.0;
 const float RESOLVE_DEPTH_TOLERANCE = 0.05;
@@ -454,6 +864,33 @@ vec3 envBrdf(vec3 f0, float roughness, float n_dot_v) {
     return f0 * ab.x + ab.y;
 }
 
+// Joint bilateral upsample of the half-resolution glossy reflections. a = hit confidence.
+vec4 sampleReflection(ivec2 pixel, float z, vec3 n) {
+    if (fullResRays()) {
+        return texelFetch(reflection_tex, pixel, 0);
+    }
+    const ivec2 hsize = raySize();
+    const vec2 hf = (vec2(pixel) + 0.5) * 0.5 - 0.5;
+    const ivec2 b = ivec2(floor(hf));
+    const vec2 f = hf - vec2(b);
+    vec4 sum = vec4(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const ivec2 q = clamp(b + o, ivec2(0), hsize - 1);
+        const vec4 g = texelFetch(geo_tex, rayPixel(q), 0);
+        if (g.w <= 0.0) {
+            continue;
+        }
+        const float w = (o.x == 0 ? 1.0 - f.x : f.x) * (o.y == 0 ? 1.0 - f.y : f.y) *
+                        exp(-abs(g.w - z) / (0.02 * z)) * pow(max(dot(n, g.xyz), 0.0), 8.0) +
+                        1e-5;
+        sum += texelFetch(reflection_tex, q, 0) * w;
+        wsum += w;
+    }
+    return wsum > 0.0 ? sum / wsum : vec4(0.0);
+}
+
 void main() {
     const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(size.x) || pixel.y >= int(size.y)) {
@@ -470,19 +907,20 @@ void main() {
     const vec3 pos = viewPos(vec2(pixel) + 0.5, z);
     const vec3 v = -normalize(pos);
 
-    float roughness = 1.0;
+    float roughness = 1.0, probe_roughness = 1.0;
     vec3 f0 = vec3(0.0);
     bool specular = material_on > 0.5 && specular_scale > 0.0;
+    bool ray_specular = false;
     if (specular) {
-        const float exponent = exp2(13.0 * texelFetch(material_tex, pixel, 0).r);
-        const float c2 = exp2(-2.0 / exponent);
-        const float a2 = clamp((1.0 - c2) / (1.41421356 * c2), 1e-6, 1.0);
-        roughness = sqrt(sqrt(a2));
+        probe_roughness = materialRoughness(texelFetch(material_tex, pixel, 0).r);
+        roughness = (history & 2u) != 0u ? wetRoughness(probe_roughness, n) : probe_roughness;
         const vec3 s = texelFetch(specular_tex, pixel, 0).rgb;
         f0 = s * s;
-        // Only rough surfaces: the probes are too coarse for sharp reflections, which are left to
-        // screen-space reflections and the game's cubemaps.
-        specular = roughness > 0.4;
+        ray_specular = (history & 2u) != 0u && roughness <= RAY_MAX_ROUGHNESS;
+        // Probe specular only on rough surfaces: the probes are too coarse for sharp reflections,
+        // which are left to the glossy rays (if on), screen-space reflections and cubemaps. It
+        // keeps the game's roughness, as the fallback where wet-ground rays miss.
+        specular = probe_roughness > 0.4;
     }
     const vec3 r = reflect(-v, n);
 
@@ -551,9 +989,18 @@ void main() {
         albedo = ALBEDO * mix(vec3(1.0), clamp(color.rgb / max(luma, 1e-3), 0.0, 2.5), 0.6);
     }
     vec3 add = albedo * irradiance * (diffuse_scale / PI);
-    if (specular) {
-        const float fade = smoothstep(0.4, 0.6, roughness);
-        add += radiance * envBrdf(f0, roughness, max(dot(n, v), 1e-3)) * (specular_scale * fade);
+    if (specular || ray_specular) {
+        vec3 spec = specular ? radiance * smoothstep(0.4, 0.6, probe_roughness) : vec3(0.0);
+        const vec3 brdf = envBrdf(f0, roughness, max(dot(n, v), 1e-3));
+        if (ray_specular) {
+            const vec4 reflection = sampleReflection(pixel, z, n);
+            const float t = clamp(reflection.a, 0.0, 1.0) *
+                            (1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness));
+            const float strength =
+                float((history >> 8u) & 255u) * (REFLECTION_STRENGTH_SCALE / 255.0);
+            spec = mix(spec, reflection.rgb * strength, t);
+        }
+        add += spec * brdf * specular_scale;
     }
     if (ao_amount > 0.0) {
         add *= max(1.0 - ao_amount * (1.0 - clamp(sampleAo(pixel), 0.0, 1.0)), 0.0);

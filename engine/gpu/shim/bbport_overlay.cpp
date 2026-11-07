@@ -690,6 +690,53 @@ void PictureSection() {
             "непрямой свет зондами (один на 16x16 пикселей): рассеянный отражённый свет и "
             "размытые отражения. Пока включено, заменяет трассированный отражённый свет."));
     }
+    if (const char* label = Item("Screen probe glossy reflections (experimental)",
+                                 "Глянцевые отражения экранных зондов (экспериментальный)")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes);
+        Checkbox(label, s.graphics_gi_reflections);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Needs Screen probe indirect light. Traces one glossy reflection "
+            "ray per 2x2 pixels on wet and smooth surfaces, so nearby lit surfaces reflect in "
+            "them. Costs about as much as screen-space reflections at half resolution.",
+            "Работает сразу, по умолчанию выкл. Нужен непрямой свет экранных зондов. Трассирует "
+            "один луч глянцевого отражения на 2x2 пикселя на мокрых и гладких поверхностях, чтобы "
+            "в них отражались освещённые поверхности рядом. Стоит примерно как экранные "
+            "отражения в половинном разрешении."));
+    }
+    if (const char* label = Item("Full-resolution glossy reflections",
+                                 "Глянцевые отражения в полном разрешении")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes || !s.graphics_gi_reflections);
+        Checkbox(label, s.graphics_gi_reflections_full_res);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Traces one glossy reflection ray per pixel instead of per 2x2 "
+            "pixels: sharper puddle reflections for about 4x the reflection cost.",
+            "Работает сразу, по умолчанию выкл. Трассирует один луч глянцевого отражения на "
+            "каждый пиксель вместо 2x2: более чёткие отражения в лужах примерно за 4x стоимость "
+            "отражений."));
+    }
+    if (const char* label = Item("Glossy reflection strength", "Сила глянцевых отражений")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes || !s.graphics_gi_reflections);
+        Slider(label, s.graphics_gi_reflection_strength, 0.0f, 1.0f, "%.2f",
+               ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live. Scales the screen probe glossy reflections: 0 is off, 1 is full strength.",
+            "Работает сразу. Масштабирует глянцевые отражения экранных зондов: 0 — выкл., 1 — "
+            "полная сила."));
+    }
+    if (const char* label = Item("Wet ground", "Мокрая земля")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes || !s.graphics_gi_reflections);
+        Slider(label, s.graphics_gi_wet_ground, 0.0f, 1.0f, "%.2f",
+               ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live. Makes upward-facing surfaces smoother for the glossy reflections, like rain-wet "
+            "stone: 0 keeps the game's materials, 1 gives near-mirror puddles.",
+            "Работает сразу. Делает обращённые вверх поверхности глаже для глянцевых отражений, "
+            "как мокрый от дождя камень: 0 — материалы игры, 1 — почти зеркальные лужи."));
+    }
     if (const char* label = Item("Recalibrate exposure", "Калибровать экспозицию заново")) {
         ImGui::BeginDisabled(!s.graphics_auto_exposure);
         if (ImGui::Button(label)) BbEngine::Exposure::Recalibrate();
