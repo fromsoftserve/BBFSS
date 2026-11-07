@@ -429,7 +429,10 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     };
     const u32 current = frame & 1;
     scheduler.EndRendering();
-    const bool use_rays = gather_ray.pipeline && rt_shadow.PrepareScene();
+    const bool use_rays =
+        gather_ray.pipeline &&
+        BbSettings::Get().graphics_rt_bounce.load(std::memory_order_relaxed) &&
+        rt_shadow.PrepareScene();
     if (!use_rays &&
         !BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed)) {
         return;

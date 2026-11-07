@@ -156,6 +156,9 @@ function(add_host_shader FILENAME SHADER_NAME)
     if (FILENAME MATCHES "^native_motion_blur")
         list(APPEND INCLUDES ${SHADER_SRC}/native_motion_blur.glsl)
     endif()
+    if (FILENAME MATCHES "^sun_vsm")
+        list(APPEND INCLUDES ${SHADER_SRC}/sun_vsm.glsl)
+    endif()
     add_custom_command(OUTPUT ${OUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DIR}
         COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${STAGE} ${DEFINES} ${SHADER_SRC}/${FILENAME}
@@ -187,6 +190,8 @@ add_host_shader(ssr_trace.comp ssr_trace_comp)
 add_host_shader(contact_shadow.comp contact_shadow_comp)
 add_host_shader(rt_shadow.comp rt_shadow_comp)
 add_host_shader(rt_unproject.comp rt_unproject_comp)
+add_host_shader(sun_vsm.comp sun_vsm_comp)
+add_host_shader(sun_vsm_draw.vert sun_vsm_draw_vert)
 add_host_shader(point_shadow_ray.comp point_shadow_ray_comp)
 add_host_shader(ssgi_gather_ray.comp ssgi_gather_ray_comp)
 add_host_shader(rt_shadow_filter.comp rt_shadow_filter_comp)

@@ -18,6 +18,7 @@ class CameraMotion;
 class Instance;
 class ObjectMotion;
 class Scheduler;
+class SunVsm;
 
 class RtShadow {
 public:
@@ -92,6 +93,7 @@ private:
     struct Entry {
         Buffer storage;
         Buffer indices;
+        Buffer world;
         vk::AccelerationStructureKHR handle;
         u64 address = 0;
         u64 palette = 0;
@@ -104,10 +106,19 @@ private:
         u64 update_scratch = 0;
         u64 seen_frame = 0;
         u64 built_frame = 0;
+        u64 bytes = 0;
         u8 mask = 1;
         bool built = false;
         bool dynamic = false;
         bool rebuilt = false;
+        bool copied = false;
+        // The BLAS holds this entry's geometry (false while the scene is not being built).
+        bool blas = false;
+        // Value of `copies` when the world copy was last written.
+        u64 copied_at = 0;
+        // World bounds measured by the sun VSM (min xyz, max xyz), when has_box.
+        std::array<float, 6> box{};
+        bool has_box = false;
     };
     struct Build {
         Entry* entry;
@@ -122,6 +133,10 @@ private:
     void Destroy(Entry& entry);
     bool ToWorld(const float* constants, bool perspective, std::array<float, 12>& out) const;
     bool MakeRaw(u32 width, u32 height);
+    bool PrepareCapture();
+    // Whether anything this frame traces the scene. Off (sun VSM only), captures only feed the
+    // VSM's world copies and no acceleration structures are built.
+    [[nodiscard]] bool SceneWanted() const;
     u32 Param(u32 store, const Entry& entry);
     std::unique_ptr<Entry> MakeEntry(const Draw& draw, u8 mask);
 
@@ -141,6 +156,13 @@ private:
     vk::UniquePipelineLayout trace_layout, filter_layout, unproject_layout;
     vk::UniquePipeline trace_pipeline, filter_pipeline, unproject_pipeline;
     vk::UniqueSampler sampler;
+    std::unique_ptr<SunVsm> vsm;
+    bool vsm_tried = false;
+    // SceneWanted() at the start of the frame, kept for the whole frame.
+    bool need_scene = true;
+    // World copies recorded so far, and the count at the last VSM pass (its changed casters).
+    u64 copies = 0;
+    u64 vsm_copies = 0;
 
     Buffer capture_addresses, both_addresses, params, positions, scratch, instance_data,
         tlas_storage, tlas_scratch;
@@ -154,6 +176,7 @@ private:
     std::unordered_set<u64> shared_keys;
     std::unordered_map<u64, u32> occurrences;
     std::vector<const float*> frame_cameras;
+    std::vector<std::array<float, 12>> frame_volumes;
     std::vector<Entry*> frame_entries;
     std::vector<Build> builds;
     std::array<u64, 4> slot_ticks{};
@@ -163,6 +186,7 @@ private:
     u32 new_triangles = 0;
     u32 rebuilt_triangles = 0;
     u64 scratch_used = 0;
+    u64 entry_bytes = 0;
     u32 alpha_casters = 0;
     u32 missed = 0;
     u32 tlas_count = 0;
@@ -171,7 +195,11 @@ private:
     struct Stats {
         u64 draws = 0, camera_draws = 0, not_ortho = 0, no_camera = 0, alpha = 0, unsupported = 0,
             over_budget = 0, instanced = 0, dynamic_draws = 0, strips = 0, frames = 0, instances = 0,
-            triangles = 0, shared_builds = 0;
+            triangles = 0, shared_builds = 0, sun = 0, incomplete = 0, ends = 0, stale = 0,
+            evicted = 0;
+        u64 vsm_casters = 0, vsm_camera = 0, vsm_no_world = 0, vsm_not_copied = 0,
+            vsm_no_views = 0, shadow_not_solid = 0, shadow_alpha = 0, shadow_at_end = 0,
+            vsm_kept = 0, vsm_kept_in_view = 0, vsm_kept_in_cascade = 0;
     } stats;
 };
 

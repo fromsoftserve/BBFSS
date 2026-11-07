@@ -310,6 +310,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_auto_exposure") {
         v.graphics_auto_exposure=i!=0;
+    } else if (key == "graphics_sun_vsm") {
+        v.graphics_sun_vsm=i!=0;
+    } else if (key == "graphics_rt_point_shadows") {
+        v.graphics_rt_point_shadows=i!=0;
+    } else if (key == "graphics_rt_bounce") {
+        v.graphics_rt_bounce=i!=0;
     } else if (key == "graphics_native_sss") {
         v.graphics_native_sss=i!=0;
     } else if (key == "graphics_directional_ggx") {
@@ -738,6 +744,9 @@ void Save() {
     put("graphics_point_fog_glow_size",fixed(v.graphics_point_fog_glow_size,3));
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
     put("graphics_auto_exposure",flag(v.graphics_auto_exposure));
+    put("graphics_sun_vsm",flag(v.graphics_sun_vsm));
+    put("graphics_rt_point_shadows",flag(v.graphics_rt_point_shadows));
+    put("graphics_rt_bounce",flag(v.graphics_rt_bounce));
     put("graphics_native_sss",flag(v.graphics_native_sss));
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));

@@ -95,6 +95,11 @@ bool PointShadow::Ready() {
 
 PointShadow::~PointShadow() = default;
 
+bool PointShadow::RaysWanted() const {
+    return rt_shadow.Wanted() &&
+           BbSettings::Get().graphics_rt_point_shadows.load(std::memory_order_relaxed);
+}
+
 bool PointShadow::EnsureImage(OwnImage& own, u32 width, u32 height) {
     if (own.image && own.width == width && own.height == height) {
         return false;
@@ -151,7 +156,7 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
     if (failed || !color0 || !color1 || !inputs.constants || !inputs.lights || inputs.count == 0 ||
         (!BbSettings::Get().effects[BbSettings::EffectPointShadows].load(
              std::memory_order_relaxed) &&
-         !rt_shadow.Wanted()) ||
+         !RaysWanted()) ||
         !Ready()) {
         return;
     }
@@ -367,7 +372,7 @@ void PointShadow::Flush(bool animate_noise) {
     }
 
     scheduler.EndRendering();
-    const bool use_rays = ray_pipeline && rt_shadow.PrepareScene();
+    const bool use_rays = ray_pipeline && RaysWanted() && rt_shadow.PrepareScene();
     if (!use_rays &&
         !BbSettings::Get().effects[BbSettings::EffectPointShadows].load(std::memory_order_relaxed)) {
         return;

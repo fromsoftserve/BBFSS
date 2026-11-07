@@ -181,6 +181,9 @@ struct Values {
     std::atomic<bool> change_appearance{false}, rebirth{false};
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
     std::atomic<bool> graphics_auto_exposure{false};
+    std::atomic<bool> graphics_sun_vsm{false};
+    std::atomic<bool> graphics_rt_point_shadows{false};
+    std::atomic<bool> graphics_rt_bounce{true};
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_dof_intensity{1};

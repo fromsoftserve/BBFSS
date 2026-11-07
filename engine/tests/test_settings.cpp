@@ -105,10 +105,14 @@ int main() {
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
     assert(s.graphics_point_fog_glow_size == 0.15f);
-    assert(!s.graphics_auto_exposure && !s.graphics_native_sss);
+    assert(!s.graphics_auto_exposure && !s.graphics_native_sss && !s.graphics_sun_vsm &&
+           !s.graphics_rt_point_shadows && s.graphics_rt_bounce);
     assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
     assert(s.graphics_dof_intensity == 1.0f);
     s.graphics_auto_exposure = true;
+    s.graphics_sun_vsm = true;
+    s.graphics_rt_point_shadows = true;
+    s.graphics_rt_bounce = false;
     s.graphics_native_sss = true;
     s.graphics_directional_ggx = true;
     s.graphics_dof_intensity = 1.75f;
@@ -117,18 +121,27 @@ int main() {
     {
         const std::string fork_keys = Read(path);
         assert(fork_keys.find("graphics_auto_exposure=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_sun_vsm=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_rt_point_shadows=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_rt_bounce=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_directional_ggx=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     }
     s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_directional_ggx = false;
+    s.graphics_sun_vsm = false;
+    s.graphics_rt_point_shadows = false;
+    s.graphics_rt_bounce = true;
     s.graphics_dof_intensity = 1.0f;
     BbSettings::Load();
+    assert(s.graphics_sun_vsm && s.graphics_rt_point_shadows && !s.graphics_rt_bounce);
     assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
     assert(s.graphics_directional_ggx && s.startup_directional_ggx);
     s.graphics_directional_ggx = false;
     assert(s.startup_directional_ggx);
-    s.graphics_auto_exposure = s.graphics_native_sss = false;
+    s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_sun_vsm = false;
+    s.graphics_rt_point_shadows = false;
+    s.graphics_rt_bounce = true;
     s.graphics_dof_intensity = 1.0f;
     BbSettings::Save();
     for (const auto& [input, expected] :

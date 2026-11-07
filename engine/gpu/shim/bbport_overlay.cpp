@@ -648,6 +648,37 @@ void PictureSection() {
         }
         ImGui::TextDisabled("%s (%+.2f EV)", text, BbEngine::Exposure::CurrentStops());
     }
+    if (const char* label = Item("Sun virtual shadow maps (prototype)", "Виртуальные карты теней солнца (прототип)")) {
+        Checkbox(label, s.graphics_sun_vsm);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Needs Ray traced lighting (experimental). Replaces the ray traced "
+            "sun with a 16-cascade virtual shadow map drawn from the same captured casters; only the "
+            "pages on screen are rendered. Compare against ray traced sun shadows.",
+            "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Заменяет "
+            "трассировку солнца виртуальной картой теней из 16 каскадов по тем же объектам; "
+            "рисуются только видимые страницы. Сравните с трассированными тенями."));
+    }
+    if (const char* label = Item("Ray traced lamp shadows", "Трассированные тени ламп")) {
+        Checkbox(label, s.graphics_rt_point_shadows);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Needs Ray traced lighting (experimental). Traces lamp and torch "
+            "shadows against the captured scene; costly. Off, lamps use the screen space point "
+            "shadows effect (if enabled) instead.",
+            "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Тени ламп и "
+            "факелов трассируются по сцене; затратно. Выкл.: используются экранные тени точечных "
+            "источников (если включены)."));
+    }
+    if (const char* label = Item("Ray traced bounce light", "Трассированный отражённый свет")) {
+        Checkbox(label, s.graphics_rt_bounce);
+        Hint(BbSettings::MenuText(
+            "Live, on by default. Needs Ray traced lighting (experimental). Traces indirect light "
+            "against the captured scene. With sun virtual shadow maps on and ray traced lamp shadows "
+            "off, turning this off skips building the ray tracing scene entirely (much cheaper).",
+            "Работает сразу, по умолчанию вкл. Нужно освещение с трассировкой лучей. Отражённый "
+            "свет трассируется по сцене. Если включены виртуальные карты теней солнца, а "
+            "трассированные тени ламп выкл., выключение пропускает построение сцены (намного "
+            "дешевле)."));
+    }
     if (const char* label = Item("Recalibrate exposure", "Калибровать экспозицию заново")) {
         ImGui::BeginDisabled(!s.graphics_auto_exposure);
         if (ImGui::Button(label)) BbEngine::Exposure::Recalibrate();
@@ -765,6 +796,8 @@ void PictureSection() {
     if (const char* label = Item("Game's own picture", "Как в игре")) {
         if (ImGui::Button(label)) {
             Store(s.graphics_auto_exposure, false, true);
+            Store(s.graphics_sun_vsm, false, true);
+            Store(s.graphics_rt_point_shadows, false, true);
             Store(s.graphics_native_sss, false, true);
             Store(s.graphics_dof_intensity, 1.0f, true);
             Store(s.graphics_brightness, 1.0f, true);

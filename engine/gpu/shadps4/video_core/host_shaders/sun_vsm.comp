@@ -1,0 +1,656 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Sun virtual shadow map bookkeeping and sampling (vk_sun_vsm.cpp). One shader, run in modes:
+// setup -> mark -> invalidate -> free list -> allocate -> (bounds reset -> bounds -> dirty, for
+// changed casters) -> resolve -> bin -> finalize, then the depth-only page draw, then sample.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#include "sun_vsm.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Vertices { vec4 p[]; };
+
+layout(scalar, set = 0, binding = 0) readonly buffer Cb { uint d[]; } cbuf;
+layout(set = 0, binding = 1) uniform sampler2D depth_tex;
+layout(scalar, set = 0, binding = 2) coherent buffer State { VSM_STATE_BODY } st;
+layout(scalar, set = 0, binding = 3) writeonly buffer Items { uvec2 items[]; };
+layout(scalar, set = 0, binding = 4) readonly buffer Draws { VsmDraw draws[]; };
+layout(set = 0, binding = 5) uniform sampler2D physical;
+layout(set = 0, binding = 6, r8) uniform writeonly image2D raw_img;
+// Per caster slot, 12 words: this frame's world bounds being gathered (6, order-preserving uints)
+// and the bounds last drawn into the pages (6 floats; lo.x > hi.x when none).
+layout(scalar, set = 0, binding = 7) coherent buffer Bounds { uint b[]; } bnd;
+
+layout(push_constant) uniform Constants {
+    uint mode; // low byte: mode; bit 8: drop every cached page this frame
+    uint buf_off;
+    vec2 size;
+    vec4 inv_view[3];
+    vec4 view[3];
+    uint draw_count;
+    uint triangle_count;
+    uint max_items; // the changed casters' first draw for the bounds modes
+    uint frame_index;
+};
+
+const uint ModeSetup = 0u, ModeMark = 1u, ModeInvalidate = 2u, ModeFreeList = 3u,
+           ModeAllocate = 4u, ModeBoundsReset = 5u, ModeBounds = 6u, ModeDirty = 7u,
+           ModeResolve = 8u, ModeBin = 9u, ModeFinalize = 10u, ModeSample = 11u;
+// Frames between redraws of an unchanged page, staggered across pages.
+const uint RefreshFrames = 240u;
+// World bounds change (m) treated as a caster having moved.
+const float MoveEpsilon = 0.01;
+
+uint base;
+float cb(int i) { return uintBitsToFloat(cbuf.d[base + uint(i)]); }
+vec4 row(int i) { return vec4(cb(i), cb(i + 1), cb(i + 2), cb(i + 3)); }
+
+mat4 invMat;
+
+vec3 viewPosAt(vec2 uv, float depth) {
+    vec4 v = invMat * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return v.xyz / v.w;
+}
+
+// As rt_shadow.comp: the direction towards the sun, view space, from the native light matrix.
+vec3 sunDirection() {
+    mat4 projMat = inverse(invMat);
+    vec4 p = vec4(0.0, 0.0, 1.0, 1.0);
+    mat4 rows = transpose(transpose(mat4(row(16), row(20), row(28), row(24))) * projMat);
+    float w = dot(rows[2], p);
+    float lu = dot(rows[0], p) / w;
+    float lv = dot(rows[1], p) / w;
+    float lz = dot(rows[3], p) / w;
+    vec3 dir = normalize(cross(rows[0].xyz - lu * rows[2].xyz, rows[1].xyz - lv * rows[2].xyz));
+    return dot(rows[3].xyz - lz * rows[2].xyz, dir) > 0.0 ? -dir : dir;
+}
+
+vec3 surfaceNormal(vec2 uv, vec3 P, vec2 px) {
+    vec3 best[2];
+    for (int axis = 0; axis < 2; ++axis) {
+        vec2 step_uv = axis == 0 ? vec2(px.x, 0.0) : vec2(0.0, px.y);
+        float d1 = textureLod(depth_tex, uv + step_uv, 0.0).x;
+        float d2 = textureLod(depth_tex, uv - step_uv, 0.0).x;
+        vec3 a = viewPosAt(uv + step_uv, d1) - P;
+        vec3 b = P - viewPosAt(uv - step_uv, d2);
+        best[axis] = abs(a.z) < abs(b.z) ? a : b;
+    }
+    vec3 n = cross(best[1], best[0]);
+    float len = length(n);
+    if (!(len > 1e-12)) {
+        return vec3(0.0);
+    }
+    n /= len;
+    return dot(n, P) > 0.0 ? -n : n;
+}
+
+mat3 ViewToWorld() {
+    return transpose(mat3(inv_view[0].xyz, inv_view[1].xyz, inv_view[2].xyz));
+}
+
+mat3 WorldToView() {
+    return transpose(mat3(view[0].xyz, view[1].xyz, view[2].xyz));
+}
+
+uint LinearId() {
+    return (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u +
+           gl_LocalInvocationIndex;
+}
+
+// Cascade whose half width (2^c m) holds a point `dist` m from the camera, with room for the
+// page snap of the clipmap centre.
+int CascadeFor(float dist) {
+    return clamp(int(ceil(log2(max(dist * 1.1, 1e-6)))), 0, VSM_CASCADES - 1);
+}
+
+vec2 LightPlane(vec3 rel) {
+    return vec2(dot(rel, st.right.xyz), dot(rel, st.up.xyz));
+}
+
+void Request(int c, vec2 texel) {
+    ivec2 page = ivec2(floor(texel / VSM_PAGE));
+    if (any(lessThan(page, ivec2(0))) || any(greaterThanEqual(page, ivec2(VSM_PAGES)))) {
+        return;
+    }
+    st.request[VsmIndex(c, page, st.cascades[c].base)] = 1u;
+}
+
+// The world page a table entry stands for in the current window.
+ivec2 Expected(uint id) {
+    const ivec2 base = st.cascades[id / uint(VSM_PAGES * VSM_PAGES)].base;
+    return base + VsmWindow(VsmWrapped(id), base);
+}
+
+void Setup() {
+    const uint id = LinearId();
+    if (id < VSM_TABLE) {
+        st.request[id] = 0u;
+        st.flags[id] &= ~VSM_RENDER;
+    }
+    if (id < VSM_CASCADES) {
+        st.bounds[id] = uvec4(VSM_PAGES, VSM_PAGES, 0u, 0u);
+    }
+    if (id != 0u) {
+        return;
+    }
+    st.args = uint[4](0u, 1u, 0u, 0u);
+    st.clear_args = uint[4](0u, 1u, VSM_CLEAR_FIRST, 0u);
+    st.item_count = 0u;
+    st.page_count = 0u;
+    st.item_overflow = 0u;
+    st.page_overflow = 0u;
+    st.render_count = 0u;
+    st.request_count = 0u;
+    st.free_front = 0u;
+    st.free_back = 0u;
+    st.moved = 0u;
+    st.marked = 0u;
+    st.marked_max = 0u;
+    st.frame += 1u;
+    uint reset = (mode >> 8) & 1u;
+
+    base = (buf_off & 0xffu) >> 2;
+    invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
+    vec3 light = normalize(ViewToWorld() * sunDirection());
+    // Hold the basis while the sun is still, so the clipmaps do not shimmer with float noise.
+    if (st.kept_light.w == 1.0 && dot(st.kept_light.xyz, light) > 0.9999996) {
+        light = st.kept_light.xyz;
+    } else {
+        st.kept_light = vec4(light, 1.0);
+        reset = 1u;
+    }
+    const vec3 axis = abs(light.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 right = normalize(cross(axis, light));
+    const vec3 up = cross(light, right);
+    const vec3 cam = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
+    // Cached depths are heights above a fixed anchor; it follows the camera in coarse steps.
+    const float h = dot(cam, light);
+    if (st.anchor_set == 0u || reset != 0u || abs(h - st.anchor) > 64.0) {
+        st.anchor = round(h / 32.0) * 32.0;
+        st.anchor_set = 1u;
+        reset = 1u;
+    }
+    st.height = h - st.anchor;
+    st.reset = reset;
+    st.right = vec4(right, 0.0);
+    st.up = vec4(up, 0.0);
+    st.light = vec4(light, 0.0);
+    st.cam = vec4(cam, 0.0);
+    const vec2 at = vec2(dot(cam, right), dot(cam, up));
+    st.at = vec4(at, h, 0.0);
+    for (int c = 0; c < VSM_CASCADES; ++c) {
+        const float width = exp2(float(c + 1));
+        const float page = width / float(VSM_PAGES);
+        const ivec2 first = ivec2(floor(at / page)) - VSM_PAGES / 2;
+        st.cascades[c].origin = vec2(first) * page - at;
+        st.cascades[c].texel = width / VSM_VIRTUAL;
+        st.cascades[c].page = page;
+        st.cascades[c].base = first;
+    }
+}
+
+void Mark() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(size)))) {
+        return;
+    }
+    const vec2 uv = (vec2(pixel) + 0.5) / size;
+    const float d0 = textureLod(depth_tex, uv, 0.0).x;
+    if (!(d0 < 1.0) || !(d0 > 0.0)) {
+        return;
+    }
+    base = (buf_off & 0xffu) >> 2;
+    invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
+    const vec3 P = viewPosAt(uv, d0);
+    const int c = CascadeFor(length(P));
+    const VsmCascade cascade = st.cascades[c];
+    const vec2 texel = (LightPlane(ViewToWorld() * P) - cascade.origin) / cascade.texel;
+    // The filter footprint and normal offset reach about two texels.
+    Request(c, texel + vec2(-3.0, -3.0));
+    Request(c, texel + vec2(3.0, -3.0));
+    Request(c, texel + vec2(-3.0, 3.0));
+    Request(c, texel + vec2(3.0, 3.0));
+}
+
+void Invalidate() {
+    const uint id = LinearId();
+    if (id >= VSM_TABLE) {
+        return;
+    }
+    if (st.reset != 0u) {
+        st.stamp[id] = 0u;
+        st.flags[id] = 0u;
+    }
+    const uint entry = st.table[id];
+    // A wrapped entry whose world page left the window gives its space back.
+    if (entry != 0u && (st.reset != 0u || st.tag[id] != Expected(id))) {
+        st.owner[entry - 1u] = 0u;
+        st.table[id] = 0u;
+    }
+    if (st.request[id] != 0u) {
+        atomicAdd(st.request_count, 1u);
+    }
+}
+
+// Free physical pages go to the front of the list; pages cached but not needed this frame to
+// the back, to be taken only when the free ones run out.
+void FreeList() {
+    const uint id = LinearId();
+    if (id >= VSM_PHYSICAL_PAGES) {
+        return;
+    }
+    const uint owner = st.owner[id];
+    if (owner == 0u) {
+        st.free_list[atomicAdd(st.free_front, 1u)] = id;
+    } else if (st.request[owner - 1u] == 0u) {
+        st.free_list[VSM_PHYSICAL_PAGES - 1u - atomicAdd(st.free_back, 1u)] = id;
+    }
+}
+
+void Allocate() {
+    const uint id = LinearId();
+    if (id >= VSM_TABLE || st.request[id] == 0u || st.table[id] != 0u) {
+        return;
+    }
+    const uint k = atomicAdd(st.page_count, 1u);
+    uint slot;
+    if (k < st.free_front) {
+        slot = st.free_list[k];
+    } else if (k - st.free_front < st.free_back) {
+        slot = st.free_list[VSM_PHYSICAL_PAGES - 1u - (k - st.free_front)];
+    } else {
+        atomicAdd(st.page_overflow, 1u);
+        return;
+    }
+    // A taken cached page belongs to an entry not requested this frame, so no other invocation
+    // touches that entry.
+    const uint previous = st.owner[slot];
+    if (previous != 0u) {
+        st.table[previous - 1u] = 0u;
+    }
+    st.owner[slot] = id + 1u;
+    st.table[id] = slot + 1u;
+    st.tag[id] = Expected(id);
+    st.flags[id] |= VSM_DIRTY;
+}
+
+// Draw `index` and triangle `local` holding triangle `id` of draws[first, first + count).
+bool FindTriangle(uint first, uint count, uint id, out uint index, out uint local) {
+    uint lo = 0u, hi = count;
+    while (hi - lo > 1u) {
+        const uint mid = (lo + hi) >> 1;
+        if (draws[first + mid].first <= id) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    index = lo;
+    local = id - draws[first + lo].first;
+    return local < draws[first + lo].count;
+}
+
+uint Ordered(float f) {
+    const uint u = floatBitsToUint(f);
+    return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u);
+}
+
+float Unordered(uint u) {
+    return uintBitsToFloat((u & 0x80000000u) != 0u ? (u & 0x7fffffffu) : ~u);
+}
+
+// Camera relative light plane rectangle holding a world box.
+void PlaneRect(vec3 lo, vec3 hi, out vec2 plo, out vec2 phi) {
+    const vec3 centre = 0.5 * (lo + hi) - st.cam.xyz;
+    const vec3 extent = 0.5 * (hi - lo);
+    const vec2 mid = vec2(dot(centre, st.right.xyz), dot(centre, st.up.xyz));
+    const vec2 reach = vec2(dot(abs(st.right.xyz), extent), dot(abs(st.up.xyz), extent));
+    plo = mid - reach;
+    phi = mid + reach;
+}
+
+void PageRange(int c, vec2 plo, vec2 phi, out ivec2 first, out ivec2 last) {
+    const VsmCascade cascade = st.cascades[c];
+    first = max(ivec2(floor((plo - cascade.origin) / cascade.page)), ivec2(0));
+    last = min(ivec2(floor((phi - cascade.origin) / cascade.page)), ivec2(VSM_PAGES - 1));
+}
+
+void BoundsReset() {
+    const uint id = LinearId();
+    if (id >= draw_count) {
+        return;
+    }
+    const uint at = draws[max_items + id].slot * 12u;
+    for (uint k = 0u; k < 3u; ++k) {
+        bnd.b[at + k] = 0xffffffffu;
+        bnd.b[at + 3u + k] = 0u;
+    }
+}
+
+void GatherBounds() {
+    const uint id = LinearId();
+    if (id >= triangle_count) {
+        return;
+    }
+    uint index, local;
+    if (!FindTriangle(max_items, draw_count, id, index, local)) {
+        return;
+    }
+    const VsmDraw draw = draws[max_items + index];
+    Indices indices = Indices(draw.indices);
+    Vertices vertices = Vertices(draw.vertices);
+    vec3 lo = vec3(1e30), hi = vec3(-1e30);
+    for (uint k = 0u; k < 3u; ++k) {
+        const vec3 p = vertices.p[indices.i[local * 3u + k]].xyz;
+        lo = min(lo, p);
+        hi = max(hi, p);
+    }
+    if (any(isnan(lo)) || any(isnan(hi))) {
+        return;
+    }
+    uvec3 olo = uvec3(Ordered(lo.x), Ordered(lo.y), Ordered(lo.z));
+    uvec3 ohi = uvec3(Ordered(hi.x), Ordered(hi.y), Ordered(hi.z));
+    const uint at = draw.slot * 12u;
+    if (subgroupAllEqual(draw.slot)) {
+        olo = subgroupMin(olo);
+        ohi = subgroupMax(ohi);
+        if (!subgroupElect()) {
+            return;
+        }
+    }
+    for (uint k = 0u; k < 3u; ++k) {
+        atomicMin(bnd.b[at + k], olo[k]);
+        atomicMax(bnd.b[at + 3u + k], ohi[k]);
+    }
+}
+
+uint MarkRect(vec3 lo, vec3 hi) {
+    vec2 plo, phi;
+    PlaneRect(lo, hi, plo, phi);
+    uint marked = 0u;
+    for (int c = 0; c < VSM_CASCADES; ++c) {
+        ivec2 first, last;
+        PageRange(c, plo, phi, first, last);
+        const ivec2 base = st.cascades[c].base;
+        for (int y = first.y; y <= last.y; ++y) {
+            for (int x = first.x; x <= last.x; ++x) {
+                st.stamp[VsmIndex(c, ivec2(x, y), base)] = st.frame;
+                ++marked;
+            }
+        }
+    }
+    return marked;
+}
+
+// Stamps the pages under a changed caster's old and new bounds, then keeps the new bounds.
+void Dirty() {
+    const uint id = LinearId();
+    if (id >= draw_count) {
+        return;
+    }
+    const VsmDraw draw = draws[max_items + id];
+    const uint at = draw.slot * 12u;
+    vec3 olo, ohi;
+    for (uint k = 0u; k < 3u; ++k) {
+        olo[k] = uintBitsToFloat(bnd.b[at + 6u + k]);
+        ohi[k] = uintBitsToFloat(bnd.b[at + 9u + k]);
+    }
+    const uvec3 alo = uvec3(bnd.b[at], bnd.b[at + 1u], bnd.b[at + 2u]);
+    const uvec3 ahi = uvec3(bnd.b[at + 3u], bnd.b[at + 4u], bnd.b[at + 5u]);
+    const bool old_valid = (draw.flags & VSM_CASTER_FRESH) == 0u && olo.x <= ohi.x;
+    const bool new_valid = (draw.flags & VSM_CASTER_REMOVED) == 0u && all(lessThanEqual(alo, ahi));
+    vec3 nlo = vec3(1e30), nhi = vec3(-1e30);
+    if (new_valid) {
+        nlo = vec3(Unordered(alo.x), Unordered(alo.y), Unordered(alo.z));
+        nhi = vec3(Unordered(ahi.x), Unordered(ahi.y), Unordered(ahi.z));
+    }
+    // Skinned casters are not redrawn by default: most stand still, and real movement shows in
+    // their bounds.
+    const bool moved =
+        (draw.flags & VSM_CASTER_REMOVED) != 0u || old_valid != new_valid ||
+        (old_valid && (any(greaterThan(abs(nlo - olo), vec3(MoveEpsilon))) ||
+                       any(greaterThan(abs(nhi - ohi), vec3(MoveEpsilon)))));
+    if (moved) {
+        uint marked = 0u;
+        if (old_valid) {
+            marked += MarkRect(olo, ohi);
+        }
+        if (new_valid) {
+            marked += MarkRect(nlo, nhi);
+        }
+        atomicAdd(st.moved, 1u);
+        atomicAdd(st.marked, marked);
+        atomicMax(st.marked_max, marked);
+    }
+    for (uint k = 0u; k < 3u; ++k) {
+        bnd.b[at + 6u + k] = floatBitsToUint(nlo[k]);
+        bnd.b[at + 9u + k] = floatBitsToUint(nhi[k]);
+    }
+}
+
+// Picks the pages drawn this frame: needed and out of date, or due their staggered refresh.
+void Resolve() {
+    const uint id = LinearId();
+    if (id >= VSM_TABLE) {
+        return;
+    }
+    const uint entry = st.table[id];
+    if (entry == 0u) {
+        return;
+    }
+    const bool touched = st.stamp[id] == st.frame;
+    if (st.request[id] == 0u) {
+        if (touched) {
+            st.flags[id] |= VSM_DIRTY;
+        }
+        return;
+    }
+    if ((st.flags[id] & VSM_DIRTY) == 0u && !touched &&
+        (st.frame + id * 97u) % RefreshFrames != 0u) {
+        return;
+    }
+    st.flags[id] = (st.flags[id] & ~VSM_DIRTY) | VSM_RENDER;
+    st.render_list[atomicAdd(st.render_count, 1u)] = entry - 1u;
+    const uint c = id / (VSM_PAGES * VSM_PAGES);
+    const uvec2 w = uvec2(VsmWindow(VsmWrapped(id), st.cascades[c].base));
+    atomicMin(st.bounds[c].x, w.x);
+    atomicMin(st.bounds[c].y, w.y);
+    atomicMax(st.bounds[c].z, w.x);
+    atomicMax(st.bounds[c].w, w.y);
+}
+
+void Bin() {
+    const uint id = LinearId();
+    if (id >= triangle_count || st.render_count == 0u) {
+        return;
+    }
+    uint lo, local;
+    if (!FindTriangle(0u, draw_count, id, lo, local)) {
+        return;
+    }
+    const VsmDraw draw = draws[lo];
+    // Skip a caster whose kept bounds miss every page drawn this frame before reading vertices.
+    const uint at = draw.slot * 12u;
+    vec3 blo, bhi;
+    for (uint k = 0u; k < 3u; ++k) {
+        blo[k] = uintBitsToFloat(bnd.b[at + 6u + k]);
+        bhi[k] = uintBitsToFloat(bnd.b[at + 9u + k]);
+    }
+    if (blo.x <= bhi.x) {
+        vec2 plo, phi;
+        PlaneRect(blo, bhi, plo, phi);
+        bool overlaps = false;
+        for (int c = 0; c < VSM_CASCADES && !overlaps; ++c) {
+            const uvec4 b = st.bounds[c];
+            if (b.x > b.z) {
+                continue;
+            }
+            ivec2 first, last;
+            PageRange(c, plo, phi, first, last);
+            overlaps = all(lessThanEqual(max(first, ivec2(b.xy)), min(last, ivec2(b.zw))));
+        }
+        if (!overlaps) {
+            return;
+        }
+    }
+    Indices indices = Indices(draw.indices);
+    Vertices vertices = Vertices(draw.vertices);
+    const vec3 cam = st.cam.xyz;
+    vec2 lo_xy = vec2(1e30), hi_xy = vec2(-1e30);
+    for (uint k = 0u; k < 3u; ++k) {
+        const vec2 p = LightPlane(vertices.p[indices.i[local * 3u + k]].xyz - cam);
+        lo_xy = min(lo_xy, p);
+        hi_xy = max(hi_xy, p);
+    }
+    if (any(isnan(lo_xy)) || any(isnan(hi_xy))) {
+        return;
+    }
+    for (int c = 0; c < VSM_CASCADES; ++c) {
+        const uvec4 b = st.bounds[c];
+        if (b.x > b.z) {
+            continue;
+        }
+        const VsmCascade cascade = st.cascades[c];
+        const ivec2 first = max(ivec2(floor((lo_xy - cascade.origin) / cascade.page)), ivec2(b.xy));
+        const ivec2 last = min(ivec2(floor((hi_xy - cascade.origin) / cascade.page)), ivec2(b.zw));
+        for (int y = first.y; y <= last.y; ++y) {
+            for (int x = first.x; x <= last.x; ++x) {
+                const uint page = VsmIndex(c, ivec2(x, y), cascade.base);
+                if ((st.flags[page] & VSM_RENDER) == 0u) {
+                    continue;
+                }
+                const uint item = atomicAdd(st.item_count, 1u);
+                if (item < max_items) {
+                    items[item] = uvec2(local, page | (lo << 14));
+                } else {
+                    atomicAdd(st.item_overflow, 1u);
+                }
+            }
+        }
+    }
+}
+
+float noise(vec2 pixel) {
+    float k = float(frame_index & 63u);
+    return fract(52.9829189 * fract(dot(pixel + 5.588238 * k, vec2(0.06711056, 0.00583715))));
+}
+
+// Stored depth at a virtual texel of cascade c; 2.0 when its page is not resident or out of date.
+float Stored(int c, vec2 texel) {
+    const ivec2 t = ivec2(floor(texel));
+    const ivec2 page = t / int(VSM_PAGE);
+    if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(page, ivec2(VSM_PAGES)))) {
+        return 2.0;
+    }
+    const uint index = VsmIndex(c, page, st.cascades[c].base);
+    const uint slot = st.table[index];
+    if (slot == 0u || (st.flags[index] & VSM_DIRTY) != 0u) {
+        return 2.0;
+    }
+    const ivec2 origin = ivec2((slot - 1u) % uint(VSM_PAGES), (slot - 1u) / uint(VSM_PAGES)) *
+                         int(VSM_PAGE);
+    return texelFetch(physical, origin + (t - page * int(VSM_PAGE)), 0).x;
+}
+
+void Sample() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(size)))) {
+        return;
+    }
+    const vec2 uv = (vec2(pixel) + 0.5) / size;
+    const float d0 = textureLod(depth_tex, uv, 0.0).x;
+    if (!(d0 < 1.0) || !(d0 > 0.0)) {
+        imageStore(raw_img, pixel, vec4(1.0));
+        return;
+    }
+    base = (buf_off & 0xffu) >> 2;
+    invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
+    const vec3 P = viewPosAt(uv, d0);
+    const mat3 to_world = ViewToWorld();
+    const vec3 light = st.light.xyz;
+    const vec3 n_view = surfaceNormal(uv, P, 1.0 / size);
+    const vec3 n = n_view == vec3(0.0) ? vec3(0.0) : normalize(to_world * n_view);
+    const float facing = dot(n, light);
+    if (n != vec3(0.0) && facing <= 0.0) {
+        imageStore(raw_img, pixel, vec4(0.0));
+        return;
+    }
+    int c = CascadeFor(length(P));
+    const vec3 rel = to_world * P;
+    // Fall back to a coarser cascade if this page did not fit the physical atlas.
+    for (; c < VSM_CASCADES - 1; ++c) {
+        const VsmCascade cascade = st.cascades[c];
+        if (Stored(c, (LightPlane(rel) - cascade.origin) / cascade.texel) < 2.0) {
+            break;
+        }
+    }
+    const VsmCascade cascade = st.cascades[c];
+    const float slope = sqrt(max(1.0 - facing * facing, 0.0)) / max(facing, 0.2);
+    const vec3 offset_rel = rel + n * cascade.texel * 1.5;
+    const vec2 centre = (LightPlane(offset_rel) - cascade.origin) / cascade.texel;
+    const float receiver = VsmDepth(dot(offset_rel, light) + st.height);
+    const float bias = (cascade.texel * (1.0 + slope) + 0.002) / (2.0 * VSM_Z_RANGE);
+    const float phi = 6.2831853 * noise(vec2(pixel));
+    const uint taps = 8u;
+    float lit = 0.0;
+    for (uint i = 0u; i < taps; ++i) {
+        const float r = sqrt((float(i) + 0.5) / float(taps)) * 1.5;
+        const float a = float(i) * 2.399963 + phi;
+        const float stored = Stored(c, centre + vec2(cos(a), sin(a)) * r);
+        lit += receiver - bias <= stored ? 1.0 : 0.0;
+    }
+    imageStore(raw_img, pixel, vec4(lit / float(taps)));
+}
+
+void main() {
+    switch (mode & 0xffu) {
+    case ModeSetup:
+        Setup();
+        break;
+    case ModeMark:
+        Mark();
+        break;
+    case ModeInvalidate:
+        Invalidate();
+        break;
+    case ModeFreeList:
+        FreeList();
+        break;
+    case ModeAllocate:
+        Allocate();
+        break;
+    case ModeBoundsReset:
+        BoundsReset();
+        break;
+    case ModeBounds:
+        GatherBounds();
+        break;
+    case ModeDirty:
+        Dirty();
+        break;
+    case ModeResolve:
+        Resolve();
+        break;
+    case ModeBin:
+        Bin();
+        break;
+    case ModeFinalize:
+        if (LinearId() == 0u) {
+            st.args[0] = min(st.item_count, max_items) * 3u;
+            st.clear_args[0] = st.render_count * 6u;
+        }
+        break;
+    case ModeSample:
+        Sample();
+        break;
+    }
+}

@@ -46,6 +46,8 @@ public:
 
 private:
     bool Ready();
+    /// Ray traced lamp shadows: ray tracing on and their own toggle set.
+    bool RaysWanted() const;
 
     struct OwnImage {
         VideoCore::UniqueImage image;
