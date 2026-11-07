@@ -73,6 +73,12 @@ jobs:
           CXX: clang++
           BB_PGO: "off"
           BB_JOBS: "4"
+          # CI gets the newest MSYS2 libc++, which no longer includes these transitively;
+          # some third-party sources (sirit, FidelityFX) relied on that.
+          CXXFLAGS: >-
+            -include cstdlib -include cstring -include cstdint -include cstdio -include cstddef
+            -include climits -include cmath -include limits -include utility -include algorithm
+            -include memory -include string -include stdexcept -include functional
         run: |
           set +e
           bash engine/build.sh
