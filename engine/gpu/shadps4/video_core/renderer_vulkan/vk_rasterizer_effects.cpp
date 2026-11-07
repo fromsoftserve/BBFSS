@@ -319,7 +319,10 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
         if (EffectShaders::GtaoActive()) {
             const float k = std::clamp(
                 BbSettings::Get().graphics_ao_strength.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            push_data.motion_param = std::bit_cast<u32>(k);
+            // gtao.frag reads ao_k >= 2 as graphics_smooth_normals.
+            const bool smooth =
+                BbSettings::Get().graphics_smooth_normals.load(std::memory_order_relaxed);
+            push_data.motion_param = std::bit_cast<u32>(k + (smooth ? 2.0f : 0.0f));
         }
     } else if (hash == EffectShaders::SsrHash) {
         if (EffectShaders::SsrActive() && cb_descs[0].first) {

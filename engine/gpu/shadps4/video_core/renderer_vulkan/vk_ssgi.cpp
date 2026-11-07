@@ -581,6 +581,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
              specular_view = has_material ? specular_view : *geo.view,
              normal_rows = has_normal && camera.valid ? camera.view : Identity,
              normal_amount = has_normal && camera.valid ? normal_amount : 0.0f,
+             smooth_normals =
+                 BbSettings::Get().graphics_smooth_normals.load(std::memory_order_relaxed),
              geo_image = vk::Image(geo.image), geo_view = *geo.view,
              probe_image = vk::Image(probe_geo[current].image),
              probe_view = *probe_geo[current].view,
@@ -664,6 +666,9 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                     Params prep_params = params;
                     prep_params.reproject = normal_rows;
                     prep_params.step_size = normal_amount;
+                    if (smooth_normals) {
+                        prep_params.history |= 0x80000000u;
+                    }
                     std::swap(params, prep_params);
                     run(prep_pipeline, prep_layout, writes, full_x, full_y);
                     std::swap(params, prep_params);
@@ -803,6 +808,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
          normal_view = has_normal ? normal_view : *geo.view,
          normal_rows = has_normal && camera.valid ? camera.view : Identity,
          normal_amount = has_normal && camera.valid ? normal_amount : 0.0f,
+         smooth_normals = BbSettings::Get().graphics_smooth_normals.load(std::memory_order_relaxed),
          geo_image = vk::Image(geo.image), geo_view = *geo.view,
          cur_image = vk::Image(light[current].image), cur_view = *light[current].view,
          old_image = vk::Image(light[current ^ 1].image), old_view = *light[current ^ 1].view,
@@ -844,10 +850,15 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                                         Write(2, SampledImage, &infos[2])};
 
                 const auto reproject = params.reproject;
+                const u32 history = params.history;
                 std::memcpy(params.reproject.data(), normal_rows.data(), sizeof(normal_rows));
                 params.step_size = normal_amount;
+                if (smooth_normals) {
+                    params.history |= 0x80000000u;
+                }
                 run(prep_pipeline, prep_layout, writes, full_x, full_y);
                 params.reproject = reproject;
+                params.history = history;
                 params.step_size = 1.0f;
             }
             BetweenPasses(cmdbuf);

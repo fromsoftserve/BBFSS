@@ -51,6 +51,10 @@ void main() {
 #else
     float z = depth(center);
     vec3 n = normalAt(p);
+    // buf_off bit 31 = graphics_smooth_normals: tolerate normal-map variation within a surface.
+    const bool smooth_normals = (buf_off & 0x80000000u) != 0u;
+    const float min_cosine = smooth_normals ? 0.7 : 0.9;
+    const float sharpness = smooth_normals ? 8.0 : 32.0;
     const float weights[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);
     float sum = 0.0, total = 0.0;
     for (int y = -2; y <= 2; ++y) {
@@ -62,10 +66,10 @@ void main() {
             float relative = abs(depth(sampleAO) - z) / max(z, 1e-4);
             if (relative >= 0.02) continue;
             float cosine = dot(n, normalAt(q));
-            if (cosine <= 0.9 && (x != 0 || y != 0)) continue;
+            if (cosine <= min_cosine && (x != 0 || y != 0)) continue;
             float w = weights[x + 2] * weights[y + 2] *
                       (1.0 - smoothstep(0.0, 0.02, relative)) *
-                      (x == 0 && y == 0 ? 1.0 : pow(max(cosine, 0.0), 32.0));
+                      (x == 0 && y == 0 ? 1.0 : pow(max(cosine, 0.0), sharpness));
             sum += w * sampleAO.r;
             total += w;
         }

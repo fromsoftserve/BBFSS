@@ -193,6 +193,7 @@ struct Values {
     std::atomic<bool> graphics_gi_reflections_full_res{false};
     std::atomic<float> graphics_gi_reflection_strength{1.0f};
     std::atomic<float> graphics_gi_wet_ground{0.5f};
+    std::atomic<bool> graphics_smooth_normals{false}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_dof_intensity{1};

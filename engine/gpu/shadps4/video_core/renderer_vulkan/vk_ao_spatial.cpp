@@ -37,6 +37,12 @@ struct FullParams {
 };
 static_assert(sizeof(FullParams) == 16);
 
+// gtao_denoise.comp reads buf_off bit 31 as graphics_smooth_normals.
+u32 SmoothNormalsBit() {
+    return BbSettings::Get().graphics_smooth_normals.load(std::memory_order_relaxed) ? 0x80000000u
+                                                                                     : 0u;
+}
+
 void Barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 source,
              vk::AccessFlags2 source_access, vk::PipelineStageFlags2 destination,
              vk::AccessFlags2 destination_access) {
@@ -224,7 +230,7 @@ void SpatialAo::Filter(VideoCore::ImageId id, const VideoCore::ImageViewInfo& in
     const vk::ImageView view = ViewOf(target_view, target, image.image_uid, Format);
     const bool created = EnsureScratch(scratch, width, height, "HQ AO spatial scratch");
     const Params params{{region.offset.x, region.offset.y},
-        {region.extent.width, region.extent.height}, scene_size, cb_offset};
+        {region.extent.width, region.extent.height}, scene_size, cb_offset | SmoothNormalsBit()};
     scheduler.RecordCrumb({.name = "HQ AO spatial filter"},
         [params, created, normals, constants, target = view,
          temp_image = vk::Image(scratch.image), temp = *scratch.view,
@@ -306,8 +312,11 @@ void SpatialAo::FullResolution(VideoCore::ImageId id, const VideoCore::ImageView
     const vk::ImageView view = ViewOf(full_view, target, image.image_uid, FullFormat);
     const bool created = EnsureScratch(full_scratch, size.width, size.height,
                                        "HQ AO full resolution scratch");
-    const FullParams gather{{size.width, size.height}, strength, cb_offset | (far_offset << 16)};
-    const Params filter{{0, 0}, {size.width, size.height}, 0, cb_offset};
+    const u32 smooth = SmoothNormalsBit();
+    // gtao.frag reads a strength >= 2 as graphics_smooth_normals.
+    const FullParams gather{{size.width, size.height}, strength + (smooth ? 2.0f : 0.0f),
+                            cb_offset | (far_offset << 16)};
+    const Params filter{{0, 0}, {size.width, size.height}, 0, cb_offset | smooth};
     scheduler.RecordCrumb({.name = "HQ AO full resolution"},
         [gather, filter, created, depth, normals, constants, far_constants, target = view,
          temp_image = vk::Image(full_scratch.image), temp = *full_scratch.view,

@@ -605,6 +605,23 @@ void AoQualityItem() {
     }
 }
 
+void SmoothNormalsItem() {
+    auto& s = BbSettings::Get();
+    if (const char* label = Item("Smooth AO and indirect light normals",
+                                 "Сглаженные нормали для AO и непрямого света")) {
+        Checkbox(label, s.graphics_smooth_normals);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. GTAO and indirect light (screen-space and screen probes) use a "
+            "normal averaged over a few pixels on the same surface instead of the per-pixel normal "
+            "map and depth-derived facets. Reduces crawling AO, blotchy bounce light and glossy "
+            "sparkles on bumpy stone; fine bump detail in those effects is softened.",
+            "Работает сразу, по умолчанию выкл. GTAO и непрямой свет (экранный и зонды) используют "
+            "нормаль, усреднённую по нескольким пикселям той же поверхности, вместо попиксельной "
+            "карты нормалей и граней из глубины. Меньше мерцания AO, пятен отражённого света и "
+            "искр в глянцевых отражениях на неровном камне; мелкий рельеф в этих эффектах мягче."));
+    }
+}
+
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
@@ -851,6 +868,7 @@ void PictureSection() {
         }
         if (e == BbSettings::EffectGtao) {
             AoQualityItem();
+            SmoothNormalsItem();
         }
     }
     if (const char* heading = Item("Looks", "Образы")) {

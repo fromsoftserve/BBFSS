@@ -91,6 +91,30 @@ float fastAcos(float x) {
     return x >= 0.0 ? r : PI - r;
 }
 
+vec3 worldNormal(vec2 uv) {
+    vec3 n = textureLod(sampler2D(img1, samp1), uv, 0.0).xyz * 2.0 - 1.0;
+    return n / max(length(n), 1e-4);
+}
+
+// graphics_smooth_normals: the G-buffer normal averaged over a 5x5 normal-texel footprint on the
+// same surface, so normal-map detail does not make the horizons (and the AO) crawl.
+vec3 smoothWorldNormal(vec2 uv, vec3 centre, float z) {
+    vec2 texel = 2.0 / vec2(textureSize(sampler2D(img1, samp1), 0));
+    vec3 sum = centre * 2.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            vec2 q = uv + vec2(x, y) * texel;
+            if (any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, vec2(1.0)))) continue;
+            float d = readDepth(q);
+            if (d >= 1.0 || abs(viewPos(q, d).z - z) > 0.03 * abs(z)) continue;
+            vec3 s = worldNormal(q);
+            sum += s * smoothstep(0.5, 0.8, dot(s, centre));
+        }
+    }
+    return normalize(sum);
+}
+
 uint sectorMask(vec2 uvS, vec3 pos, vec3 v, float side, float lo, float thick, float reach, float bias) {
 #ifdef GTAO_SPATIAL_HQ
     if (any(lessThan(uvS, vec2(0.0))) || any(greaterThanEqual(uvS, vec2(1.0)))) return 0u;
@@ -128,13 +152,16 @@ void main() {
     vec2 uv = gl_FragCoord.xy * (vec2(1920.0, 1080.0) / raster) / size;
 #endif
     float depth = readDepth(uv);
+    // ao_k >= 2 flags graphics_smooth_normals; the AO strength is the remainder.
+    const bool smooth_normals = ao_k >= 2.0;
+    const float k = smooth_normals ? ao_k - 2.0 : ao_k;
 
     float visibility = 1.0;
     vec3 pos = viewPos(uv, depth);
 
     if (depth < 1.0) {
-        vec3 wn = textureLod(sampler2D(img1, samp1), uv, 0.0).xyz * 2.0 - 1.0;
-        wn = normalize(wn);
+        vec3 wn = worldNormal(uv);
+        if (smooth_normals) wn = smoothWorldNormal(uv, wn, pos.z);
         vec3 n = vec3(dot(vec3(cb0(20), cb0(21), cb0(22)), wn),
                       dot(vec3(cb0(24), cb0(25), cb0(26)), wn),
                       dot(vec3(cb0(28), cb0(29), cb0(30)), wn));
@@ -221,7 +248,7 @@ void main() {
         visibility = mix(visibility, visibility * visibility * (3.0 - 2.0 * visibility), CONTRAST);
     }
 
-    float ao = cb0(36) * ao_k * visibility + (cb0(37) * ao_k + (1.0 - ao_k));
+    float ao = cb0(36) * k * visibility + (cb0(37) * k + (1.0 - k));
 
     float lin = pos.z / cb2(2);
     float p = fract(65025.0 * lin);

@@ -338,6 +338,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_gi_reflection_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
     } else if (key == "graphics_gi_wet_ground") {
         v.graphics_gi_wet_ground=Clamp(std::isfinite(f)?f:0.5f,0.0f,1.0f);
+    } else if (key == "graphics_smooth_normals") {
+        v.graphics_smooth_normals=i!=0;
     } else if (key == "graphics_native_sss") {
         v.graphics_native_sss=i!=0;
     } else if (key == "graphics_directional_ggx") {
@@ -776,6 +778,7 @@ void Save() {
     put("graphics_gi_reflections_full_res",flag(v.graphics_gi_reflections_full_res));
     put("graphics_gi_reflection_strength",fixed(v.graphics_gi_reflection_strength,2));
     put("graphics_gi_wet_ground",fixed(v.graphics_gi_wet_ground,2));
+    put("graphics_smooth_normals",flag(v.graphics_smooth_normals));
     put("graphics_native_sss",flag(v.graphics_native_sss));
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));
