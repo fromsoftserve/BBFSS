@@ -754,6 +754,44 @@ void PictureSection() {
             "Работает сразу. Делает обращённые вверх поверхности глаже для глянцевых отражений, "
             "как мокрый от дождя камень: 0 — материалы игры, 1 — почти зеркальные лужи."));
     }
+    if (const char* label = Item("GGX probe specular", "GGX-блики зондов")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes);
+        Checkbox(label, s.graphics_ggx_probe_specular);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Blurs the screen probes' rough reflections by each material's "
+            "GGX lobe width and leans them towards the surface normal as roughness rises, matching "
+            "the GGX reflection rays. Rougher surfaces get softer, more even reflected light.",
+            "Работает сразу, по умолчанию выкл. Размывает грубые отражения экранных зондов по "
+            "ширине GGX-лепестка материала и наклоняет их к нормали с ростом шероховатости, как "
+            "GGX-лучи отражений. Шероховатые поверхности получают более мягкий отражённый свет."));
+    }
+    if (const char* label = Item("Rough metal energy compensation",
+                                 "Компенсация энергии грубого металла")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes);
+        Checkbox(label, s.graphics_specular_multiscatter);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Adds back the light GGX loses between microfacets on rough "
+            "surfaces, so rough metal reflections are not too dark (up to 2x on white metal, barely "
+            "any change on non-metals). Applies to the screen probe reflections.",
+            "Работает сразу, по умолчанию выкл. Возвращает свет, который GGX теряет между "
+            "микрогранями грубых поверхностей, чтобы отражения грубого металла не были слишком "
+            "тёмными (до 2x на белом металле, почти без изменений на неметаллах). Для отражений "
+            "экранных зондов."));
+    }
+    if (const char* label = Item("Specular occlusion", "Затенение бликов")) {
+        ImGui::BeginDisabled(!s.graphics_gi_probes);
+        Checkbox(label, s.graphics_specular_occlusion);
+        ImGui::EndDisabled();
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Darkens the screen probe reflections in creases using AO, "
+            "scaled by roughness and view angle, instead of applying the plain AO term. Traced "
+            "glossy reflection hits keep their own occlusion. Uses GTAO when it is on.",
+            "Работает сразу, по умолчанию выкл. Затемняет отражения экранных зондов в щелях по AO "
+            "с учётом шероховатости и угла обзора вместо простого множителя AO. Попадания лучей "
+            "глянцевых отражений сохраняют своё затенение. Использует GTAO, если он включён."));
+    }
     if (const char* label = Item("Recalibrate exposure", "Калибровать экспозицию заново")) {
         ImGui::BeginDisabled(!s.graphics_auto_exposure);
         if (ImGui::Button(label)) BbEngine::Exposure::Recalibrate();

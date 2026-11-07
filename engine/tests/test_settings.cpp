@@ -111,7 +111,11 @@ int main() {
     assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
     assert(s.graphics_dof_intensity == 1.0f && s.graphics_gi_reflection_strength == 1.0f);
     assert(s.graphics_gi_wet_ground == 0.5f && !s.graphics_smooth_normals);
+    assert(!s.graphics_ggx_probe_specular && !s.graphics_specular_multiscatter &&
+           !s.graphics_specular_occlusion);
     s.graphics_smooth_normals = true;
+    s.graphics_ggx_probe_specular = s.graphics_specular_multiscatter = true;
+    s.graphics_specular_occlusion = true;
     s.graphics_auto_exposure = true;
     s.graphics_sun_vsm = true;
     s.graphics_rt_point_shadows = true;
@@ -138,6 +142,9 @@ int main() {
         assert(fork_keys.find("graphics_gi_wet_ground=0.75\n") != std::string::npos);
         assert(fork_keys.find("graphics_gi_reflections_full_res=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_smooth_normals=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_ggx_probe_specular=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_specular_multiscatter=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_specular_occlusion=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_directional_ggx=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
@@ -153,9 +160,15 @@ int main() {
     s.graphics_gi_reflections_full_res = false;
     s.graphics_dof_intensity = 1.0f;
     s.graphics_smooth_normals = false;
+    s.graphics_ggx_probe_specular = s.graphics_specular_multiscatter = false;
+    s.graphics_specular_occlusion = false;
     BbSettings::Load();
     assert(s.graphics_gi_wet_ground == 0.75f && s.graphics_smooth_normals);
+    assert(s.graphics_ggx_probe_specular && s.graphics_specular_multiscatter &&
+           s.graphics_specular_occlusion);
     s.graphics_smooth_normals = false;
+    s.graphics_ggx_probe_specular = s.graphics_specular_multiscatter = false;
+    s.graphics_specular_occlusion = false;
     assert(s.graphics_sun_vsm && s.graphics_rt_point_shadows && !s.graphics_rt_bounce &&
            s.graphics_gi_probes && s.graphics_gi_reflections &&
            s.graphics_gi_reflection_strength == 0.25f && s.graphics_gi_reflections_full_res);
