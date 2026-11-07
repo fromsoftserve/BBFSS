@@ -340,12 +340,6 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_gi_wet_ground=Clamp(std::isfinite(f)?f:0.5f,0.0f,1.0f);
     } else if (key == "graphics_smooth_normals") {
         v.graphics_smooth_normals=i!=0;
-    } else if (key == "graphics_ggx_probe_specular") {
-        v.graphics_ggx_probe_specular=i!=0;
-    } else if (key == "graphics_specular_multiscatter") {
-        v.graphics_specular_multiscatter=i!=0;
-    } else if (key == "graphics_specular_occlusion") {
-        v.graphics_specular_occlusion=i!=0;
     } else if (key == "graphics_native_sss") {
         v.graphics_native_sss=i!=0;
     } else if (key == "graphics_directional_ggx") {
@@ -785,9 +779,6 @@ void Save() {
     put("graphics_gi_reflection_strength",fixed(v.graphics_gi_reflection_strength,2));
     put("graphics_gi_wet_ground",fixed(v.graphics_gi_wet_ground,2));
     put("graphics_smooth_normals",flag(v.graphics_smooth_normals));
-    put("graphics_ggx_probe_specular",flag(v.graphics_ggx_probe_specular));
-    put("graphics_specular_multiscatter",flag(v.graphics_specular_multiscatter));
-    put("graphics_specular_occlusion",flag(v.graphics_specular_occlusion));
     put("graphics_native_sss",flag(v.graphics_native_sss));
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
     put("graphics_dof_intensity",fixed(v.graphics_dof_intensity,2));

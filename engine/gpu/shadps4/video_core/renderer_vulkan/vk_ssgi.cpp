@@ -553,19 +553,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                         << 8) |
                        (full_res_rays ? 0x10000u : 0u) |
                        (static_cast<u32>(std::lround(wet * 255.0f)) << 18) |
-                       (up[2] < 0.0f ? 0x4000000u : 0u) |
-                       (BbSettings::Get().graphics_ggx_probe_specular.load(
-                            std::memory_order_relaxed)
-                            ? 0x8000000u
-                            : 0u) |
-                       (BbSettings::Get().graphics_specular_multiscatter.load(
-                            std::memory_order_relaxed)
-                            ? 0x10000000u
-                            : 0u) |
-                       (BbSettings::Get().graphics_specular_occlusion.load(
-                            std::memory_order_relaxed)
-                            ? 0x20000000u
-                            : 0u),
+                       (up[2] < 0.0f ? 0x4000000u : 0u),
             .strength = gi * 1.5f,
             .radius = gi * (1.0f / 6.0f),
             .feedback = 0.8f,

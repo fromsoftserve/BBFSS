@@ -8,9 +8,7 @@
 //
 // history bits: 1 = probe history valid, 2 = glossy reflection rays on, 4 = ray history valid,
 // 8..15 = glossy reflection strength * 255, 16 = full-resolution reflection rays, 18..25 = wet
-// ground * 255, 26 = view-space world up has negative z, 27 = GGX-filtered probe specular,
-// 28 = multiple-scattering specular compensation, 29 = specular occlusion (the last three are
-// read only by COMPOSITE). After the probe trace, `feedback` holds
+// ground * 255, 26 = view-space world up has negative z. After the probe trace, `feedback` holds
 // the view-space world up (x, y) as two unorm16.
 
 #version 450
@@ -857,21 +855,8 @@ float sampleAo(ivec2 pixel) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-bool ggxProbeSpecular() {
-    return (history & 0x8000000u) != 0u;
-}
-
-bool specularMultiscatter() {
-    return (history & 0x10000000u) != 0u;
-}
-
-bool specularOcclusionOn() {
-    return (history & 0x20000000u) != 0u;
-}
-
-// Karis' analytic fit of the split-sum environment BRDF. With multiple scattering on, adds the
-// energy single-scattering GGX loses at high roughness (Fdez-Aguera 2019), which otherwise makes
-// rough metals too dark.
+// Karis' analytic fit of the split-sum environment BRDF, plus the energy single-scattering GGX
+// loses at high roughness (Fdez-Aguera 2019), which otherwise makes rough metals too dark.
 vec3 envBrdf(vec3 f0, float roughness, float n_dot_v) {
     const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
     const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
@@ -879,9 +864,6 @@ vec3 envBrdf(vec3 f0, float roughness, float n_dot_v) {
     const float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
     const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
     const vec3 single = f0 * ab.x + ab.y;
-    if (!specularMultiscatter()) {
-        return single;
-    }
     // The fit undershoots single-scattering energy when very rough; the floor caps the boost at 2x.
     const float energy = clamp(ab.x + ab.y, 0.5, 1.0);
     return max(single, vec3(0.0)) * (1.0 + f0 * (1.0 / energy - 1.0));
@@ -969,9 +951,8 @@ void main() {
         // keeps the game's roughness, as the fallback where wet-ground rays miss.
         specular = probe_roughness > 0.4;
     }
-    const bool ggx = ggxProbeSpecular();
-    const vec3 r = ggx ? ggxDominantDirection(n, reflect(-v, n), probe_roughness) : reflect(-v, n);
-    const float band1 = ggx ? ggxBand1(probe_roughness) : 1.0;
+    const vec3 r = ggxDominantDirection(n, reflect(-v, n), probe_roughness);
+    const float band1 = ggxBand1(probe_roughness);
 
     const ivec2 tiles = tileCount();
     const ivec2 centre = pixel / TILE;
@@ -1042,12 +1023,11 @@ void main() {
                          : 1.0;
     // Specular occlusion replaces plain AO on the specular: AO is meant for diffuse light, and
     // traced reflection hits are already occluded by what they hit.
-    const bool spec_occlusion = specularOcclusionOn();
     const float n_dot_v = max(dot(n, v), 1e-3);
     vec3 add = albedo * irradiance * (diffuse_scale / PI) * ao;
     if (specular || ray_specular) {
         vec3 spec = specular ? radiance * smoothstep(0.4, 0.6, probe_roughness) : vec3(0.0);
-        spec *= spec_occlusion ? specularOcclusion(n_dot_v, ao, probe_roughness) : ao;
+        spec *= specularOcclusion(n_dot_v, ao, probe_roughness);
         const vec3 brdf = envBrdf(f0, roughness, n_dot_v);
         if (ray_specular) {
             const vec4 reflection = sampleReflection(pixel, z, n);
@@ -1055,7 +1035,7 @@ void main() {
                             (1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness));
             const float strength =
                 float((history >> 8u) & 255u) * (REFLECTION_STRENGTH_SCALE / 255.0);
-            spec = mix(spec, reflection.rgb * strength * (spec_occlusion ? 1.0 : ao), t);
+            spec = mix(spec, reflection.rgb * strength, t);
         }
         add += spec * brdf * specular_scale;
     }

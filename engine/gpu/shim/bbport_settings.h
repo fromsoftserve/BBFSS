@@ -194,9 +194,6 @@ struct Values {
     std::atomic<float> graphics_gi_reflection_strength{1.0f};
     std::atomic<float> graphics_gi_wet_ground{0.5f};
     std::atomic<bool> graphics_smooth_normals{false}; // Smoothed normals for GTAO and indirect light.
-    std::atomic<bool> graphics_ggx_probe_specular{false};  // GGX lobe-filtered probe specular.
-    std::atomic<bool> graphics_specular_multiscatter{false}; // Rough-metal energy compensation.
-    std::atomic<bool> graphics_specular_occlusion{false};  // AO-derived specular occlusion.
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_dof_intensity{1};
