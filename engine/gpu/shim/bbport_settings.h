@@ -184,6 +184,7 @@ struct Values {
     std::atomic<bool> graphics_sun_vsm{false};
     std::atomic<bool> graphics_rt_point_shadows{false};
     std::atomic<bool> graphics_rt_bounce{true};
+    std::atomic<bool> graphics_gi_probes{false};
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{false};
     std::atomic<float> graphics_dof_intensity{1};

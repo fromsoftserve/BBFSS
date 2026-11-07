@@ -798,7 +798,9 @@ bool RtShadow::SceneWanted() const {
     const auto& s = BbSettings::Get();
     if (!s.graphics_sun_vsm.load(std::memory_order_relaxed) ||
         s.graphics_rt_point_shadows.load(std::memory_order_relaxed) ||
-        s.graphics_rt_bounce.load(std::memory_order_relaxed)) {
+        (s.graphics_rt_bounce.load(std::memory_order_relaxed) &&
+         !(s.graphics_gi_probes.load(std::memory_order_relaxed) &&
+           s.effects[BbSettings::EffectGi].load(std::memory_order_relaxed)))) {
         return true;
     }
     // A VSM that could not be made falls back to the ray traced sun.

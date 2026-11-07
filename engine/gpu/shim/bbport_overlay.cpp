@@ -679,6 +679,17 @@ void PictureSection() {
             "трассированные тени ламп выкл., выключение пропускает построение сцены (намного "
             "дешевле)."));
     }
+    if (const char* label = Item("Screen probe indirect light (experimental)",
+                                 "Непрямой свет экранных зондов (экспериментальный)")) {
+        Checkbox(label, s.graphics_gi_probes);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Needs Indirect lighting. Replaces the screen-space indirect light "
+            "with radiance probes (one per 16x16 pixels) that add diffuse bounce and rough "
+            "specular reflections. Overrides Ray traced bounce light while on.",
+            "Работает сразу, по умолчанию выкл. Нужно непрямое освещение. Заменяет экранный "
+            "непрямой свет зондами (один на 16x16 пикселей): рассеянный отражённый свет и "
+            "размытые отражения. Пока включено, заменяет трассированный отражённый свет."));
+    }
     if (const char* label = Item("Recalibrate exposure", "Калибровать экспозицию заново")) {
         ImGui::BeginDisabled(!s.graphics_auto_exposure);
         if (ImGui::Button(label)) BbEngine::Exposure::Recalibrate();
