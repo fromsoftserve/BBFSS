@@ -1,0 +1,128 @@
+name: BBFSS beta build
+
+# Builds the BBFSS package (engine, launcher, runtime DLLs, DLSS) on every push to beta and
+# uploads it to the run's Artifacts section on the Actions tab.
+on:
+  push:
+    branches: [beta]
+  workflow_dispatch:
+
+concurrency:
+  group: beta-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      BBFSS_VERSION: 0.9.10-ci.${{ github.run_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup MSYS2 CLANG64
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            curl
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-libc++
+            mingw-w64-clang-x86_64-llvm-tools
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-sdl3
+            mingw-w64-clang-x86_64-boost
+            mingw-w64-clang-x86_64-fmt
+            mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-spirv-cross
+            mingw-w64-clang-x86_64-spirv-headers
+            mingw-w64-clang-x86_64-spirv-tools
+            mingw-w64-clang-x86_64-vulkan-headers
+            mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-vulkan-memory-allocator
+            mingw-w64-clang-x86_64-xxhash
+            mingw-w64-clang-x86_64-zydis
+            mingw-w64-clang-x86_64-robin-map
+            mingw-w64-clang-x86_64-opus
+            mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-protobuf
+            mingw-w64-clang-x86_64-nlohmann-json
+            mingw-w64-clang-x86_64-miniupnpc
+            mingw-w64-clang-x86_64-zlib
+            mingw-w64-clang-x86_64-expat
+
+      - name: Build engine
+        shell: msys2 {0}
+        env:
+          CC: clang
+          CXX: clang++
+          BB_PGO: "off"
+          BB_JOBS: "4"
+        run: |
+          set +e
+          bash engine/build.sh
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            tail -n 200 engine/out/gpu-build.log 2>/dev/null || true
+            exit "$rc"
+          fi
+
+      - name: Run settings test
+        shell: msys2 {0}
+        run: |
+          ninja -C engine/out/gpu settings-test
+          engine/out/gpu/settings-test.exe
+
+      - name: Fetch DLSS
+        shell: msys2 {0}
+        run: bash engine/tools/fetch_dlss.sh out
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish BBFSS launcher
+        shell: pwsh
+        run: >-
+          dotnet publish launcher/windows/BloodborneLauncher/BloodborneLauncher.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:BBFSSDistribution=true -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
+          -p:DebugType=none -p:Version=$env:BBFSS_VERSION
+          -o engine/out/bbfss-launcher
+
+      - name: Package BBFSS
+        id: package
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'BBFSS'
+          $bin = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'clang64\bin'
+          ./tools/package-bbfss.ps1 -Destination $dest -Version $env:BBFSS_VERSION -RuntimeBin $bin
+          "dir=$dest" >> $env:GITHUB_OUTPUT
+          "name=BBFSS-beta-$($env:GITHUB_SHA.Substring(0,7))" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.dir }}
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 90
