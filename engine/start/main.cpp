@@ -494,22 +494,38 @@ int Main(std::vector<std::wstring> arguments) {
         Log("Engine: enhancement preparation skipped: %s", e.what());
     }
     UnsetEnv("BB_FILE_FIXES");
+    std::vector<std::pair<std::string, fs::path>> file_fixes;
     if (Env("BB_EFFECT_FIXES", "") != "0") {
         try {
             std::vector<std::string> notes;
-            const auto fixed = PrepareEffectFixes(merged, data / "engine-assets", notes);
+            file_fixes = PrepareEffectFixes(merged, data / "engine-assets", notes);
             for (const std::string& note : notes) Log("Engine: Ebrietas effect fix: %s", note.c_str());
-            if (!fixed.empty()) {
-                std::string list;
-                for (const auto& [relative, file] : fixed) list += relative + "\t" + Utf8(file) + "\n";
-                WriteText(out / "file-fixes.txt", list);
-                SetEnv("BB_FILE_FIXES", Utf8(out / "file-fixes.txt"));
+            if (!file_fixes.empty()) {
                 Log("Engine: Ebrietas' trail effect replaced as Nexus mod 41 does, in %zu effect files "
-                    "(BB_EFFECT_FIXES=0 keeps the game's)", fixed.size());
+                    "(BB_EFFECT_FIXES=0 keeps the game's)", file_fixes.size());
             }
         } catch (const std::exception& e) {
             Log("Engine: Ebrietas effect fix skipped: %s", e.what());
         }
+    }
+    if (Setting(settings, "graphics_disable_player_light").value_or("1") == "1") {
+        try {
+            std::vector<std::string> notes;
+            const auto fixed = PreparePlayerLight(merged, data / "engine-assets", notes);
+            for (const std::string& note : notes) Log("Engine: player lamp: %s", note.c_str());
+            if (fixed) {
+                file_fixes.push_back(*fixed);
+                Log("Engine: player lamp disabled with the game's no-lamp SFX");
+            }
+        } catch (const std::exception& e) {
+            Log("Engine: player lamp toggle skipped: %s", e.what());
+        }
+    }
+    if (!file_fixes.empty()) {
+        std::string list;
+        for (const auto& [relative, file] : file_fixes) list += relative + "\t" + Utf8(file) + "\n";
+        WriteText(out / "file-fixes.txt", list);
+        SetEnv("BB_FILE_FIXES", Utf8(out / "file-fixes.txt"));
     }
     if (!Env("BB_DISPLAY_SIZE") || Env("BB_DISPLAY_SIZE", "").empty()) {
         if (const auto size = DisplaySize()) {

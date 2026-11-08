@@ -17,7 +17,8 @@ import struct
 import sys
 import zlib
 
-from engine_assets import prepare_effect_fixes, prepare_menu_assets, prepare_mirror, verify_executable
+from engine_assets import (prepare_effect_fixes, prepare_menu_assets, prepare_mirror, prepare_player_light,
+                           verify_executable)
 
 
 def settings_value(config, key):
@@ -68,19 +69,30 @@ def prepare(game, out, data, config):
                 print(f'Engine: native PC menus disabled: {error}', flush=True)
     except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
         print(f'Engine: enhancement preparation skipped: {error}', flush=True)
+    file_fixes = []
     if os.environ.get('BB_EFFECT_FIXES', '') != '0':
         try:
-            fixed = prepare_effect_fixes(game, data / 'engine-assets',
-                                         log=lambda line: print(line, flush=True))
-            if fixed:
-                listing = out / 'file-fixes.txt'
-                listing.write_text(''.join(f'{relative.as_posix()}\t{path}\n' for relative, path in fixed),
-                                   encoding='utf-8')
-                env['BB_FILE_FIXES'] = str(listing)
-                print(f"Engine: Ebrietas' trail effect replaced as Nexus mod 41 does, in {len(fixed)} effect files "
+            file_fixes = prepare_effect_fixes(game, data / 'engine-assets',
+                                              log=lambda line: print(line, flush=True))
+            if file_fixes:
+                print(f"Engine: Ebrietas' trail effect replaced as Nexus mod 41 does, in {len(file_fixes)} effect files "
                       '(BB_EFFECT_FIXES=0 keeps the game\'s)', flush=True)
         except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
             print(f'Engine: Ebrietas effect fix skipped: {error}', flush=True)
+    if settings_value(config, 'graphics_disable_player_light') != '0':
+        try:
+            fixed = prepare_player_light(game, data / 'engine-assets',
+                                         log=lambda line: print(line, flush=True))
+            if fixed:
+                file_fixes.append(fixed)
+                print("Engine: player lamp disabled with the game's no-lamp SFX", flush=True)
+        except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
+            print(f'Engine: player lamp toggle skipped: {error}', flush=True)
+    if file_fixes:
+        listing = out / 'file-fixes.txt'
+        listing.write_text(''.join(f'{relative.as_posix()}\t{path}\n' for relative, path in file_fixes),
+                           encoding='utf-8')
+        env['BB_FILE_FIXES'] = str(listing)
     return env
 
 

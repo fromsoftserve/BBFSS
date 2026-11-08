@@ -14,6 +14,7 @@
 #include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/renderer_vulkan/vk_ggx_lobes.h"
 #include "video_core/renderer_vulkan/vk_ggx_patch.h"
+#include "video_core/renderer_vulkan/vk_local_falloff.h"
 #include "video_core/renderer_vulkan/vk_pom_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_ssr_composite_patch.h"
@@ -182,14 +183,19 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         std::vector<u32> patched(spv.begin(), spv.end());
         Pom::PatchPom(info.pgm_hash, true, patched);
         if (patched.size() != spv.size()) {
+            LocalFalloff::Patch(patched, info.pgm_hash,
+                                BbSettings::Get().startup_local_inverse_square);
             PatchLobes(patched);
             PatchSharpness(patched);
             return patched;
         }
     }
     std::vector<u32> lobes(spv.begin(), spv.end());
+    const bool falloff = LocalFalloff::Patch(lobes, info.pgm_hash,
+                                             BbSettings::Get().startup_local_inverse_square)
+                             .Changed();
     const bool lobed = PatchLobes(lobes);
-    if (PatchSharpness(lobes) || lobed) {
+    if (PatchSharpness(lobes) || lobed || falloff) {
         return lobes;
     }
     return std::nullopt;

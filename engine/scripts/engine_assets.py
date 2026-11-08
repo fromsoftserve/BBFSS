@@ -29,7 +29,7 @@ DCX_HEADER = bytes.fromhex(
     '44435800000100000000001800000024000000440000004c'
     '4443530000000000000000004443500044464c5400000020'
     '09000000000000000000000000000000000001014443410000000008')
-DCX_LARGEST = 32 << 20
+DCX_LARGEST = 128 << 20
 
 
 def dcx_unpack(data):
@@ -173,6 +173,14 @@ EFFECT_FIXES = (
      '085f2d3d60d54e50fa981c7aad89ca42f47b3a733a78b40ee98f572883ce122b',
      '8348b2b7f110feb7ca0a444e8331886b85fe24ba422b8b9909cdc5d551ffcb07'),
 )
+PLAYER_LIGHT_BINDER = SFX / 'frpg_sfxbnd_commoneffects.ffxbnd.dcx'
+PLAYER_LIGHT_PACKED_SHA = 'd7a08853690cd47a1d843127a9de0028eb518d2e45efb26afee19ced1669919c'
+PLAYER_LIGHT_INPUT_SHA = 'da61f671a1d006c56949e0505685eaade617237ab5f75608e8fbd6de98d5d8c3'
+PLAYER_LIGHT_OUTPUT_SHA = '7e263e0197c4a41561090378f7144be958ff23de90daf1548cb69880835f45b8'
+PLAYER_LIGHT_ON = 'f000000210.fxr'
+PLAYER_LIGHT_ON_SHA = '627f29a6e8e097f4a296df3449c47d654f6a287978e0770bf9ea521e5bbc3fcf'
+PLAYER_LIGHT_OFF = 'f000000192.fxr'
+PLAYER_LIGHT_OFF_SHA = '3426021113416c284f8025d5b639fd4d94fb02f8cb235f402f3746fb46f32c72'
 BND4_ENTRY = 0x24
 
 
@@ -261,6 +269,40 @@ def prepare_effect_fixes(game, cache, log=print):
         stamp.write_text(sha(out) + '\n', encoding='ascii')
         fixed.append((relative, destination.resolve()))
     return fixed
+
+
+def prepare_player_light(game, cache, log=print):
+    """Replace the player lamp SFX with the game's no-lamp variant in a verified 1.09 binder."""
+    game = Path(game)
+    packed = (game / PLAYER_LIGHT_BINDER).read_bytes()
+    raw = None
+    if sha(packed) != PLAYER_LIGHT_PACKED_SHA:
+        raw = dcx_unpack(packed)
+        if sha(raw) != PLAYER_LIGHT_INPUT_SHA:
+            log(f'Engine: player lamp: {PLAYER_LIGHT_BINDER.name} is not the 1.09 file '
+                '(a mod changes it): left as it is')
+            return None
+    destination = Path(cache) / 'no-player-light' / PLAYER_LIGHT_BINDER
+    stamp = destination.with_name(destination.name + '.sha256')
+    try:
+        if stamp.read_text(encoding='ascii').strip() == sha(destination.read_bytes()):
+            return PLAYER_LIGHT_BINDER, destination.resolve()
+    except OSError:
+        pass
+    raw = raw if raw is not None else dcx_unpack(packed)
+    lamp, no_lamp = binder_file(raw, PLAYER_LIGHT_ON), binder_file(raw, PLAYER_LIGHT_OFF)
+    if sha(lamp) != PLAYER_LIGHT_ON_SHA or sha(no_lamp) != PLAYER_LIGHT_OFF_SHA:
+        raise ValueError(f'Unexpected player-light SFX in {PLAYER_LIGHT_BINDER.name}')
+    result = replace_entry(raw, PLAYER_LIGHT_ON, no_lamp)
+    if sha(result) != PLAYER_LIGHT_OUTPUT_SHA:
+        raise ValueError(f'{PLAYER_LIGHT_BINDER.name} does not match the verified no-lamp result')
+    out = dcx_pack(result)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + f'.{os.getpid()}.tmp')
+    temporary.write_bytes(out)
+    os.replace(temporary, destination)
+    stamp.write_text(sha(out) + '\n', encoding='ascii')
+    return PLAYER_LIGHT_BINDER, destination.resolve()
 
 
 def prepare_lamp2lamp(game, update, patch, cache):

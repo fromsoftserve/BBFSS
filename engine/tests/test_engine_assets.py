@@ -110,6 +110,41 @@ class EngineAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'layout'):
             engine_assets.binder_entries(b'BND3' + bnd[4:])
 
+    def test_player_light_toggle_replaces_only_lamp_and_leaves_modded_binder_alone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = self.binder([(engine_assets.PLAYER_LIGHT_OFF, b'no lamp'),
+                               ('f000000001.fxr', b'other effect'),
+                               (engine_assets.PLAYER_LIGHT_ON, b'player lamp')])
+            expected = engine_assets.replace_entry(raw, engine_assets.PLAYER_LIGHT_ON, b'no lamp')
+            packed = engine_assets.dcx_pack(raw)
+            binder = root / 'game' / engine_assets.PLAYER_LIGHT_BINDER
+            binder.parent.mkdir(parents=True)
+            binder.write_bytes(packed)
+            values = {
+                'PLAYER_LIGHT_PACKED_SHA': engine_assets.sha(packed),
+                'PLAYER_LIGHT_INPUT_SHA': engine_assets.sha(raw),
+                'PLAYER_LIGHT_OUTPUT_SHA': engine_assets.sha(expected),
+                'PLAYER_LIGHT_ON_SHA': engine_assets.sha(b'player lamp'),
+                'PLAYER_LIGHT_OFF_SHA': engine_assets.sha(b'no lamp'),
+            }
+            with patch.multiple(engine_assets, **values), patch.object(engine_assets, 'dcx_pack',
+                    wraps=engine_assets.dcx_pack) as pack:
+                prepared = engine_assets.prepare_player_light(root / 'game', root / 'cache')
+                self.assertEqual(prepared[0], engine_assets.PLAYER_LIGHT_BINDER)
+                result = engine_assets.dcx_unpack(prepared[1].read_bytes())
+                self.assertEqual(engine_assets.binder_file(result, engine_assets.PLAYER_LIGHT_ON), b'no lamp')
+                self.assertEqual(engine_assets.binder_file(result, engine_assets.PLAYER_LIGHT_OFF), b'no lamp')
+                self.assertEqual(engine_assets.binder_file(result, 'f000000001.fxr'), b'other effect')
+                self.assertEqual(binder.read_bytes(), packed)
+                self.assertEqual(pack.call_count, 1)
+                self.assertEqual(engine_assets.prepare_player_light(root / 'game', root / 'cache'), prepared)
+                self.assertEqual(pack.call_count, 1)
+                binder.write_bytes(engine_assets.dcx_pack(raw + b'modded'))
+                lines = []
+                self.assertIsNone(engine_assets.prepare_player_light(root / 'game', root / 'cache', log=lines.append))
+                self.assertIn('not the 1.09 file', lines[0])
+
     def test_effect_fix_leaves_a_modded_binder_alone(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

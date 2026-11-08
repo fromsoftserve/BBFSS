@@ -611,11 +611,11 @@ void SmoothNormalsItem() {
                                  "Сглаженные нормали для AO и непрямого света")) {
         Checkbox(label, s.graphics_smooth_normals);
         Hint(BbSettings::MenuText(
-            "Live, off by default. GTAO and indirect light (screen-space and screen probes) use a "
+            "Live, on by default. GTAO and indirect light (screen-space and screen probes) use a "
             "normal averaged over a few pixels on the same surface instead of the per-pixel normal "
             "map and depth-derived facets. Reduces crawling AO, blotchy bounce light and glossy "
             "sparkles on bumpy stone; fine bump detail in those effects is softened.",
-            "Работает сразу, по умолчанию выкл. GTAO и непрямой свет (экранный и зонды) используют "
+            "Работает сразу, по умолчанию вкл. GTAO и непрямой свет (экранный и зонды) используют "
             "нормаль, усреднённую по нескольким пикселям той же поверхности, вместо попиксельной "
             "карты нормалей и граней из глубины. Меньше мерцания AO, пятен отражённого света и "
             "искр в глянцевых отражениях на неровном камне; мелкий рельеф в этих эффектах мягче."));
@@ -849,6 +849,7 @@ void PictureSection() {
             "не зависит от настройки изображения. Исходное резервное размытие можно уменьшить, но не усилить."));
     }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
+        if (e == BbSettings::EffectModernSsr || e == BbSettings::EffectPomCavity) continue;
         const auto& effect = BbSettings::Effects[e];
         if (const char* label = Item(effect.label, effect.label_ru)) {
             Checkbox(label, s.effects[e]);
@@ -860,15 +861,9 @@ void PictureSection() {
                                                                    "Применяется после перезапуска игры."));
                 }
             }
-            if (e == BbSettings::EffectModernSsr && s.effects[e] &&
-                !s.effects[BbSettings::EffectSsr]) {
-                ImGui::TextDisabled("%s", BbSettings::MenuText("Needs Screen-space reflections on",
-                                                               "Нужны включённые экранные отражения"));
-            }
         }
         if (e == BbSettings::EffectGtao) {
             AoQualityItem();
-            SmoothNormalsItem();
         }
     }
     if (const char* heading = Item("Looks", "Образы")) {
@@ -920,18 +915,18 @@ void PictureSection() {
     ImGui::EndDisabled();
 }
 
-void EffectsSection() {
+void DebugSection() {
     auto& s = BbSettings::Get();
-    Section("Game effects (restart required)", "Эффекты игры (после перезапуска)");
+    Section("Shader and lighting (restart required)", "Шейдеры и освещение (после перезапуска)");
     if (const char* label = Item("Directional GGX (native-anchored, experimental)",
                                 "Направленный GGX (нативная калибровка, экспериментальный)")) {
         Checkbox(label, s.graphics_directional_ggx);
         Hint(BbSettings::MenuText(
-            "Off by default. Native-anchored GGX for the four directional specular lobes only. "
+            "On by default. Native-anchored GGX for the four directional specular lobes only. "
             "Softer highlight tails can brighten rough or grazing surfaces. Diffuse, local lights "
             "and environment/SSR remain native. Requires restarting Bloodborne; unsupported shader "
             "variants retain native specular and report a warning. Not a full PBR conversion.",
-            "По умолчанию выключено. GGX с нативной калибровкой для четырёх направленных бликов. "
+            "По умолчанию включено. GGX с нативной калибровкой для четырёх направленных бликов. "
             "Мягкие края могут осветлять шероховатые поверхности и скользящие углы. Диффузное "
             "освещение, локальные источники и окружение/SSR не меняются. Требуется перезапуск "
             "Bloodborne. Неподдерживаемые шейдеры сохраняют нативные блики с предупреждением. "
@@ -944,6 +939,30 @@ void EffectsSection() {
             "width-matched GGX: same highlight size and peak, softer natural falloff. Requires restart.",
             "По умолчанию включено. Заменяет блик Фонга от точечных и прожекторных источников на GGX "
             "той же ширины: тот же размер и яркость, мягкий естественный спад. Требуется перезапуск."));
+    }
+    if (const char* label = Item("Inverse-square local-light falloff",
+                                "Обратноквадратичный спад локальных источников")) {
+        Checkbox(label, s.graphics_local_inverse_square);
+        Hint(BbSettings::MenuText(
+            "On by default. Uses the game's inverse-square diffuse curve for point and spot light "
+            "attenuation, including specular. Light radius, culling, shadows, and lamp fog are unchanged. "
+            "Requires restart.",
+            "По умолчанию включено. Использует игровую обратноквадратичную кривую для затухания "
+            "точечных и прожекторных источников, включая блики. Радиус, отсечение, тени и туман ламп "
+            "не меняются. Требуется перезапуск."));
+    }
+    if (const char* label = Item("Disable player lamp", "Отключить свет фонаря персонажа")) {
+        Checkbox(label, s.graphics_disable_player_light);
+        Hint(BbSettings::MenuText(
+            "On by default. Removes the player character's own point light by replacing its SFX with "
+            "the game's no-lamp variant. Other lights are unchanged. Requires restart.",
+            "По умолчанию включено. Убирает собственный точечный свет персонажа, заменяя его SFX "
+            "игровым вариантом без фонаря. Другие источники не меняются. Требуется перезапуск."));
+        if (s.graphics_disable_player_light != s.startup_disable_player_light) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
+                                                           "Применяется после перезапуска игры."));
+        }
     }
     if (const char* label = Item("Specular anti-aliasing", "Сглаживание бликов")) {
         Checkbox(label, s.graphics_specular_aa);
@@ -974,6 +993,28 @@ void EffectsSection() {
             "солнца и ламп на глянцевых поверхностях. Большие значения делают блики меньше и ярче; "
             "максимум снимает ограничение. Требуется перезапуск."));
     }
+    SmoothNormalsItem();
+    for (int e : {BbSettings::EffectModernSsr, BbSettings::EffectPomCavity}) {
+        const auto& effect = BbSettings::Effects[e];
+        if (const char* label = Item(effect.label, effect.label_ru)) {
+            Checkbox(label, s.effects[e]);
+            Hint(BbSettings::MenuText("Applied when the game restarts.", "Применяется после перезапуска игры."));
+            if (s.effects[e] != s.startup_effects[e]) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
+                                                               "Применяется после перезапуска игры."));
+            }
+            if (e == BbSettings::EffectModernSsr && s.effects[e] && !s.effects[BbSettings::EffectSsr]) {
+                ImGui::TextDisabled("%s", BbSettings::MenuText("Needs Screen-space reflections on",
+                                                               "Нужны включённые экранные отражения"));
+            }
+        }
+    }
+}
+
+void EffectsSection() {
+    auto& s = BbSettings::Get();
+    Section("Game effects (restart required)", "Эффекты игры (после перезапуска)");
     if (const char* label = Item("Model detail", "Детализация моделей")) {
         const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
                               BbSettings::MenuText("Game default", "Как в игре"),
@@ -2185,7 +2226,7 @@ void CoopSection() {
                               "Ставит ваш знак в мире хозяина, пока он вас не призовёт. Колокол не нужен."));
 }
 
-enum Tab : int { TabUpscaling, TabDisplay, TabPicture, TabGameplay, TabInterface, TabCoop, TabCount };
+enum Tab : int { TabUpscaling, TabDisplay, TabPicture, TabGameplay, TabInterface, TabCoop, TabDebug, TabCount };
 
 const char* TabTitle(int tab) {
     switch (tab) {
@@ -2194,6 +2235,7 @@ const char* TabTitle(int tab) {
     case TabPicture: return BbSettings::MenuText("Picture", "Изображение");
     case TabGameplay: return BbSettings::MenuText("Gameplay", "Игра");
     case TabCoop: return BbSettings::MenuText("Co-op", "Совместная игра");
+    case TabDebug: return BbSettings::MenuText("debug", "отладка");
     default: return BbSettings::MenuText("Interface", "Интерфейс");
     }
 }
@@ -2225,6 +2267,9 @@ void DrawTab(int tab) {
         CoopSection();
         CoopOptionsSection();
         VoiceSection();
+        break;
+    case TabDebug:
+        DebugSection();
         break;
     default:
         FpsSection();
@@ -2352,6 +2397,8 @@ void Menu() {
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
         s.graphics_directional_ggx != s.startup_directional_ggx ||
         s.graphics_local_ggx != s.startup_local_ggx ||
+        s.graphics_local_inverse_square != s.startup_local_inverse_square ||
+        s.graphics_disable_player_light != s.startup_disable_player_light ||
         s.graphics_specular_aa != s.startup_specular_aa ||
         s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||
         s.graphics_light_sharpness != s.startup_light_sharpness ||

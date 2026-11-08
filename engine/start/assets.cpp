@@ -30,7 +30,7 @@ void PutBigEndian32(std::uint8_t* p, std::uint32_t v) {
 constexpr std::string_view kDcxHeader = "44435800000100000000001800000024000000440000004c"
                                         "4443530000000000000000004443500044464c5400000020"
                                         "09000000000000000000000000000000000001014443410000000008";
-constexpr std::uint32_t kDcxLargest = 32u << 20;
+constexpr std::uint32_t kDcxLargest = 128u << 20;
 
 Bytes DcxUnpack(const Bytes& data) {
     if (data.size() < 4 || std::memcmp(data.data(), "DCX\0", 4) != 0) return data;
@@ -165,6 +165,14 @@ const EffectFix kEffectFixes[] = {
      "085f2d3d60d54e50fa981c7aad89ca42f47b3a733a78b40ee98f572883ce122b",
      "8348b2b7f110feb7ca0a444e8331886b85fe24ba422b8b9909cdc5d551ffcb07"},
 };
+const char* const kPlayerLightBinder = "dvdroot_ps4/sfx/frpg_sfxbnd_commoneffects.ffxbnd.dcx";
+const char* const kPlayerLightPackedSha = "d7a08853690cd47a1d843127a9de0028eb518d2e45efb26afee19ced1669919c";
+const char* const kPlayerLightInputSha = "da61f671a1d006c56949e0505685eaade617237ab5f75608e8fbd6de98d5d8c3";
+const char* const kPlayerLightOutputSha = "7e263e0197c4a41561090378f7144be958ff23de90daf1548cb69880835f45b8";
+const char* const kPlayerLightOn = "f000000210.fxr";
+const char* const kPlayerLightOnSha = "627f29a6e8e097f4a296df3449c47d654f6a287978e0770bf9ea521e5bbc3fcf";
+const char* const kPlayerLightOff = "f000000192.fxr";
+const char* const kPlayerLightOffSha = "3426021113416c284f8025d5b639fd4d94fb02f8cb235f402f3746fb46f32c72";
 constexpr std::size_t kBnd4Entry = 0x24;
 
 struct BinderEntry {
@@ -380,6 +388,46 @@ std::vector<std::pair<std::string, fs::path>> PrepareEffectFixes(const fs::path&
         fixed.emplace_back(fix.binder, fs::canonical(destination));
     }
     return fixed;
+}
+
+std::optional<std::pair<std::string, fs::path>> PreparePlayerLight(const fs::path& game, const fs::path& cache,
+                                                                   std::vector<std::string>& notes) {
+    const Bytes packed = ReadFile(game / Path(kPlayerLightBinder));
+    std::optional<Bytes> raw;
+    if (Sha256Hex(packed) != kPlayerLightPackedSha) {
+        raw = DcxUnpack(packed);
+        if (Sha256Hex(*raw) != kPlayerLightInputSha) {
+            notes.emplace_back(Path(kPlayerLightBinder).filename().string() +
+                               " is not the 1.09 file (a mod changes it): left as it is");
+            return std::nullopt;
+        }
+    }
+    const fs::path destination = cache / "no-player-light" / Path(kPlayerLightBinder);
+    fs::path stamp = destination;
+    stamp += L".sha256";
+    try {
+        if (Trim(ReadText(stamp)) == Sha256Hex(ReadFile(destination)))
+            return std::pair{std::string(kPlayerLightBinder), fs::canonical(destination)};
+    } catch (const std::exception&) {
+    }
+    if (!raw) raw = DcxUnpack(packed);
+    const Bytes lamp = BinderFile(*raw, kPlayerLightOn), no_lamp = BinderFile(*raw, kPlayerLightOff);
+    if (Sha256Hex(lamp) != kPlayerLightOnSha || Sha256Hex(no_lamp) != kPlayerLightOffSha)
+        throw Error(std::string("Unexpected player-light SFX in ") + Path(kPlayerLightBinder).filename().string());
+    const Bytes result = ReplaceBinderFile(*raw, kPlayerLightOn, no_lamp);
+    if (Sha256Hex(result) != kPlayerLightOutputSha) throw Error("Player-light binder does not match the verified result");
+    const Bytes out = DcxPack(result);
+    fs::create_directories(destination.parent_path());
+    fs::path temporary = destination;
+    temporary += L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    WriteFile(temporary, out);
+    std::error_code error;
+    if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        fs::remove(temporary, error);
+        throw Error("cannot write " + Utf8(destination));
+    }
+    WriteText(stamp, Sha256Hex(out) + "\n");
+    return std::pair{std::string(kPlayerLightBinder), fs::canonical(destination)};
 }
 
 fs::path PrepareMenuAssets(const fs::path& game, const fs::path& elf, const fs::path& cache, const fs::path& tool,

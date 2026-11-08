@@ -108,12 +108,14 @@ int main() {
     assert(!s.graphics_auto_exposure && !s.graphics_native_sss && !s.graphics_sun_vsm &&
            !s.graphics_rt_point_shadows && s.graphics_rt_bounce && !s.graphics_gi_probes &&
            !s.graphics_gi_reflections && !s.graphics_gi_reflections_full_res);
-    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
+    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
+    assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
+    assert(s.graphics_disable_player_light && s.startup_disable_player_light);
     assert(s.graphics_local_ggx && s.graphics_specular_aa && s.graphics_env_ggx_tails);
     assert(s.startup_local_ggx && s.startup_specular_aa && s.startup_env_ggx_tails);
     assert(s.graphics_light_sharpness == 1.0f && s.startup_light_sharpness == 1.0f);
     assert(s.graphics_dof_intensity == 1.0f && s.graphics_gi_reflection_strength == 1.0f);
-    assert(s.graphics_gi_wet_ground == 0.5f && !s.graphics_smooth_normals);
+    assert(s.graphics_gi_wet_ground == 0.5f && s.graphics_smooth_normals);
     s.graphics_smooth_normals = true;
     s.graphics_auto_exposure = true;
     s.graphics_sun_vsm = true;
@@ -122,14 +124,16 @@ int main() {
     s.graphics_gi_probes = true;
     s.graphics_gi_reflections = true;
     s.graphics_native_sss = true;
-    s.graphics_directional_ggx = true;
+    s.graphics_directional_ggx = false;
+    s.graphics_local_inverse_square = false;
+    s.graphics_disable_player_light = false;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = false;
     s.graphics_light_sharpness = 250.0f;
     s.graphics_dof_intensity = 1.75f;
     s.graphics_gi_reflection_strength = 0.25f;
     s.graphics_gi_wet_ground = 0.75f;
     s.graphics_gi_reflections_full_res = true;
-    assert(!s.startup_directional_ggx);
+    assert(s.startup_directional_ggx && s.startup_local_inverse_square && s.startup_disable_player_light);
     BbSettings::Save();
     {
         const std::string fork_keys = Read(path);
@@ -144,14 +148,19 @@ int main() {
         assert(fork_keys.find("graphics_gi_reflections_full_res=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_smooth_normals=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
-        assert(fork_keys.find("graphics_directional_ggx=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_directional_ggx=0\n") != std::string::npos);
+        assert(fork_keys.find("graphics_local_inverse_square=0\n") != std::string::npos);
+        assert(fork_keys.find("graphics_disable_player_light=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_ggx=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_specular_aa=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_env_ggx_tails=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_light_sharpness=250.0\n") != std::string::npos);
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     }
-    s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_directional_ggx = false;
+    s.graphics_auto_exposure = s.graphics_native_sss = false;
+    s.graphics_directional_ggx = true;
+    s.graphics_local_inverse_square = true;
+    s.graphics_disable_player_light = true;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = true;
     s.graphics_sun_vsm = false;
     s.graphics_rt_point_shadows = false;
@@ -170,9 +179,18 @@ int main() {
            s.graphics_gi_probes && s.graphics_gi_reflections &&
            s.graphics_gi_reflection_strength == 0.25f && s.graphics_gi_reflections_full_res);
     assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
-    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
+    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
+    s.graphics_directional_ggx = true;
+    assert(!s.startup_directional_ggx);
     s.graphics_directional_ggx = false;
-    assert(s.startup_directional_ggx);
+    assert(!s.graphics_local_inverse_square && !s.startup_local_inverse_square);
+    s.graphics_local_inverse_square = true;
+    assert(!s.startup_local_inverse_square);
+    s.graphics_local_inverse_square = false;
+    assert(!s.graphics_disable_player_light && !s.startup_disable_player_light);
+    s.graphics_disable_player_light = true;
+    assert(!s.startup_disable_player_light);
+    s.graphics_disable_player_light = false;
     assert(!s.graphics_local_ggx && !s.graphics_specular_aa && !s.graphics_env_ggx_tails);
     assert(!s.startup_local_ggx && !s.startup_specular_aa && !s.startup_env_ggx_tails);
     assert(s.graphics_light_sharpness == 100.0f && s.startup_light_sharpness == 100.0f);
@@ -198,7 +216,8 @@ int main() {
                std::string::npos);
     }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
-        assert(!BbSettings::Effects[e].default_on);
+        assert(BbSettings::Effects[e].default_on ==
+               (e == BbSettings::EffectModernSsr || e == BbSettings::EffectPomCavity));
     }
     { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\n    graphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_gi_reflection_strength=9\ngraphics_gi_wet_ground=-3\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();

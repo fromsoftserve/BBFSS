@@ -54,8 +54,8 @@ inline constexpr Effect Effects[] = {
     {"debug_camera", "Free camera (Cross + L3)", "Свободная камера (Cross + L3)", false},
     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
     {"effect_gtao", "Ground-truth ambient occlusion (GTAO, experimental)", "Затенение GTAO (эксперимент)", false},
-    {"effect_modern_ssr", "Improved reflections", "Улучшенные отражения", false},
-    {"effect_pom_cavity", "Deeper parallax surfaces", "Глубокие параллакс-поверхности", false},
+    {"effect_modern_ssr", "Improved reflections", "Улучшенные отражения", true},
+    {"effect_pom_cavity", "Deeper parallax surfaces", "Глубокие параллакс-поверхности", true},
     {"effect_contact_shadows", "Contact shadows", "Контактные тени", false},
     {"effect_pcss", "Soft sun shadows (PCSS)", "Мягкие тени солнца (PCSS)", false},
     {"effect_gi", "Indirect lighting (GI)", "Непрямое освещение (GI)", false},
@@ -194,9 +194,11 @@ struct Values {
     std::atomic<bool> graphics_gi_reflections_full_res{false};
     std::atomic<float> graphics_gi_reflection_strength{1.0f};
     std::atomic<float> graphics_gi_wet_ground{0.5f};
-    std::atomic<bool> graphics_smooth_normals{false}; // Smoothed normals for GTAO and indirect light.
+    std::atomic<bool> graphics_smooth_normals{true}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
-    std::atomic<bool> graphics_directional_ggx{false};
+    std::atomic<bool> graphics_directional_ggx{true};
+    std::atomic<bool> graphics_local_inverse_square{true};
+    std::atomic<bool> graphics_disable_player_light{true};
     // Game-shader specular upgrades applied at shader compile time (restart required).
     std::atomic<bool> graphics_local_ggx{true}, graphics_specular_aa{true}, graphics_env_ggx_tails{true};
     // Multiplies each light's specular sharpness limit; LightSharpnessMax removes the limit.
@@ -253,7 +255,9 @@ struct Values {
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 0;
-    bool startup_directional_ggx = false;
+    bool startup_directional_ggx = true;
+    bool startup_local_inverse_square = true;
+    bool startup_disable_player_light = true;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
     float startup_light_sharpness = 1.0f;
     int startup_ao_quality = 0;
