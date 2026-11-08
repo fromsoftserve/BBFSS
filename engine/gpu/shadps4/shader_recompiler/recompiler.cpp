@@ -177,7 +177,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         Native::ExtendToneCurve(program);
     } else {
         // bbport: GT7 beside the game's curve, chosen per draw (native/gt7_tonemap.h).
-        Native::ApplyGt7ToneMap(program, runtime_info);
+        Native::ApplyGt7ToneMap(program, runtime_info, pools);
     }
     Shader::Optimization::CollectShaderInfoPass(program, profile);
     Shader::IR::DumpProgram(program, info);

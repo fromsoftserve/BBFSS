@@ -479,6 +479,9 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         const bool use_rays =
             has_material &&
             BbSettings::Get().graphics_gi_reflections.load(std::memory_order_relaxed);
+        const float reflection_strength = std::clamp(
+            BbSettings::Get().graphics_gi_reflection_strength.load(std::memory_order_relaxed),
+            0.0f, 1.0f);
         const bool full_res_rays =
             BbSettings::Get().graphics_gi_reflections_full_res.load(std::memory_order_relaxed);
         const u32 ray_width = full_res_rays ? width : half_width;
@@ -506,6 +509,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         const bool rays = use_rays && probe_ray.image && probe_ray.width == ray_width &&
                           probe_ray.height == ray_height && probe_ray_dist.image &&
                           probe_ray_dist.width == ray_width;
+        const bool run_rays = rays && reflection_strength > 0.0f;
         static bool printed_probes = false;
         if (!printed_probes) {
             printed_probes = true;
@@ -544,13 +548,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
             .prev_proj = use_previous ? prev_proj : std::array<float, 2>{proj[0], proj[1]},
             .frame = frame,
             .history = (probe_history_valid && use_previous ? 1u : 0u) | (rays ? 2u : 0u) |
-                       (rays && reflection_history_valid ? 4u : 0u) |
-                       (static_cast<u32>(std::lround(
-                            std::clamp(BbSettings::Get().graphics_gi_reflection_strength.load(
-                                           std::memory_order_relaxed),
-                                       0.0f, 1.0f) *
-                            255.0f))
-                        << 8) |
+                       (run_rays && reflection_history_valid ? 4u : 0u) |
+                       (static_cast<u32>(std::lround(reflection_strength * 255.0f)) << 8) |
                        (full_res_rays ? 0x10000u : 0u) |
                        (static_cast<u32>(std::lround(wet * 255.0f)) << 18) |
                        (up[2] < 0.0f ? 0x4000000u : 0u),
@@ -603,7 +602,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
              specular_out_view = *probe_specular[current].view,
              old_specular_image = vk::Image(probe_specular[current ^ 1].image),
              old_specular_view = *probe_specular[current ^ 1].view, prep_pipeline = *prep.pipeline,
-             rays, init_reflection = rays && !reflection_history_valid,
+             rays, run_rays, init_reflection = run_rays && !reflection_history_valid,
              ray_image = rays ? vk::Image(probe_ray.image) : vk::Image{},
              ray_view = rays ? *probe_ray.view : *geo.view,
              ray_dist_image = rays ? vk::Image(probe_ray_dist.image) : vk::Image{},
@@ -628,7 +627,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                                               specular_out_image}) {
                     barriers[count++] = ToGeneral(image);
                 }
-                if (rays) {
+                if (run_rays) {
                     barriers[count++] = ToGeneral(ray_image);
                     barriers[count++] = ToGeneral(ray_dist_image);
                     barriers[count++] = ToGeneral(reflection_image);
@@ -689,7 +688,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                 }
                 // Only the probe trace reads the feedback; later passes get the world up.
                 params.feedback = up_packed;
-                if (rays) {
+                if (run_rays) {
                     const u32 half_x = (half_width + 7) / 8, half_y = (half_height + 7) / 8;
                     {
                         const std::array infos{Info(depth_view), Info(geo_view), Info(color_view),
@@ -734,7 +733,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                 AfterCompute(cmdbuf);
             });
         probe_history_valid = true;
-        reflection_history_valid = rays;
+        reflection_history_valid = run_rays;
         history_valid = false;
         prev_view = camera.view;
         prev_proj = {proj[0], proj[1]};

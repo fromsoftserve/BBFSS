@@ -3,10 +3,10 @@
 // github.com/aletschfirn/gt7tonemapper; notice in gt7_tonemap.cpp) and fitted ACES as alternatives
 // to the game's tone curve in its final composite pixel shaders (docs/hdr-scene-path.md).
 //
-// Composites are compiled with all three: per draw, Gt7Push::mode selects GT7, ACES or the game's
-// curve (its own instructions, bit for bit), so the choice changes live. The alternatives need the
-// three channels together, so they go after the last channel's clamp and replace the clamps' uses
-// there; a composite whose channels are used earlier keeps the game's curve. Skipped when the HDR
+// Composites are compiled with all three: per draw, Gt7Push::mode selects uniform branches for GT7
+// and ACES, or the game's curve (its own instructions, bit for bit), so the choice changes live.
+// The alternatives need the three channels together; pure curve dependencies are moved ahead of
+// the first clamp use when needed, and phi nodes merge the selected channels. Skipped when the HDR
 // extension (BB_HDR_SCENE_CURVE=1, tone_curve.h) owns the curve.
 #pragma once
 
@@ -14,16 +14,19 @@
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/runtime_info.h"
 
-namespace Shader::IR {
+namespace Shader {
+struct Pools;
+namespace IR {
 struct Program;
 }
+} // namespace Shader
 
 namespace Shader::Native {
 
 /// Adds GT7 and ACES to a composite (a fragment program whose curve is in one block). Sets
 /// Info::gt7_checked for any composite and Info::uses_tone_curve when applied; returns whether it
 /// applied.
-bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info);
+bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info, Pools& pools);
 
 /// The composites found in captures (docs/hdr-scene-path.md): a cached record of one without
 /// Info::gt7_checked predates the pass and is compiled again.

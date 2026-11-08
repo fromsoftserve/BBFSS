@@ -816,8 +816,8 @@ namespace Shader {
 
 // "TCX1": the module uses the tone curve extension's push data.
 static constexpr u32 ToneCurveTag = 0x31584354;
-// "GT72": a composite compiled with the GT7 and ACES tone map pass (applied or not).
-static constexpr u32 Gt7CheckedTag = 0x32375447;
+// "GT73": a composite compiled with uniform-branched GT7 and ACES tone maps (applied or not).
+static constexpr u32 Gt7CheckedTag = 0x33375447;
 
 void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};

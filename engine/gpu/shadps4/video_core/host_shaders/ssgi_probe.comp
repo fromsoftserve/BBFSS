@@ -728,7 +728,7 @@ void main() {
     // Smoother surfaces share rays with fewer neighbours, keeping their reflections sharper.
     const float sigma = mix(0.8, 2.0, roughness / RAY_MAX_ROUGHNESS) *
                         (fullResRays() ? 1.5 : 1.0);
-    vec3 sum = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0);
+    vec3 sum = vec3(0.0), m2 = vec3(0.0);
     float color_w = 0.0, hit_sum = 0.0, wsum = 0.0, moments = 0.0, dist_sum = 0.0;
     for (int y = -FILTER_RADIUS; y <= FILTER_RADIUS; ++y) {
         for (int x = -FILTER_RADIUS; x <= FILTER_RADIUS; ++x) {
@@ -753,7 +753,6 @@ void main() {
             wsum += w;
             hit_sum += ray.a * w;
             sum += c * w;
-            m1 += c * w;
             m2 += c * c * w;
             moments += w;
             if (ray.a > 0.0) {
@@ -775,7 +774,7 @@ void main() {
     if ((history & 5u) == 5u && reflectionHistory(pos, roughness, hit_dist, hist)) {
         vec3 hist_c = compressColor(hist.rgb);
         if (moments > 0.0) {
-            const vec3 mean = m1 / moments;
+            const vec3 mean = sum / moments;
             const vec3 sd = sqrt(max(m2 / moments - mean * mean, vec3(0.0)));
             hist_c = clamp(hist_c, mean - HISTORY_CLAMP * sd - 0.01,
                            mean + HISTORY_CLAMP * sd + 0.01);
@@ -963,8 +962,12 @@ void main() {
         // keeps the game's roughness, as the fallback where wet-ground rays miss.
         specular = probe_roughness > 0.4;
     }
-    const vec3 r = ggxDominantDirection(n, reflect(-v, n), probe_roughness);
-    const float band1 = ggxBand1(probe_roughness);
+    vec3 r = vec3(0.0);
+    float band1 = 1.0;
+    if (specular) {
+        r = ggxDominantDirection(n, reflect(-v, n), probe_roughness);
+        band1 = ggxBand1(probe_roughness);
+    }
 
     const ivec2 tiles = tileCount();
     const ivec2 centre = pixel / TILE;
@@ -1042,11 +1045,14 @@ void main() {
         spec *= specularOcclusion(n_dot_v, ao, probe_roughness);
         const vec3 brdf = envBrdf(f0, roughness, n_dot_v);
         if (ray_specular) {
-            const vec4 reflection = sampleReflection(pixel, z, n);
             const float t = 1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness);
             const float strength =
                 float((history >> 8u) & 255u) * (REFLECTION_STRENGTH_SCALE / 255.0);
-            spec = mix(spec, reflection.rgb * strength, t);
+            vec3 reflected = vec3(0.0);
+            if (strength > 0.0) {
+                reflected = sampleReflection(pixel, z, n).rgb * strength;
+            }
+            spec = mix(spec, reflected, t);
         }
         add += spec * brdf * specular_scale;
     }

@@ -223,10 +223,12 @@ tonemapper (aletschfirn/gt7tonemapper, MIT) and fitted ACES to the same composit
   (`5c02eaf8`: glow screen blend, then a 3x3 colour matrix), it is the clamps' order in the block
   (the shader's x, y, z) through the colour buffer's export swizzle, which gives the same answer
   for the composites that do not mix.
-- Each clamp's uses select ACES, GT7 or the game from a numeric mode. Mode and exposure come from
-  push data (`Gt7Push`, after the 128 bytes, as `ToneCurvePush`), set at each draw from
-  `graphics_tonemapper` (`original`, `gt7`, `aces`) and `graphics_gt7_exposure` (0.25-4), so the
-  overlay's Tonemapper drop-down and shared exposure slider switch live. With Original the game's
-  instruction is taken bit for bit.
-- Cache: a module that went through the current pass carries the `GT72` tag; a cached known
+- Mode and exposure come from push data (`Gt7Push`, after the 128 bytes, as `ToneCurvePush`), set at
+  each draw from `graphics_tonemapper` (`original`, `gt7`, `aces`) and `graphics_gt7_exposure`
+  (0.25-4), so the overlay's Tonemapper drop-down and shared exposure slider switch live. The mode
+  drives two uniform branches: Original executes neither alternative, GT7 skips ACES, and ACES skips
+  GT7. Phi nodes merge each result with the game's clamp. Where a composite uses one channel before
+  the other clamps, the pass first moves only the clamps' pure arithmetic dependencies ahead of that
+  use. With Original the game's instruction is taken bit for bit.
+- Cache: a module that went through the current pass carries the `GT73` tag; a cached known
   composite without it is compiled again once.

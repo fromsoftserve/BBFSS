@@ -37,7 +37,9 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/recompiler.h"
 
 namespace Shader::Native {
 namespace {
@@ -243,7 +245,7 @@ bool IsKnownComposite(u64 hash) {
     }
 }
 
-bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
+bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info, Pools& pools) {
     if (gt7_lab_override == 0 || ToneCurveEnabled() ||
         program.info.sw_stage != SwStage::Fragment) {
         return false;
@@ -273,8 +275,7 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
     std::ranges::sort(matches, [&](const auto& a, const auto& b) {
         return order.at(a.result) < order.at(b.result);
     });
-    // GT7 needs only the curve's inputs: it goes after the last of them, and each channel's
-    // select after both it and that channel's clamp, before the clamp's first use.
+    // All curve inputs must dominate the common setup; all clamp uses must follow the branch merge.
     IR::Inst* inputs_end = nullptr;
     const auto later = [&](IR::Inst* inst) {
         if (inst && order.contains(inst) && (!inputs_end || order.at(inst) > order.at(inputs_end))) {
@@ -311,7 +312,79 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
         return decline("the channels do not map one to one onto the colour output");
     }
 
-    IR::IREmitter ir{block, std::next(IR::Block::InstructionList::s_iterator_to(*inputs_end))};
+    const auto block_it = std::ranges::find_if(program.syntax_list, [&](const auto& node) {
+        return node.type == IR::AbstractSyntaxNode::Type::Block && node.data.block == &block;
+    });
+    if (block_it == program.syntax_list.end()) {
+        return decline("the curve's block is absent from the structured program");
+    }
+
+    IR::Inst* first_use = nullptr;
+    for (const auto& m : matches) {
+        for (const IR::Use& use : m.result->Uses()) {
+            if (!first_use || order.at(use.user) < order.at(first_use)) {
+                first_use = use.user;
+            }
+        }
+    }
+    std::set<IR::Inst*> curve_insts;
+    std::vector<IR::Inst*> work;
+    for (const auto& m : matches) {
+        work.push_back(m.result);
+    }
+    while (!work.empty()) {
+        IR::Inst* const inst = work.back();
+        work.pop_back();
+        if (!curve_insts.insert(inst).second) {
+            continue;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            IR::Inst* const dependency = inst->Arg(arg).TryInst();
+            if (dependency && dependency->GetParent() == &block) {
+                work.push_back(dependency);
+            }
+        }
+    }
+    std::vector<IR::Inst*> original;
+    for (IR::Inst& inst : block.Instructions()) {
+        original.push_back(&inst);
+    }
+    const auto first_use_it = IR::Block::InstructionList::s_iterator_to(*first_use);
+    for (IR::Inst* const inst : original) {
+        if (order.at(inst) <= order.at(first_use) || !curve_insts.contains(inst)) {
+            continue;
+        }
+        if (inst->MayHaveSideEffects()) {
+            return decline("the curve has an operation that cannot be reordered");
+        }
+        block.Instructions().splice(first_use_it, block.Instructions(),
+                                    IR::Block::InstructionList::s_iterator_to(*inst));
+    }
+
+    IR::Block* const gt7_block = pools.block_pool.Create(pools.inst_pool);
+    IR::Block* const gt7_merge = pools.block_pool.Create(pools.inst_pool);
+    IR::Block* const aces_block = pools.block_pool.Create(pools.inst_pool);
+    IR::Block* const final_merge = pools.block_pool.Create(pools.inst_pool);
+
+    final_merge->Instructions().splice(final_merge->begin(), block.Instructions(), first_use_it,
+                                       block.end());
+    for (IR::Inst& inst : final_merge->Instructions()) {
+        inst.SetParent(final_merge);
+    }
+    const auto successors = block.imm_successors;
+    block.imm_successors.clear();
+    for (IR::Block* const successor : successors) {
+        std::erase(successor->imm_predecessors, &block);
+        final_merge->AddBranch(successor);
+    }
+    block.AddBranch(gt7_block);
+    block.AddBranch(gt7_merge);
+    gt7_block->AddBranch(gt7_merge);
+    gt7_merge->AddBranch(aces_block);
+    gt7_merge->AddBranch(final_merge);
+    aces_block->AddBranch(final_merge);
+
+    IR::IREmitter ir{block};
     const Emit e{ir};
     const auto& m0 = matches[0];
 
@@ -337,74 +410,125 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
                               e.Add(e.C(1.0f), e.Mul(e.Max(shoulder, e.C(0.0f)), e.C(MatchPoint))));
     }
     const F32 exposure = e.Clamp(ir.ToneCurveParam(1), 0.05f, 16.0f);
-    const F32 gt7_gain = e.Clamp(e.Mul(game_at_match, e.C(Target / MatchPoint)), 0.05f, 10.0f);
-    const F32 gt7_scale = e.Mul(gt7_gain, exposure);
-    Vec3 linear;
-    for (size_t c = 0; c < 3; ++c) {
-        linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), gt7_scale);
-    }
-    const Vec3 rgb = e.Apply(Rec709To2020, linear);
-
-    // applyToneMapping (SDR): per-channel curve ("skewed"), and the skewed intensity with the
-    // input's chroma faded out towards the target; blended.
-    const Vec3 ucs = e.ToICtCp(rgb);
-    Vec3 skewed;
-    for (size_t c = 0; c < 3; ++c) {
-        skewed[c] = e.Curve(rgb[c]);
-    }
-    const Vec3 skewed_ucs = e.ToICtCp(skewed);
-    const float target_ucs = float(InversePq(Target));
-    const F32 chroma = e.Sub(e.C(1.0f), e.SmoothStep(e.Mul(ucs[0], e.C(1.0f / target_ucs)),
-                                                    FadeStart, FadeEnd));
-    const Vec3 scaled = e.FromICtCp({skewed_ucs[0], e.Mul(ucs[1], chroma), e.Mul(ucs[2], chroma)});
-    Vec3 mapped;
-    for (size_t c = 0; c < 3; ++c) {
-        const F32 blended = e.Add(e.Mul(e.C(1.0f - BlendRatio), skewed[c]), e.Mul(e.C(BlendRatio), scaled[c]));
-        mapped[c] = e.Mul(e.C(SdrCorrection), e.Min(blended, e.C(Target)));
-    }
-    const Vec3 gt7_out = e.Apply(Rec2020To709, mapped);
-
-    // Fitted ACES: Rec.709 to the working space, the RRT/ODT fit, then back to Rec.709.
-    const F32 aces_gain = e.Clamp(e.Div(game_at_match, e.C(AcesFit(MatchPoint))), 0.05f, 10.0f);
-    const F32 aces_scale = e.Mul(aces_gain, exposure);
-    Vec3 aces_linear;
-    for (size_t c = 0; c < 3; ++c) {
-        aces_linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), aces_scale);
-    }
-    const Vec3 aces_input = e.Apply(AcesInput, aces_linear);
-    Vec3 aces_fitted;
-    for (size_t c = 0; c < 3; ++c) {
-        const F32 v = aces_input[c];
-        aces_fitted[c] = e.Div(
-            e.Sub(e.Mul(v, e.Add(v, e.C(0.0245786f))), e.C(0.000090537f)),
-            e.Add(e.Mul(v, e.Add(e.Mul(v, e.C(0.983729f)), e.C(0.4329510f))), e.C(0.238081f)));
-    }
-    const Vec3 aces_out = e.Apply(AcesOutput, aces_fitted);
-
     const F32 mode = ir.ToneCurveParam(0);
-    const IR::U1 gt7_on = ir.FPGreaterThan(mode, e.C(0.5f));
+    const IR::U1 gt7_on = ir.LogicalAnd(ir.FPGreaterThan(mode, e.C(0.5f)),
+                                        ir.FPLessThan(mode, e.C(1.5f)));
     const IR::U1 aces_on = ir.FPGreaterThan(mode, e.C(1.5f));
-    for (size_t channel = 0; channel < 3; ++channel) {
-        IR::Inst* clamp = matches[channel].result;
-        const F32 game{IR::Value{clamp}};
-        const F32 gt7 = e.Clamp(gt7_out[(*components)[channel]], 0.0f, 1.0f);
-        const F32 aces = e.Clamp(aces_out[(*components)[channel]], 0.0f, 1.0f);
-        IR::Value select;
-        if (order.at(clamp) < inputs) {
-            select = ir.Select(gt7_on, gt7, game);
-            select = ir.Select(aces_on, aces, select);
-        } else {
-            IR::IREmitter after{block, std::next(IR::Block::InstructionList::s_iterator_to(*clamp))};
-            select = after.Select(gt7_on, gt7, game);
-            select = after.Select(aces_on, aces, select);
+
+    const Vec3 gt7 = [&] {
+        IR::IREmitter ir{*gt7_block};
+        const Emit e{ir};
+        const F32 gt7_gain = e.Clamp(e.Mul(game_at_match, e.C(Target / MatchPoint)), 0.05f, 10.0f);
+        const F32 gt7_scale = e.Mul(gt7_gain, exposure);
+        Vec3 linear;
+        for (size_t c = 0; c < 3; ++c) {
+            linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), gt7_scale);
         }
+        const Vec3 rgb = e.Apply(Rec709To2020, linear);
+
+        // applyToneMapping (SDR): per-channel curve ("skewed"), and the skewed intensity with the
+        // input's chroma faded out towards the target; blended.
+        const Vec3 ucs = e.ToICtCp(rgb);
+        Vec3 skewed;
+        for (size_t c = 0; c < 3; ++c) {
+            skewed[c] = e.Curve(rgb[c]);
+        }
+        const Vec3 skewed_ucs = e.ToICtCp(skewed);
+        const float target_ucs = float(InversePq(Target));
+        const F32 chroma = e.Sub(e.C(1.0f), e.SmoothStep(e.Mul(ucs[0], e.C(1.0f / target_ucs)),
+                                                        FadeStart, FadeEnd));
+        const Vec3 scaled = e.FromICtCp({skewed_ucs[0], e.Mul(ucs[1], chroma), e.Mul(ucs[2], chroma)});
+        Vec3 mapped;
+        for (size_t c = 0; c < 3; ++c) {
+            const F32 blended = e.Add(e.Mul(e.C(1.0f - BlendRatio), skewed[c]), e.Mul(e.C(BlendRatio), scaled[c]));
+            mapped[c] = e.Mul(e.C(SdrCorrection), e.Min(blended, e.C(Target)));
+        }
+        const Vec3 gt7_out = e.Apply(Rec2020To709, mapped);
+        Vec3 result;
+        for (size_t channel = 0; channel < 3; ++channel) {
+            result[channel] = e.Clamp(gt7_out[(*components)[channel]], 0.0f, 1.0f);
+        }
+        return result;
+    }();
+
+    const Vec3 aces = [&] {
+        IR::IREmitter ir{*aces_block};
+        const Emit e{ir};
+        // Fitted ACES: Rec.709 to the working space, the RRT/ODT fit, then back to Rec.709.
+        const F32 aces_gain = e.Clamp(e.Div(game_at_match, e.C(AcesFit(MatchPoint))), 0.05f, 10.0f);
+        const F32 aces_scale = e.Mul(aces_gain, exposure);
+        Vec3 aces_linear;
+        for (size_t c = 0; c < 3; ++c) {
+            aces_linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), aces_scale);
+        }
+        const Vec3 aces_input = e.Apply(AcesInput, aces_linear);
+        Vec3 aces_fitted;
+        for (size_t c = 0; c < 3; ++c) {
+            const F32 v = aces_input[c];
+            aces_fitted[c] = e.Div(
+                e.Sub(e.Mul(v, e.Add(v, e.C(0.0245786f))), e.C(0.000090537f)),
+                e.Add(e.Mul(v, e.Add(e.Mul(v, e.C(0.983729f)), e.C(0.4329510f))), e.C(0.238081f)));
+        }
+        const Vec3 aces_out = e.Apply(AcesOutput, aces_fitted);
+        Vec3 result;
+        for (size_t channel = 0; channel < 3; ++channel) {
+            result[channel] = e.Clamp(aces_out[(*components)[channel]], 0.0f, 1.0f);
+        }
+        return result;
+    }();
+
+    const auto select_phi = [](IR::Block& merge, IR::Block& true_block, F32 true_value,
+                               IR::Block& false_block, F32 false_value) {
+        IR::Inst* const phi = &*merge.PrependNewInst(merge.begin(), IR::Opcode::Phi);
+        phi->SetFlags(IR::Type::F32);
+        phi->AddPhiOperand(&true_block, true_value);
+        phi->AddPhiOperand(&false_block, false_value);
+        return F32{IR::Value{phi}};
+    };
+    Vec3 gt7_selected;
+    Vec3 selected;
+    for (size_t channel = 0; channel < 3; ++channel) {
+        const F32 game{IR::Value{matches[channel].result}};
+        gt7_selected[channel] = select_phi(*gt7_merge, *gt7_block, gt7[channel], block, game);
+        selected[channel] = select_phi(*final_merge, *aces_block, aces[channel], *gt7_merge,
+                                       gt7_selected[channel]);
+    }
+    for (size_t channel = 0; channel < 3; ++channel) {
+        IR::Inst* const clamp = matches[channel].result;
         std::vector<IR::Use> uses(clamp->Uses().begin(), clamp->Uses().end());
         for (const IR::Use& use : uses) {
             if (order.contains(use.user)) {
-                use.user->SetArg(use.operand, select);
+                use.user->SetArg(use.operand, selected[channel]);
             }
         }
     }
+
+    std::vector<IR::AbstractSyntaxNode> nodes(8);
+    nodes[0].type = IR::AbstractSyntaxNode::Type::If;
+    nodes[0].data.if_node = {.cond = gt7_on, .body = gt7_block, .merge = gt7_merge};
+    nodes[1].type = IR::AbstractSyntaxNode::Type::Block;
+    nodes[1].data.block = gt7_block;
+    nodes[2].type = IR::AbstractSyntaxNode::Type::EndIf;
+    nodes[2].data.end_if.merge = gt7_merge;
+    nodes[3].type = IR::AbstractSyntaxNode::Type::Block;
+    nodes[3].data.block = gt7_merge;
+    nodes[4].type = IR::AbstractSyntaxNode::Type::If;
+    nodes[4].data.if_node = {.cond = aces_on, .body = aces_block, .merge = final_merge};
+    nodes[5].type = IR::AbstractSyntaxNode::Type::Block;
+    nodes[5].data.block = aces_block;
+    nodes[6].type = IR::AbstractSyntaxNode::Type::EndIf;
+    nodes[6].data.end_if.merge = final_merge;
+    nodes[7].type = IR::AbstractSyntaxNode::Type::Block;
+    nodes[7].data.block = final_merge;
+    program.syntax_list.insert(std::next(block_it), nodes.begin(), nodes.end());
+
+    program.blocks.clear();
+    for (const auto& node : program.syntax_list) {
+        if (node.type == IR::AbstractSyntaxNode::Type::Block) {
+            program.blocks.push_back(node.data.block);
+        }
+    }
+    program.post_order_blocks = IR::PostOrder(program.syntax_list.front().data.block);
     program.info.uses_tone_curve = true;
     return true;
 }
