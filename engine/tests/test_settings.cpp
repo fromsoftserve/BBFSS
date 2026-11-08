@@ -326,8 +326,13 @@ int main() {
     assert(Read(path).find("graphics_gt7_exposure=1.50\n") != std::string::npos);
     { std::ofstream file(path); file << "graphics_tonemapper=aces\ngraphics_gt7_exposure=99\n"; }
     BbSettings::Load();
-    assert(s.graphics_tonemapper == BbSettings::TonemapperOriginal &&
+    assert(s.graphics_tonemapper == BbSettings::TonemapperAces &&
            s.graphics_gt7_exposure == BbSettings::Gt7ExposureMax);
+    BbSettings::Save();
+    assert(Read(path).find("graphics_tonemapper=aces\n") != std::string::npos);
+    { std::ofstream file(path); file << "graphics_tonemapper=unknown\n"; }
+    BbSettings::Load();
+    assert(s.graphics_tonemapper == BbSettings::TonemapperOriginal);
     { std::ofstream file(path); file << "graphics_gt7_exposure=nan\n"; }
     BbSettings::Load();
     assert(s.graphics_gt7_exposure == 1.0f);

@@ -56,8 +56,20 @@ constexpr float BlendRatio = 0.6f, FadeStart = 0.98f, FadeEnd = 1.16f;
 // ST 2084 (PQ).
 constexpr float PqM1 = 0.1593017578125f, PqM2 = 78.84375f, PqC1 = 0.8359375f, PqC2 = 18.8515625f,
                 PqC3 = 18.6875f;
-// The scene value (k * x, the curve's own units) where GT7 meets the game's curve by default.
+// The scene value (k * x, the curve's own units) where the alternatives meet the game's curve.
 constexpr float MatchPoint = 0.3f;
+constexpr float AcesFit(float v) {
+    return (v * (v + 0.0245786f) - 0.000090537f) /
+           (v * (0.983729f * v + 0.4329510f) + 0.238081f);
+}
+
+// ACES fitted input/output transforms. Their rows sum to one, so AcesFit is also the neutral response.
+constexpr Mat3 AcesInput{{{0.59719f, 0.35458f, 0.04823f},
+                          {0.07600f, 0.90834f, 0.01566f},
+                          {0.02840f, 0.13383f, 0.83777f}}};
+constexpr Mat3 AcesOutput{{{1.60475f, -0.53108f, -0.07367f},
+                           {-0.10208f, 1.10813f, -0.00605f},
+                           {-0.00327f, -0.07276f, 1.07602f}}};
 
 constexpr Mat3 Rec709To2020{{{0.6274040f, 0.3292820f, 0.0433136f},
                              {0.0690970f, 0.9195400f, 0.0113612f},
@@ -324,12 +336,12 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
         game_at_match = e.Mul(e.C(MatchPoint / (1.0f + MatchPoint)),
                               e.Add(e.C(1.0f), e.Mul(e.Max(shoulder, e.C(0.0f)), e.C(MatchPoint))));
     }
-    const F32 gain = e.Clamp(e.Mul(game_at_match, e.C(Target / MatchPoint)), 0.05f, 10.0f);
     const F32 exposure = e.Clamp(ir.ToneCurveParam(1), 0.05f, 16.0f);
-    const F32 scale = e.Mul(gain, exposure);
+    const F32 gt7_gain = e.Clamp(e.Mul(game_at_match, e.C(Target / MatchPoint)), 0.05f, 10.0f);
+    const F32 gt7_scale = e.Mul(gt7_gain, exposure);
     Vec3 linear;
     for (size_t c = 0; c < 3; ++c) {
-        linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), scale);
+        linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), gt7_scale);
     }
     const Vec3 rgb = e.Apply(Rec709To2020, linear);
 
@@ -350,20 +362,41 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info) {
         const F32 blended = e.Add(e.Mul(e.C(1.0f - BlendRatio), skewed[c]), e.Mul(e.C(BlendRatio), scaled[c]));
         mapped[c] = e.Mul(e.C(SdrCorrection), e.Min(blended, e.C(Target)));
     }
-    const Vec3 out = e.Apply(Rec2020To709, mapped);
+    const Vec3 gt7_out = e.Apply(Rec2020To709, mapped);
 
-    // Each clamp's uses take GT7 or the game's value.
-    const IR::U1 on = ir.FPGreaterThan(ir.ToneCurveParam(0), e.C(0.5f));
+    // Fitted ACES: Rec.709 to the working space, the RRT/ODT fit, then back to Rec.709.
+    const F32 aces_gain = e.Clamp(e.Div(game_at_match, e.C(AcesFit(MatchPoint))), 0.05f, 10.0f);
+    const F32 aces_scale = e.Mul(aces_gain, exposure);
+    Vec3 aces_linear;
+    for (size_t c = 0; c < 3; ++c) {
+        aces_linear[c] = e.Mul(e.Max(scene[c], e.C(0.0f)), aces_scale);
+    }
+    const Vec3 aces_input = e.Apply(AcesInput, aces_linear);
+    Vec3 aces_fitted;
+    for (size_t c = 0; c < 3; ++c) {
+        const F32 v = aces_input[c];
+        aces_fitted[c] = e.Div(
+            e.Sub(e.Mul(v, e.Add(v, e.C(0.0245786f))), e.C(0.000090537f)),
+            e.Add(e.Mul(v, e.Add(e.Mul(v, e.C(0.983729f)), e.C(0.4329510f))), e.C(0.238081f)));
+    }
+    const Vec3 aces_out = e.Apply(AcesOutput, aces_fitted);
+
+    const F32 mode = ir.ToneCurveParam(0);
+    const IR::U1 gt7_on = ir.FPGreaterThan(mode, e.C(0.5f));
+    const IR::U1 aces_on = ir.FPGreaterThan(mode, e.C(1.5f));
     for (size_t channel = 0; channel < 3; ++channel) {
         IR::Inst* clamp = matches[channel].result;
         const F32 game{IR::Value{clamp}};
-        const F32 gt7 = e.Clamp(out[(*components)[channel]], 0.0f, 1.0f);
+        const F32 gt7 = e.Clamp(gt7_out[(*components)[channel]], 0.0f, 1.0f);
+        const F32 aces = e.Clamp(aces_out[(*components)[channel]], 0.0f, 1.0f);
         IR::Value select;
         if (order.at(clamp) < inputs) {
-            select = ir.Select(on, gt7, game);
+            select = ir.Select(gt7_on, gt7, game);
+            select = ir.Select(aces_on, aces, select);
         } else {
             IR::IREmitter after{block, std::next(IR::Block::InstructionList::s_iterator_to(*clamp))};
-            select = after.Select(on, gt7, game);
+            select = after.Select(gt7_on, gt7, game);
+            select = after.Select(aces_on, aces, select);
         }
         std::vector<IR::Use> uses(clamp->Uses().begin(), clamp->Uses().end());
         for (const IR::Use& use : uses) {

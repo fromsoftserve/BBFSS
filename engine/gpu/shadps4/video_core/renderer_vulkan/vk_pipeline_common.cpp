@@ -161,17 +161,14 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
     });
     if (uses_tone_curve && !Shader::Native::ToneCurveEnabled()) {
         const auto& settings = BbSettings::Get();
-        const Shader::Native::Gt7Push gt7{
-            .enabled = settings.graphics_tonemapper.load(std::memory_order_relaxed) ==
-                               BbSettings::TonemapperGt7
-                           ? 1.0f
-                           : 0.0f,
+        const Shader::Native::Gt7Push tone_map{
+            .mode = float(settings.graphics_tonemapper.load(std::memory_order_relaxed)),
             .exposure = settings.graphics_gt7_exposure.load(std::memory_order_relaxed),
             .unused = {},
         };
-        scheduler.Record([layout, stage_flags, gt7](vk::CommandBuffer cmdbuf) {
+        scheduler.Record([layout, stage_flags, tone_map](vk::CommandBuffer cmdbuf) {
             cmdbuf.pushConstants(layout, stage_flags, Shader::Native::ToneCurvePushOffset,
-                                 sizeof(gt7), &gt7);
+                                 sizeof(tone_map), &tone_map);
         });
     } else if (uses_tone_curve) {
         const Shader::Native::ToneCurvePush tone = ToneCurveParams();

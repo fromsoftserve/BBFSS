@@ -308,7 +308,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
             if (value==TonemapperNames[m]) mode=m;
         }
         if (mode<0) {
-            std::printf("Settings: unknown graphics_tonemapper '%s' (expected original or gt7); original\n",
+            std::printf("Settings: unknown graphics_tonemapper '%s' (expected original, gt7 or aces); original\n",
                         value.c_str());
         }
         v.graphics_tonemapper=mode<0?TonemapperOriginal:mode;

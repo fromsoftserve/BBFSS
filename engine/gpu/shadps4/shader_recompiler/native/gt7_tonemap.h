@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // bbport: the GT7 tone mapping operator (Polyphony Digital's sample, MIT licence, via
-// github.com/aletschfirn/gt7tonemapper; notice in gt7_tonemap.cpp) as an alternative to the game's
-// tone curve in its final composite pixel shaders (docs/hdr-scene-path.md).
+// github.com/aletschfirn/gt7tonemapper; notice in gt7_tonemap.cpp) and fitted ACES as alternatives
+// to the game's tone curve in its final composite pixel shaders (docs/hdr-scene-path.md).
 //
-// Composites are compiled with both: per draw, Gt7Push::enabled selects GT7 or the game's curve
-// (its own instructions, bit for bit), so the choice changes live. GT7 needs the three channels
-// together, so it goes after the last channel's clamp and replaces the clamps' uses there; a
-// composite whose channels are used earlier keeps the game's curve. Skipped when the HDR extension
-// (BB_HDR_SCENE_CURVE=1, tone_curve.h) owns the curve.
+// Composites are compiled with all three: per draw, Gt7Push::mode selects GT7, ACES or the game's
+// curve (its own instructions, bit for bit), so the choice changes live. The alternatives need the
+// three channels together, so they go after the last channel's clamp and replace the clamps' uses
+// there; a composite whose channels are used earlier keeps the game's curve. Skipped when the HDR
+// extension (BB_HDR_SCENE_CURVE=1, tone_curve.h) owns the curve.
 #pragma once
 
 #include "common/types.h"
@@ -20,7 +20,7 @@ struct Program;
 
 namespace Shader::Native {
 
-/// Adds GT7 to a composite (a fragment program whose curve is in one block). Sets
+/// Adds GT7 and ACES to a composite (a fragment program whose curve is in one block). Sets
 /// Info::gt7_checked for any composite and Info::uses_tone_curve when applied; returns whether it
 /// applied.
 bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info);
@@ -29,10 +29,10 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info);
 /// Info::gt7_checked predates the pass and is compiled again.
 bool IsKnownComposite(u64 hash);
 
-/// GT7's parameters, pushed in ToneCurvePush's place when the HDR extension is off.
+/// Alternative tone mapper parameters, pushed in ToneCurvePush's place when the HDR extension is off.
 struct Gt7Push {
-    float enabled;  ///< 0: the game's curve (bit for bit)
-    float exposure; ///< scene scale before GT7 (1: the game's mid-tones)
+    float mode;     ///< 0: game (bit for bit), 1: GT7, 2: ACES
+    float exposure; ///< scene scale before GT7/ACES (1: the game's mid-tones)
     float unused[2];
 };
 static_assert(sizeof(Gt7Push) == sizeof(ToneCurvePush));

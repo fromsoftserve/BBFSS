@@ -101,8 +101,8 @@ enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 
 enum HdrMode : int { HdrModeNative = 0, HdrModeExpand = 1, HdrModeCount };
 inline constexpr const char* HdrModeNames[] = {"native", "expand"};
 static_assert(sizeof(HdrModeNames) / sizeof(HdrModeNames[0]) == HdrModeCount);
-enum Tonemapper : int { TonemapperOriginal = 0, TonemapperGt7 = 1, TonemapperCount };
-inline constexpr const char* TonemapperNames[] = {"original", "gt7"};
+enum Tonemapper : int { TonemapperOriginal = 0, TonemapperGt7 = 1, TonemapperAces = 2, TonemapperCount };
+inline constexpr const char* TonemapperNames[] = {"original", "gt7", "aces"};
 static_assert(sizeof(TonemapperNames) / sizeof(TonemapperNames[0]) == TonemapperCount);
 inline constexpr float Gt7ExposureMin = 0.25f, Gt7ExposureMax = 4.0f;
 

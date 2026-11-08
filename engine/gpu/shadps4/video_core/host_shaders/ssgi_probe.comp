@@ -145,12 +145,16 @@ ivec2 raySize() {
 
 // Each half-resolution reflection pixel traces from one pixel of its 2x2 block, cycling through
 // the block over four frames.
-ivec2 rayPixel(ivec2 ray_pixel) {
+ivec2 rayPixelAt(ivec2 ray_pixel, uint at_frame) {
     if (fullResRays()) {
         return ray_pixel;
     }
     const ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 1), ivec2(1, 0), ivec2(0, 1));
-    return min(ray_pixel * 2 + offsets[frame & 3u], ivec2(size) - 1);
+    return min(ray_pixel * 2 + offsets[at_frame & 3u], ivec2(size) - 1);
+}
+
+ivec2 rayPixel(ivec2 ray_pixel) {
+    return rayPixelAt(ray_pixel, frame);
 }
 
 // Luminance-compressed colour: averaging in this space keeps a single very bright sample (a ray
@@ -650,26 +654,36 @@ const float VIRTUAL_DEPTH_TOLERANCE = 0.15;
 const float VIRTUAL_MAX_ROUGHNESS = 0.45;
 
 // Previous resolved reflection at full-resolution previous-frame pixel `pp`, validated against
-// the previous view z kept in the probe diffuse history.
+// the previous view z kept in the probe diffuse history. At half resolution, each tap checks the
+// pixel its texel represented last frame rather than mixing the block's four surfaces together.
 bool fetchHistory(vec2 pp, float expected_z, float tolerance, out vec4 hist) {
     hist = vec4(0.0);
     const ivec2 full = ivec2(floor(pp));
     if (any(lessThan(full, ivec2(0))) || any(greaterThanEqual(full, ivec2(size)))) {
         return false;
     }
-    const float prev_z = texelFetch(prev_diffuse_tex, full, 0).a;
-    if (prev_z <= 0.0 || abs(prev_z - expected_z) > tolerance * expected_z) {
-        return false;
-    }
     const vec2 hf = fullResRays() ? pp - 0.5 : pp * 0.5 - 0.5;
     const ivec2 b = ivec2(floor(hf));
     const vec2 f = hf - vec2(b);
     const ivec2 hi = raySize() - 1;
-    const vec4 h00 = texelFetch(prev_reflection_tex, clamp(b, ivec2(0), hi), 0);
-    const vec4 h10 = texelFetch(prev_reflection_tex, clamp(b + ivec2(1, 0), ivec2(0), hi), 0);
-    const vec4 h01 = texelFetch(prev_reflection_tex, clamp(b + ivec2(0, 1), ivec2(0), hi), 0);
-    const vec4 h11 = texelFetch(prev_reflection_tex, clamp(b + ivec2(1, 1), ivec2(0), hi), 0);
-    hist = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const ivec2 q = clamp(b + o, ivec2(0), hi);
+        const ivec2 previous_pixel = rayPixelAt(q, frame - 1u);
+        const float prev_z = texelFetch(prev_diffuse_tex, previous_pixel, 0).a;
+        if (prev_z <= 0.0 || abs(prev_z - expected_z) > tolerance * expected_z) {
+            continue;
+        }
+        const float w = (o.x == 0 ? 1.0 - f.x : f.x) * (o.y == 0 ? 1.0 - f.y : f.y);
+        hist += texelFetch(prev_reflection_tex, q, 0) * w;
+        wsum += w;
+    }
+    if (wsum <= 1e-5) {
+        hist = vec4(0.0);
+        return false;
+    }
+    hist /= wsum;
     return true;
 }
 
@@ -735,21 +749,23 @@ void main() {
                 continue;
             }
             const vec4 ray = texelFetch(ray_tex, q, 0);
+            const vec3 c = compressColor(ray.rgb) * ray.a;
             wsum += w;
             hit_sum += ray.a * w;
+            sum += c * w;
+            m1 += c * w;
+            m2 += c * c * w;
+            moments += w;
             if (ray.a > 0.0) {
-                const vec3 c = compressColor(ray.rgb);
                 const float cw = w * ray.a;
-                sum += c * cw;
                 color_w += cw;
                 dist_sum += texelFetch(dist_tex, q, 0).r * cw;
-                m1 += c;
-                m2 += c * c;
-                moments += 1.0;
             }
         }
     }
-    const vec3 current = color_w > 0.0 ? sum / color_w : vec3(0.0);
+    // Radiance is premultiplied by hit coverage. Misses belong in both the average and its
+    // variance; excluding them lets one bright ray define the clamp instead of being rejected.
+    const vec3 current = wsum > 0.0 ? sum / wsum : vec3(0.0);
     const float hit = wsum > 0.0 ? hit_sum / wsum : 0.0;
     const float hit_dist = color_w > 0.0 ? dist_sum / color_w : 0.0;
 
@@ -764,14 +780,10 @@ void main() {
             hist_c = clamp(hist_c, mean - HISTORY_CLAMP * sd - 0.01,
                            mean + HISTORY_CLAMP * sd + 0.01);
         }
-        // Weight each side by its hit coverage, so a frame that misses (or a history that had
-        // missed) neither wipes nor ignores the other; a hard reset here flickers at hit edges.
-        // Mirror rays are identical every frame, so they need little history: follow motion faster.
+        // Mirror rays have a deterministic direction for a given surface, so follow motion faster.
         const float blend =
             mix(MIRROR_BLEND, REFLECTION_BLEND, smoothstep(0.08, 0.2, roughness));
-        const float wh = hist.a * (1.0 - blend);
-        const float wc = (color_w > 0.0 ? hit : 0.0) * blend;
-        result = wh + wc > 1e-5 ? (hist_c * wh + current * wc) / (wh + wc) : current;
+        result = mix(hist_c, current, blend);
         result_hit = mix(hist.a, hit, HIT_BLEND);
     }
     imageStore(reflection_img, hp, vec4(expandColor(result), result_hit));
@@ -1031,8 +1043,7 @@ void main() {
         const vec3 brdf = envBrdf(f0, roughness, n_dot_v);
         if (ray_specular) {
             const vec4 reflection = sampleReflection(pixel, z, n);
-            const float t = clamp(reflection.a, 0.0, 1.0) *
-                            (1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness));
+            const float t = 1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness);
             const float strength =
                 float((history >> 8u) & 255u) * (REFLECTION_STRENGTH_SCALE / 255.0);
             spec = mix(spec, reflection.rgb * strength, t);
