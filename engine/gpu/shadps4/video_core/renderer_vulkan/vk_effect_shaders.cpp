@@ -10,6 +10,7 @@
 #include "bbport_settings.h"
 #include "video_core/host_shaders/gtao_frag.h"
 #include "video_core/host_shaders/gtao_hq_frag.h"
+#include "video_core/host_shaders/bloom_downsample_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
 #include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/renderer_vulkan/vk_ggx_lobes.h"
@@ -137,6 +138,15 @@ std::span<const u32> Replacement(const Shader::Info& info, const Shader::Profile
             return NATIVE_MOTION_BLUR_FRAG;
         }
         Declined("Motion blur quality", info, profile, start);
+    } else if (info.pgm_hash == BloomDownsampleHash) {
+        if (Fits(info, profile, start, 1, 1, 1)) {
+            static std::atomic<bool> active{false};
+            if (!active.exchange(true, std::memory_order_relaxed)) {
+                std::printf("Bloom stabilization: in use\n");
+            }
+            return BLOOM_DOWNSAMPLE_FRAG;
+        }
+        Declined("Bloom stabilization", info, profile, start);
     }
     return {};
 }
@@ -184,7 +194,8 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         Pom::PatchPom(info.pgm_hash, true, patched);
         if (patched.size() != spv.size()) {
             LocalFalloff::Patch(patched, info.pgm_hash,
-                                BbSettings::Get().startup_local_inverse_square);
+                                BbSettings::Get().startup_local_inverse_square,
+                                BbSettings::Get().startup_local_light_intensity);
             PatchLobes(patched);
             PatchSharpness(patched);
             return patched;
@@ -192,7 +203,8 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
     }
     std::vector<u32> lobes(spv.begin(), spv.end());
     const bool falloff = LocalFalloff::Patch(lobes, info.pgm_hash,
-                                             BbSettings::Get().startup_local_inverse_square)
+                                             BbSettings::Get().startup_local_inverse_square,
+                                             BbSettings::Get().startup_local_light_intensity)
                              .Changed();
     const bool lobed = PatchLobes(lobes);
     if (PatchSharpness(lobes) || lobed || falloff) {

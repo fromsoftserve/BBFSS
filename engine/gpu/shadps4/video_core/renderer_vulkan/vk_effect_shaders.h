@@ -16,6 +16,7 @@ inline constexpr u64 SsaoHash = 0xcbbca5dc;
 inline constexpr u64 SsrHash = 0x6c2323c2;
 inline constexpr u64 SsrCompositeHash = 0x3fe9e964;
 inline constexpr u64 MotionBlurHash = 0x29e06868;
+inline constexpr u64 BloomDownsampleHash = 0x4b766f62;
 
 std::span<const u32> Replacement(const Shader::Info& info, const Shader::Profile& profile,
                                  const Shader::Backend::Bindings& start);

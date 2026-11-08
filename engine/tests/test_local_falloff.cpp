@@ -21,6 +21,23 @@ std::vector<uint32_t> Read(const std::filesystem::path& path) {
 // Usage: local-falloff-test [dumps-dir out-dir]
 int main(int argc, char** argv) {
     using namespace Vulkan::LocalFalloff;
+    for (const double radius : {0.25, 1.0, 2.5, 10.0}) {
+        constexpr int steps = 10000;
+        constexpr double pi = 3.14159265358979323846;
+        double old_energy = 0, matched_energy = 0;
+        for (int i = 0; i < steps; ++i) {
+            const double x = (i + 0.5) / steps;
+            const double old_falloff = (1 - x) * (1 - x);
+            const double inverse_square = 1 / (radius * radius * x * x) - 1 / (radius * radius);
+            const double matched_falloff = inverse_square * radius * radius / 20;
+            old_energy += old_falloff * x * x;
+            matched_energy += matched_falloff * x * x;
+        }
+        old_energy *= 4 * pi * radius * radius * radius / steps;
+        matched_energy *= 4 * pi * radius * radius * radius / steps;
+        const double relative_error = (matched_energy - old_energy) / old_energy;
+        assert(relative_error > -1e-8 && relative_error < 1e-8);
+    }
     std::vector<uint32_t> malformed{0x07230203, 0x10600, 0, 10, 0, 0};
     const auto original = malformed;
     assert(!Patch(malformed, 0x7cc2c044).Changed() && malformed == original);
@@ -54,6 +71,15 @@ int main(int argc, char** argv) {
             std::ofstream file(out / entry.path().filename(), std::ios::binary);
             file.write(reinterpret_cast<const char*>(words.data()),
                        std::streamsize(words.size() * 4));
+            auto scaled = source;
+            const auto scaled_stats = Patch(scaled, hash, true, 2.5f);
+            assert(scaled_stats.standard == stats.standard && scaled_stats.special == stats.special);
+            assert(scaled != patched);
+            const auto scaled_patched = scaled;
+            assert(!Patch(scaled, hash).Changed() && scaled == scaled_patched);
+            std::ofstream scaled_file(out / (stem + "-intensity.spv"), std::ios::binary);
+            scaled_file.write(reinterpret_cast<const char*>(scaled.data()),
+                              std::streamsize(scaled.size() * 4));
         }
         std::cout << files << " files, " << shaders << " shaders: " << total.standard
                   << " standard, " << total.special << " special\n";

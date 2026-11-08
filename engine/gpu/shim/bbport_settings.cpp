@@ -348,6 +348,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_local_ggx=i!=0;
     } else if (key == "graphics_local_inverse_square") {
         v.graphics_local_inverse_square=i!=0;
+    } else if (key == "graphics_local_light_intensity") {
+        v.graphics_local_light_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,4.0f);
     } else if (key == "graphics_disable_player_light") {
         v.graphics_disable_player_light=i!=0;
     } else if (key == "graphics_specular_aa") {
@@ -611,6 +613,7 @@ void Load() {
     v.startup_directional_ggx = v.graphics_directional_ggx;
     v.startup_local_ggx = v.graphics_local_ggx;
     v.startup_local_inverse_square = v.graphics_local_inverse_square;
+    v.startup_local_light_intensity = v.graphics_local_light_intensity;
     v.startup_disable_player_light = v.graphics_disable_player_light;
     v.startup_specular_aa = v.graphics_specular_aa;
     v.startup_env_ggx_tails = v.graphics_env_ggx_tails;
@@ -801,6 +804,7 @@ void Save() {
     put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
     put("graphics_local_ggx",flag(v.graphics_local_ggx));
     put("graphics_local_inverse_square",flag(v.graphics_local_inverse_square));
+    put("graphics_local_light_intensity",fixed(v.graphics_local_light_intensity,2));
     put("graphics_disable_player_light",flag(v.graphics_disable_player_light));
     put("graphics_specular_aa",flag(v.graphics_specular_aa));
     put("graphics_env_ggx_tails",flag(v.graphics_env_ggx_tails));

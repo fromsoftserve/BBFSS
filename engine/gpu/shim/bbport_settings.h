@@ -198,6 +198,7 @@ struct Values {
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{true};
     std::atomic<bool> graphics_local_inverse_square{true};
+    std::atomic<float> graphics_local_light_intensity{1.0f};
     std::atomic<bool> graphics_disable_player_light{true};
     // Game-shader specular upgrades applied at shader compile time (restart required).
     std::atomic<bool> graphics_local_ggx{true}, graphics_specular_aa{true}, graphics_env_ggx_tails{true};
@@ -257,6 +258,7 @@ struct Values {
     int startup_motion_blur_quality = 0;
     bool startup_directional_ggx = true;
     bool startup_local_inverse_square = true;
+    float startup_local_light_intensity = 1.0f;
     bool startup_disable_player_light = true;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
     float startup_light_sharpness = 1.0f;

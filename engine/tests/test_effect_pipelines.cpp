@@ -11,6 +11,7 @@
 #define VULKAN_HPP_NO_EXCEPTIONS
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
+#include "video_core/host_shaders/bloom_downsample_frag.h"
 #include "video_core/host_shaders/contact_shadow_comp.h"
 #include "video_core/host_shaders/gtao_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
@@ -203,7 +204,8 @@ int main() {
         ++built;
     }
     for (const auto code : {std::span<const u32>(GTAO_FRAG), std::span<const u32>(SSR_FRAG),
-                            std::span<const u32>(NATIVE_MOTION_BLUR_FRAG)}) {
+                            std::span<const u32>(NATIVE_MOTION_BLUR_FRAG),
+                            std::span<const u32>(BLOOM_DOWNSAMPLE_FRAG)}) {
         auto module = device.createShaderModuleUnique(
             {.codeSize = code.size_bytes(), .pCode = code.data()});
         assert(module.result == vk::Result::eSuccess);

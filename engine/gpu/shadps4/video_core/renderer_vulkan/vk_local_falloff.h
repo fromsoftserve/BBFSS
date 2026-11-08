@@ -29,7 +29,10 @@ inline bool Target(uint32_t hash) {
     }
 }
 
-inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = true) {
+// Equal spherical-volume energy gives old = 4*pi*r^3/30 and new = 8*pi*r/3,
+// so the inverse-square curve is scaled by r^2/20 before applying user intensity.
+inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = true,
+                   float intensity = 1.0f) {
     Stats stats{};
     if (!enabled || !Target(hash) || spv.size() < 5 || spv[0] != 0x07230203 || spv[3] == 0)
         return stats;
@@ -38,6 +41,7 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
     std::unordered_map<uint32_t, Def> defs;
     std::unordered_map<uint32_t, uint32_t> constants;
     uint32_t glsl = 0, f32 = 0, floats = 0;
+    size_t first_function = 0;
     for (size_t i = 5; i < spv.size();) {
         const uint32_t size = spv[i] >> 16, op = spv[i] & 0xffff;
         if (!size || size > spv.size() - i) return stats;
@@ -50,9 +54,10 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
         if (op == 43 && size == 4) constants[spv[i + 2]] = spv[i + 3];
         if ((op == 12 || op == 43 || op == 124 || (op >= 129 && op <= 136)) && size >= 3)
             defs[spv[i + 2]] = {i, op};
+        if (op == 54 && !first_function) first_function = i;
         i += size;
     }
-    if (!glsl || !f32 || floats != 1) return stats;
+    if (!glsl || !f32 || floats != 1 || !first_function) return stats;
 
     const auto is_const = [&](uint32_t id, float value) {
         const auto it = constants.find(id);
@@ -140,7 +145,10 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
         }
     }
 
-    std::map<size_t, std::pair<uint32_t, uint32_t>> special;
+    struct Special {
+        uint32_t result, native, inverse_radius;
+    };
+    std::map<size_t, Special> special;
     for (const auto& [id, def] : defs) {
         if (def.op != 131) continue;
         const auto* sub = binary(id, 131);
@@ -151,29 +159,43 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
         if (!product) continue;
         for (int side = 0; side < 2; ++side) {
             if (!distance_squared(product[side])) continue;
-            const auto native = diffuse.find({product[side], source(product[1 - side])});
-            if (native != diffuse.end()) special[def.at] = {id, native->second};
+            const auto inverse_radius = source(product[1 - side]);
+            const auto native = diffuse.find({product[side], inverse_radius});
+            if (native != diffuse.end()) special[def.at] = {id, native->second, product[1 - side]};
         }
     }
     if (standard.empty() && special.empty()) return stats;
 
     uint32_t next = spv[3];
+    const uint32_t energy = next++;
+    const uint32_t constant[] = {
+        (4u << 16) | 43, f32, energy, std::bit_cast<uint32_t>(intensity * 0.05f),
+    };
     std::vector<uint32_t> patched(spv.begin(), spv.begin() + 5);
     for (size_t i = 5; i < spv.size();) {
         const uint32_t size = spv[i] >> 16;
+        if (i == first_function)
+            patched.insert(patched.end(), std::begin(constant), std::end(constant));
         if (const auto site = standard.find(i); site != standard.end()) {
             const auto& s = site->second;
-            const uint32_t inverse = next++, difference = next++;
+            const uint32_t inverse = next++, difference = next++, matched = next++, scale = next++;
             const uint32_t instructions[] = {
                 (5u << 16) | 136, f32, inverse, s.one, s.d2,
                 (5u << 16) | 131, f32, difference, inverse, s.inverse_radius,
-                (7u << 16) | 12, f32, s.result, glsl, 40, s.zero, difference,
+                (7u << 16) | 12, f32, matched, glsl, 40, s.zero, difference,
+                (5u << 16) | 136, f32, scale, energy, s.inverse_radius,
+                (5u << 16) | 133, f32, s.result, matched, scale,
             };
             patched.insert(patched.end(), std::begin(instructions), std::end(instructions));
             ++stats.standard;
         } else if (const auto site = special.find(i); site != special.end()) {
-            const uint32_t copy[] = {(4u << 16) | 83, f32, site->second.first, site->second.second};
-            patched.insert(patched.end(), std::begin(copy), std::end(copy));
+            const auto& s = site->second;
+            const uint32_t scale = next++;
+            const uint32_t instructions[] = {
+                (5u << 16) | 136, f32, scale, energy, s.inverse_radius,
+                (5u << 16) | 133, f32, s.result, s.native, scale,
+            };
+            patched.insert(patched.end(), std::begin(instructions), std::end(instructions));
             ++stats.special;
         } else {
             patched.insert(patched.end(), spv.begin() + i, spv.begin() + i + size);

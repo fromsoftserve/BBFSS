@@ -954,6 +954,16 @@ void DebugSection() {
             "точечных и прожекторных источников, включая блики. Радиус, отсечение, тени и туман ламп "
             "не меняются. Требуется перезапуск."));
     }
+    if (const char* label = Item("Local-light intensity", "Интенсивность локальных источников")) {
+        Slider(label, s.graphics_local_light_intensity, 0.0f, 4.0f, "%.2fx");
+        Hint(BbSettings::MenuText(
+            "1.00x by default. Matches the old and inverse-square falloff curves' integrated energy "
+            "over each point or spot light's radius, then applies this multiplier to diffuse and "
+            "specular lighting. Only used when inverse-square falloff is enabled. Requires restart.",
+            "По умолчанию 1.00x. Сравнивает полную энергию старой и обратноквадратичной кривых в "
+            "пределах радиуса каждого источника, затем применяет этот множитель к рассеянному свету "
+            "и бликам. Работает при включённом обратноквадратичном спаде. Требуется перезапуск."));
+    }
     if (const char* label = Item("Disable player lamp", "Отключить свет фонаря персонажа")) {
         Checkbox(label, s.graphics_disable_player_light);
         Hint(BbSettings::MenuText(
@@ -2401,6 +2411,7 @@ void Menu() {
         s.graphics_directional_ggx != s.startup_directional_ggx ||
         s.graphics_local_ggx != s.startup_local_ggx ||
         s.graphics_local_inverse_square != s.startup_local_inverse_square ||
+        s.graphics_local_light_intensity != s.startup_local_light_intensity ||
         s.graphics_disable_player_light != s.startup_disable_player_light ||
         s.graphics_specular_aa != s.startup_specular_aa ||
         s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||
