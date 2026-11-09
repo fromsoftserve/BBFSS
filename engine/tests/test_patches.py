@@ -576,7 +576,10 @@ class HeapPoolTests(unittest.TestCase):
                 'AppVer="01.09" AppElf="eboot.bin"><PatchList>'
                 '<Line Type="bytes32" Address="0x02196A6B" Value="0x000A00B8"/>'
                 '<Line Type="bytes" Address="0x04B36DDA" Value="00f7"/></PatchList></Metadata></Patch>')
-        (root / 'patches.json').write_text(json.dumps({'enabled': ['community.xml/Wide']}))
+        config = {'enabled': ['community.xml/Wide']}
+        if external is False:
+            config['disabled'] = ['Bloodborne.xml/' + patches.HEAP_PATCH]
+        (root / 'patches.json').write_text(json.dumps(config))
         (root / 'lantern.ini').write_text('')
         subprocess.run([sys.executable, str(ROOT / 'scripts/patches.py'), '--xml', str(root / 'xml/Bloodborne.xml'),
                         '--out', str(root / 'out'), '--fps', '30', '--settings', str(root / 'lantern.ini'),
@@ -589,6 +592,10 @@ class HeapPoolTests(unittest.TestCase):
             self.assertTrue(self.run_patches(directory, True))
         with tempfile.TemporaryDirectory() as directory:
             self.assertFalse(self.run_patches(directory, False))
+
+    def test_the_graphics_heap_patch_is_on_without_a_saved_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(self.run_patches(directory, None))
 
 
 class WidescreenUiTests(unittest.TestCase):
@@ -617,8 +624,12 @@ class BuiltInSelectionTests(unittest.TestCase):
                                                       'Bloodborne.xml/Disable DoF', 'Bloodborne.xml/Not a patch',
                                                       'other.xml/No Rally Decay'],
                                           'disabled': ['Bloodborne.xml/Increased camera distance']}))
-            self.assertEqual(patches.builtin_selection(xml, config), ['No Rally Decay'])
-            self.assertEqual(patches.builtin_selection(xml, None), [])
+            self.assertEqual(patches.builtin_selection(xml, config), ['No Rally Decay', patches.HEAP_PATCH])
+            self.assertEqual(patches.builtin_selection(xml, None), [patches.HEAP_PATCH])
+            config.write_text(json.dumps({'disabled': ['Bloodborne.xml/' + patches.HEAP_PATCH]}))
+            self.assertEqual(patches.builtin_selection(xml, config), [])
+            config.write_text(json.dumps({'enabled': ['Bloodborne.xml/' + patches.HEAP_PATCH]}))
+            self.assertEqual(patches.builtin_selection(xml, config), [patches.HEAP_PATCH])
         self.assertTrue(patches.managed_builtin('Resolution Patch 2560x1080 (21:9)'))
         self.assertTrue(patches.managed_builtin('Intel 12th Gen+ SFX workaround'))
         self.assertFalse(patches.managed_builtin('Unlock Game Region'))

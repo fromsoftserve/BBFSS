@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -85,8 +85,6 @@ namespace BloodborneLauncher
                     ws.Settings.Set("update_channel", "beta");
                     ws.SaveSoon();
                 }
-                if (ws.Settings.Bool("check_updates"))
-                    _ = CheckForUpdatesAtStartAsync();
                 await Task.Yield();
                 (_sidebarNav ? ClassicPlay : PlayItem).IsChecked = true;
                 UpdatePlayButton();
@@ -1022,26 +1020,6 @@ namespace BloodborneLauncher
             await InstallAsync(release, await Updater.NeedsPackageAsync(release));
         }
 
-        /// <summary>The check at start: an update found is offered, Download or Later (Later keeps the
-        /// Update button in the title bar; the next start asks again). Never over the game, a --play
-        /// start or another question.</summary>
-        private async Task CheckForUpdatesAtStartAsync()
-        {
-            var ws = Workspace.Current;
-            try
-            {
-                await ws.CheckForUpdatesAsync(quiet: true);
-                while (Application.Current.Windows.OfType<Prompt>().Any())
-                    await Task.Delay(500);
-                if (ws.Update is not { } release || ws.Game.Running || _directPlay) return;
-                await InstallAsync(release, await Updater.NeedsPackageAsync(release));
-            }
-            catch (Exception e)
-            {
-                ws.Log(L.T("Could not check for updates: ") + e.GetBaseException().Message, LogLevel.Warn);
-            }
-        }
-
         /// <summary>An older package's engine: download the latest package and update it in place.</summary>
         public async Task UpdateEngineAsync()
         {
@@ -1127,22 +1105,6 @@ namespace BloodborneLauncher
             {
                 await ws.StopGameAsync();
                 return;
-            }
-
-            // The launcher updated itself but the package kept an older engine: its crash fixes are
-            // missing (players reported crashes long fixed). Asked at each Play until it is updated.
-            if (Updater.EngineOutdated)
-            {
-                var choice = Prompt.Choose(L.T("Engine update needed"),
-                    L.F($"This launcher is {Updater.CurrentLabel}, but the engine in this folder is older ({Updater.LocalEngine() ?? "unknown"}): ") +
-                    L.T("the crash fixes since then are missing. Updating downloads the latest package and keeps your settings, saves and mods."),
-                    L.T("Cancel"), L.T("Play anyway"), L.T("Update engine"));
-                if (choice <= 0) return;
-                if (choice == 2)
-                {
-                    await UpdateEngineAsync();
-                    return;
-                }
             }
 
             var s = ws.Settings;

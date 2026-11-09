@@ -225,6 +225,7 @@ struct PushData {
     /// bbport: a vec4 after the block (offset 128), declared only by modules that use the tone
     /// curve extension (native/tone_curve.h, ToneCurvePush), pushed only for their pipelines.
     static constexpr u32 ToneCurveIndex = SceneSizeIndex + 1;
+    static constexpr u32 FroyokIndex = ToneCurveIndex + 1;
 
     float xoffset;
     float yoffset;

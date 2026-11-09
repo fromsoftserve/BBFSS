@@ -111,10 +111,12 @@ int main() {
     assert(s.graphics_directional_ggx && s.startup_directional_ggx);
     assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
     assert(s.graphics_local_light_intensity == 1.0f && s.startup_local_light_intensity == 1.0f);
+    assert(!s.graphics_uniform_local_light && !s.startup_uniform_local_light);
     assert(s.graphics_disable_player_light && s.startup_disable_player_light);
     assert(s.graphics_local_ggx && s.graphics_specular_aa && s.graphics_env_ggx_tails);
     assert(s.startup_local_ggx && s.startup_specular_aa && s.startup_env_ggx_tails);
-    assert(s.graphics_light_sharpness == 1.0f && s.startup_light_sharpness == 1.0f);
+    assert(s.graphics_light_sharpness == BbSettings::LightSharpnessMax &&
+           s.startup_light_sharpness == BbSettings::LightSharpnessMax);
     assert(s.graphics_dof_intensity == 1.0f && s.graphics_gi_reflection_strength == 1.0f);
     assert(s.graphics_gi_wet_ground == 0.5f && s.graphics_smooth_normals);
     s.graphics_smooth_normals = true;
@@ -128,6 +130,7 @@ int main() {
     s.graphics_directional_ggx = false;
     s.graphics_local_inverse_square = false;
     s.graphics_local_light_intensity = 2.5f;
+    s.graphics_uniform_local_light = true;
     s.graphics_disable_player_light = false;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = false;
     s.graphics_light_sharpness = 250.0f;
@@ -136,7 +139,7 @@ int main() {
     s.graphics_gi_wet_ground = 0.75f;
     s.graphics_gi_reflections_full_res = true;
     assert(s.startup_directional_ggx && s.startup_local_inverse_square && s.startup_disable_player_light);
-    assert(s.startup_local_light_intensity == 1.0f);
+    assert(s.startup_local_light_intensity == 1.0f && !s.startup_uniform_local_light);
     BbSettings::Save();
     {
         const std::string fork_keys = Read(path);
@@ -154,6 +157,7 @@ int main() {
         assert(fork_keys.find("graphics_directional_ggx=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_inverse_square=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_light_intensity=2.50\n") != std::string::npos);
+        assert(fork_keys.find("graphics_uniform_local_light=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_disable_player_light=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_ggx=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_specular_aa=0\n") != std::string::npos);
@@ -165,6 +169,7 @@ int main() {
     s.graphics_directional_ggx = true;
     s.graphics_local_inverse_square = true;
     s.graphics_local_light_intensity = 1.0f;
+    s.graphics_uniform_local_light = false;
     s.graphics_disable_player_light = true;
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = true;
     s.graphics_sun_vsm = false;
@@ -195,6 +200,9 @@ int main() {
     assert(s.graphics_local_light_intensity == 2.5f && s.startup_local_light_intensity == 2.5f);
     s.graphics_local_light_intensity = 1.0f;
     assert(s.startup_local_light_intensity == 2.5f);
+    assert(s.graphics_uniform_local_light && s.startup_uniform_local_light);
+    s.graphics_uniform_local_light = false;
+    assert(s.startup_uniform_local_light);
     assert(!s.graphics_disable_player_light && !s.startup_disable_player_light);
     s.graphics_disable_player_light = true;
     assert(!s.startup_disable_player_light);
@@ -344,6 +352,39 @@ int main() {
     { std::ofstream file(path); file << "graphics_gt7_exposure=nan\n"; }
     BbSettings::Load();
     assert(s.graphics_gt7_exposure == 1.0f);
+    assert(s.graphics_bloom_quality == BbSettings::BloomQualityOriginal &&
+           s.startup_bloom_quality == BbSettings::BloomQualityOriginal &&
+           s.graphics_froyok_bloom_blend == 0.1f &&
+           s.graphics_froyok_bloom_spread == BbSettings::FroyokSpreadDefault);
+    { std::ofstream file(path); file << "graphics_bloom_quality=froyok\n"
+                                        "graphics_froyok_bloom_blend=0.2\n"
+                                        "graphics_froyok_bloom_spread=0.7\n"; }
+    BbSettings::Load();
+    assert(s.graphics_bloom_quality == BbSettings::BloomQualityFroyok &&
+           s.startup_bloom_quality == BbSettings::BloomQualityFroyok &&
+           s.graphics_froyok_bloom_blend == 0.2f && s.graphics_froyok_bloom_spread == 0.7f);
+    BbSettings::Save();
+    assert(Read(path).find("graphics_bloom_quality=froyok\n") != std::string::npos);
+    assert(Read(path).find("graphics_froyok_bloom_blend=0.200\n") != std::string::npos);
+    assert(Read(path).find("graphics_froyok_bloom_spread=0.700\n") != std::string::npos);
+    { std::ofstream file(path); file << "graphics_bloom_quality=unknown\n"
+                                        "graphics_froyok_bloom_blend=nan\n"
+                                        "graphics_froyok_bloom_spread=nan\n"; }
+    BbSettings::Load();
+    assert(s.graphics_bloom_quality == BbSettings::BloomQualityOriginal &&
+           s.startup_bloom_quality == BbSettings::BloomQualityOriginal &&
+           s.graphics_froyok_bloom_blend == 0.1f &&
+           s.graphics_froyok_bloom_spread == BbSettings::FroyokSpreadDefault);
+    { std::ofstream file(path); file << "graphics_froyok_bloom_blend=-1\n"
+                                        "graphics_froyok_bloom_spread=2\n"; }
+    BbSettings::Load();
+    assert(s.graphics_froyok_bloom_blend == BbSettings::FroyokBlendMin &&
+           s.graphics_froyok_bloom_spread == BbSettings::FroyokSpreadDefault);
+    { std::ofstream file(path); file << "graphics_froyok_bloom_blend=1\n"
+                                        "graphics_froyok_bloom_spread=-1\n"; }
+    BbSettings::Load();
+    assert(s.graphics_froyok_bloom_blend == BbSettings::FroyokBlendMax &&
+           s.graphics_froyok_bloom_spread == BbSettings::FroyokSpreadMin);
     { std::ofstream file(path); file << "hdr_mode=native\n"; }
 #ifdef _WIN32
     _putenv_s("BB_HDR", "1");

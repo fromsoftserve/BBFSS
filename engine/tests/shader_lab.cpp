@@ -28,6 +28,7 @@
 #include "shader_recompiler/ir/abstract_syntax_list.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/native/capture.h"
+#include "shader_recompiler/native/froyok_composite.h"
 #include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/table_plan.h"
 #include "shader_recompiler/native/tone_curve.h"
@@ -1841,8 +1842,10 @@ int SeedCache(const fs::path& self, const fs::path& catalog, const fs::path& cac
 Profile CaptureProfile(const fs::path& file) {
     const auto bytes = ReadAll(file.parent_path() / "profile.bin");
     Profile profile{};
-    if (bytes.size() >= 4) {
-        std::memcpy(&profile, bytes.data() + 4, std::min<size_t>(bytes.size() - 4, sizeof(Profile)));
+    const size_t offset = bytes.size() == sizeof(Profile) + sizeof(u32) ? sizeof(u32) : 0;
+    if (bytes.size() >= offset) {
+        std::memcpy(&profile, bytes.data() + offset,
+                    std::min<size_t>(bytes.size() - offset, sizeof(Profile)));
     }
     profile.uniform_constant_buffers = g_native;
     profile.uniform_dword_layout = g_native;
@@ -2077,7 +2080,8 @@ constexpr u32 RampWidth = 4096;
 
 std::vector<u32> CompileComposite(const fs::path& file, bool extend, bool ramp,
                                   std::vector<Native::ToneCurveMatch>& matches, std::string& note,
-                                  bool gt7 = false, bool* gt7_applied = nullptr) {
+                                  bool gt7 = false, bool* gt7_applied = nullptr,
+                                  bool froyok = false, bool* froyok_applied = nullptr) {
     Profile profile = CaptureProfile(file);
     LoadedCapture cap;
     if (const char* error = cap.Load(file)) {
@@ -2090,13 +2094,25 @@ std::vector<u32> CompileComposite(const fs::path& file, bool extend, bool ramp,
     std::vector<IR::Inst*> channels;
     Native::tone_curve_lab_override = extend ? 1 : 0;
     Native::gt7_lab_override = gt7 ? 1 : 0;
+    Native::froyok_lab_override = froyok ? 1 : 0;
     Native::tone_curve_lab_channels = &channels;
     auto program = TranslateProgram(cap.code, pools, info, cap.Runtime(), profile);
     Native::tone_curve_lab_override = -1;
     Native::gt7_lab_override = -1;
+    Native::froyok_lab_override = -1;
     Native::tone_curve_lab_channels = nullptr;
     if (gt7_applied) {
         *gt7_applied = info.uses_tone_curve;
+    }
+    if (froyok_applied) {
+        Info tagged;
+        tagged.uses_froyok_bloom = info.uses_froyok_bloom;
+        Serialization::Archive archive;
+        tagged.Serialize(archive);
+        Serialization::Archive encoded{archive.TakeOff()};
+        Info restored;
+        *froyok_applied = info.uses_froyok_bloom && restored.Deserialize(encoded) &&
+                          restored.uses_froyok_bloom == info.uses_froyok_bloom;
     }
     matches = Native::FindToneCurves(program);
     if (ramp) {
@@ -2175,6 +2191,47 @@ int CurvesOne(const fs::path& file) {
                 matches.empty() ? 0u : matches[0].k_word,
                 matches.empty() ? 0u : matches[0].shoulder_word, game != extended ? 1u : 0u,
                 varies ? 1u : 0u, gt7 ? 1u : 0u, gt7_spirv != game ? 1u : 0u);
+    return 0;
+}
+
+int FroyokOne(const fs::path& file, const fs::path& out) {
+    std::vector<Native::ToneCurveMatch> matches;
+    std::string note;
+    const auto original = CompileComposite(file, false, false, matches, note);
+    if (original.empty() || !Native::IsComposite(matches)) {
+        std::printf("Froyok: original composite failed: %s\n", note.c_str());
+        return 1;
+    }
+    const struct {
+        const char* name;
+        bool extend;
+        bool gt7;
+    } variants[] = {{"froyok", false, false}, {"froyok-gt7-aces", false, true},
+                    {"froyok-hdr", true, false}};
+    for (const auto& variant : variants) {
+        bool applied = false, tone = false;
+        const auto words = CompileComposite(file, variant.extend, false, matches, note,
+                                            variant.gt7, &tone, true, &applied);
+        if (!applied || words.empty() || words == original ||
+            tone != (variant.extend || variant.gt7)) {
+            std::printf("Froyok: %s failed (applied=%u, tone=%u)\n", variant.name, applied, tone);
+            return 1;
+        }
+        if (!out.empty()) {
+            fs::create_directories(out);
+            std::ofstream file_out(out / (std::string(variant.name) + ".spv"), std::ios::binary);
+            file_out.write(reinterpret_cast<const char*>(words.data()),
+                           std::streamsize(words.size() * sizeof(u32)));
+        }
+        std::printf("Froyok: %s, %zu SPIR-V words\n", variant.name, words.size());
+    }
+    bool applied = true;
+    const auto unchanged = CompileComposite(file, false, false, matches, note, false, nullptr,
+                                            false, &applied);
+    if (applied || unchanged != original) {
+        std::printf("Froyok: Original Bloom changed\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -3006,6 +3063,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc >= 3 && std::strcmp(argv[1], "--curves-one") == 0) {
         return CurvesOne(argv[2]);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--froyok-one") == 0) {
+        return FroyokOne(argv[2], argc >= 4 ? fs::path(argv[3]) : fs::path{});
     }
     if (argc >= 4 && std::strcmp(argv[1], "--ramp-modules") == 0) {
         return RampModules(argv[2], argv[3]);

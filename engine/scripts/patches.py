@@ -603,16 +603,24 @@ def managed_builtin(name):
 
 
 def builtin_selection(xml, config):
-    """The built-in patches switched on in the launcher's Mods page: patches.json keys
-    "Bloodborne.xml/<name>" in "enabled" (built-in ones start off, whatever the file says)."""
+    """Built-in patches explicitly enabled in patches.json, plus their XML defaults unless disabled."""
     try:
-        enabled=json.loads(Path(config).read_text()).get('enabled',[]) if config and Path(config).is_file() else []
+        settings=json.loads(Path(config).read_text()) if config and Path(config).is_file() else {}
+        enabled=settings.get('enabled',[])
+        disabled=set(settings.get('disabled',[]))
     except (OSError, ValueError):
         return []
     prefix=Path(xml).name+'/'
-    known={meta.get('Name') for meta in ET.parse(xml).getroot().iter('Metadata')}
-    return [k[len(prefix):] for k in enabled if k.startswith(prefix) and k[len(prefix):] in known
-            and not managed_builtin(k[len(prefix):])]
+    metadata=list(ET.parse(xml).getroot().iter('Metadata'))
+    known={meta.get('Name') for meta in metadata}
+    out=[k[len(prefix):] for k in enabled if k.startswith(prefix) and k[len(prefix):] in known
+         and (not managed_builtin(k[len(prefix):]) or k[len(prefix):]==HEAP_PATCH)]
+    for meta in metadata:
+        name=meta.get('Name')
+        if (meta.get('isEnabled','false').lower()=='true' and name not in out and prefix+name not in disabled
+                and (not managed_builtin(name) or name==HEAP_PATCH)):
+            out.append(name)
+    return out
 
 
 def placeable(xml, name, app_version, segments):

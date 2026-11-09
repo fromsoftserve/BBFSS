@@ -12,6 +12,9 @@
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 #include "video_core/host_shaders/bloom_downsample_frag.h"
+#include "video_core/host_shaders/froyok_bloom_downsample_comp.h"
+#include "video_core/host_shaders/froyok_bloom_first_comp.h"
+#include "video_core/host_shaders/froyok_bloom_upsample_comp.h"
 #include "video_core/host_shaders/contact_shadow_comp.h"
 #include "video_core/host_shaders/gtao_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
@@ -105,6 +108,12 @@ int main() {
 
     using enum vk::DescriptorType;
     const std::vector<Pass> passes = {
+        {"froyok downsample", FROYOK_BLOOM_DOWNSAMPLE_COMP,
+         {eCombinedImageSampler, eCombinedImageSampler, eStorageImage}, 32},
+        {"froyok first downsample", FROYOK_BLOOM_FIRST_COMP,
+         {eCombinedImageSampler, eCombinedImageSampler, eStorageImage}, 32},
+        {"froyok upsample", FROYOK_BLOOM_UPSAMPLE_COMP,
+         {eCombinedImageSampler, eCombinedImageSampler, eStorageImage}, 32},
         {"ssgi prep", SSGI_PREP_COMP, {eSampledImage, eStorageImage, eSampledImage}, 128},
         {"ssgi gather",
          SSGI_GATHER_COMP,

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "shader_recompiler/native/froyok_composite.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
@@ -50,6 +51,13 @@ static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribu
 Id EmitToneCurveParam(EmitContext& ctx, u32 index) {
     const Id pointer{ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
                                        ctx.push_data_block, ctx.ConstU32(PushData::ToneCurveIndex),
+                                       ctx.ConstU32(index & 3))};
+    return ctx.OpLoad(ctx.F32[1], pointer);
+}
+
+Id EmitFroyokParam(EmitContext& ctx, u32 index) {
+    const Id pointer{ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
+                                       ctx.push_data_block, ctx.ConstU32(PushData::FroyokIndex),
                                        ctx.ConstU32(index & 3))};
     return ctx.OpLoad(ctx.F32[1], pointer);
 }

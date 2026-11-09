@@ -48,6 +48,7 @@ void EmitWorkgroupMemoryBarrier(EmitContext& ctx);
 void EmitDeviceMemoryBarrier(EmitContext& ctx);
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg);
 Id EmitToneCurveParam(EmitContext& ctx, u32 index);
+Id EmitFroyokParam(EmitContext& ctx, u32 index);
 void EmitGetThreadBitScalarReg(EmitContext& ctx);
 void EmitSetThreadBitScalarReg(EmitContext& ctx);
 void EmitGetScalarRegister(EmitContext& ctx);

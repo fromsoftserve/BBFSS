@@ -792,6 +792,42 @@ void PictureSection() {
                                       "тона как в игре."));
         }
     }
+    if (const char* label = Item("Bloom Quality", "Качество свечения")) {
+        const char* names[] = {BbSettings::MenuText("Original Bloom", "Оригинальное свечение"),
+                               BbSettings::MenuText("Froyok Bloom", "Froyok Bloom")};
+        int mode = std::clamp(s.graphics_bloom_quality.load(), 0, BbSettings::BloomQualityCount - 1);
+        const bool changed = ImGui::Combo(label, &mode, names, BbSettings::BloomQualityCount);
+        Store(s.graphics_bloom_quality, mode, changed);
+        Hint(BbSettings::MenuText(
+            "Froyok Bloom uses its own HDR downsample/upsample filters and final composite, leaving "
+            "Original Bloom unchanged. Changing quality requires restart; the sliders below are live.",
+            "Froyok Bloom использует собственные фильтры HDR и финальное смешивание, не меняя "
+            "оригинальное свечение. Смена качества требует перезапуска; ползунки ниже работают сразу."));
+        if (s.graphics_bloom_quality != s.startup_bloom_quality) {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
+                                                           "Применяется после перезапуска игры."));
+        }
+    }
+    if (s.startup_bloom_quality == BbSettings::BloomQualityFroyok || Searching()) {
+        if (const char* label = Item("Froyok final bloom blend", "Финальное смешивание Froyok")) {
+            Slider(label, s.graphics_froyok_bloom_blend, BbSettings::FroyokBlendMin,
+                   BbSettings::FroyokBlendMax, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            Hint(BbSettings::MenuText(
+                "Live. mix(scene, bloom, blend) before the selected tonemapper; energy-preserving, "
+                "0.1 to 0.3. The original Bloom strength slider does not apply to Froyok Bloom.",
+                "Работает сразу. mix(scene, bloom, blend) перед выбранным тонмаппером; с сохранением "
+                "энергии, от 0.1 до 0.3. Обычная сила свечения не действует на Froyok Bloom."));
+        }
+        if (const char* label = Item("Froyok internal bloom spread", "Внутренний разброс Froyok")) {
+            Slider(label, s.graphics_froyok_bloom_spread, BbSettings::FroyokSpreadMin,
+                   BbSettings::FroyokSpreadDefault, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+            Hint(BbSettings::MenuText(
+                "Live, default 0.85. The tent-filtered lower-resolution contribution at each "
+                "upsample step; 0.5 narrows the glow, 0.85 gives the widest spread.",
+                "Работает сразу, по умолчанию 0.85. Доля фильтрованного уровня меньшего разрешения "
+                "при каждом повышении; 0.5 сужает свечение, 0.85 даёт максимальный разброс."));
+        }
+    }
     const bool live = BbEngine::Graphics::Enabled();
     if (!live && WholeSection() && Shown("Picture", "Изображение")) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("Unavailable: the game's code differs from version 1.09.",
@@ -964,6 +1000,16 @@ void DebugSection() {
             "пределах радиуса каждого источника, затем применяет этот множитель к рассеянному свету "
             "и бликам. Работает при включённом обратноквадратичном спаде. Требуется перезапуск."));
     }
+    if (const char* label = Item("Uniform diffuse/specular light color",
+                                "Единый цвет рассеянного света и бликов")) {
+        Checkbox(label, s.graphics_uniform_local_light);
+        Hint(BbSettings::MenuText(
+            "Off by default. For each point/spot light, compares diffuse and specular RGB by "
+            "luminance and copies the brighter complete color to both. Requires restart.",
+            "По умолчанию выключено. Для каждого точечного или прожекторного источника сравнивает "
+            "яркость RGB рассеянного света и бликов и копирует более яркий цвет целиком в оба. "
+            "Требуется перезапуск."));
+    }
     if (const char* label = Item("Disable player lamp", "Отключить свет фонаря персонажа")) {
         Checkbox(label, s.graphics_disable_player_light);
         Hint(BbSettings::MenuText(
@@ -999,10 +1045,10 @@ void DebugSection() {
                removed ? BbSettings::MenuText("Unlimited", "Без ограничения") : "%.1fx",
                ImGuiSliderFlags_Logarithmic);
         Hint(BbSettings::MenuText(
-            "1x by default (original). The game caps how tight sun and lamp highlights can get on "
+            "Unlimited by default. The game caps how tight sun and lamp highlights can get on "
             "glossy surfaces; the sun is capped hardest. Higher values let glossy highlights become "
             "smaller and brighter; the maximum removes the cap. Requires restart.",
-            "По умолчанию 1x (оригинал). Игра ограничивает, насколько узкими могут быть блики от "
+            "По умолчанию без ограничения. Игра ограничивает, насколько узкими могут быть блики от "
             "солнца и ламп на глянцевых поверхностях. Большие значения делают блики меньше и ярче; "
             "максимум снимает ограничение. Требуется перезапуск."));
     }
@@ -2408,10 +2454,12 @@ void Menu() {
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+        s.graphics_bloom_quality != s.startup_bloom_quality ||
         s.graphics_directional_ggx != s.startup_directional_ggx ||
         s.graphics_local_ggx != s.startup_local_ggx ||
         s.graphics_local_inverse_square != s.startup_local_inverse_square ||
         s.graphics_local_light_intensity != s.startup_local_light_intensity ||
+        s.graphics_uniform_local_light != s.startup_uniform_local_light ||
         s.graphics_disable_player_light != s.startup_disable_player_light ||
         s.graphics_specular_aa != s.startup_specular_aa ||
         s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||

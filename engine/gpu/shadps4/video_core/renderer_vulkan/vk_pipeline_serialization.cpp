@@ -18,6 +18,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/native/froyok_composite.h"
 #include "shader_recompiler/native/gt7_tonemap.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -435,6 +436,10 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
         Shader::Native::IsKnownComposite(program->info.pgm_hash)) {
         return false;
     }
+    if (program->info.pgm_hash == Shader::Native::FroyokCompositeHash &&
+        program->info.uses_froyok_bloom != Shader::Native::FroyokCompositeEnabled()) {
+        return false;
+    }
 
     std::vector<u32> spv;
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
@@ -818,6 +823,8 @@ namespace Shader {
 static constexpr u32 ToneCurveTag = 0x31584354;
 // "GT73": a composite compiled with uniform-branched GT7 and ACES tone maps (applied or not).
 static constexpr u32 Gt7CheckedTag = 0x33375447;
+// "FRY1": the Froyok composite, whose startup selection differs from the original shader.
+static constexpr u32 FroyokTag = 0x31525946;
 
 void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};
@@ -835,6 +842,10 @@ void Info::Serialize(Serialization::Archive& ar) const {
         Serialization::Writer tail{ar};
         tail.Write(Gt7CheckedTag);
     }
+    if (uses_froyok_bloom) {
+        Serialization::Writer tail{ar};
+        tail.Write(FroyokTag);
+    }
 }
 
 bool Info::Deserialize(Serialization::Archive& ar) {
@@ -851,6 +862,7 @@ bool Info::Deserialize(Serialization::Archive& ar) {
     table_plan = {};
     uses_tone_curve = false;
     gt7_checked = false;
+    uses_froyok_bloom = false;
     while (!ar.IsEoS()) {
         // bbport: zero bytes to the end are room the writer left after a vertex shader's fetch
         // shader data (up to 0.9.37 beta 5): not a part. Taken for one, they left every such shader
@@ -870,6 +882,9 @@ bool Info::Deserialize(Serialization::Archive& ar) {
         } else if (tag == Gt7CheckedTag) {
             ar.Advance(sizeof(tag));
             gt7_checked = true;
+        } else if (tag == FroyokTag) {
+            ar.Advance(sizeof(tag));
+            uses_froyok_bloom = true;
         } else if (!table_plan.Deserialize(ar)) {
             return false;
         }

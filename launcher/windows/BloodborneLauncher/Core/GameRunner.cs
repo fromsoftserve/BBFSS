@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 
@@ -98,6 +98,16 @@ namespace BloodborneLauncher.Core
             info.WorkingDirectory = Paths.IsPortDir(Paths.PortDir) ? Paths.EngineDir : Environment.CurrentDirectory;
             foreach (var (key, value) in GameEnvironment.Build(s))
                 info.Environment[key] = value;
+            if (!Custom(s) && Paths.SourceRoot != null)
+            {
+                var msys = Environment.GetEnvironmentVariable("BB_MSYS2") is { Length: > 0 } root ? root : @"C:\msys64";
+                var runtime = Path.Combine(msys, "clang64", "bin");
+                if (Directory.Exists(runtime))
+                {
+                    info.Environment.TryGetValue("PATH", out var path);
+                    info.Environment["PATH"] = runtime + Path.PathSeparator + path;
+                }
+            }
             info.Environment["PYTHONUNBUFFERED"] = "1";
             // UTF-8 whatever the Windows language: the game title (param.sfo) has a ™ that GBK and other
             // code pages cannot write.

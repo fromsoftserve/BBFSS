@@ -101,6 +101,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     sky_zenith = std::make_unique<SkyZenith>(instance, scheduler);
     depth_of_field = std::make_unique<DepthOfField>(instance, scheduler, texture_cache,
                                                     runtime, *scene_targets);
+    froyok_bloom = std::make_unique<FroyokBloom>(instance, scheduler, texture_cache, runtime,
+                                                 *scene_targets);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets, *hdr_native);
     if (!EmulatorSettings.IsNullGPU()) {
@@ -2535,8 +2537,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             GetDrawOffsets(regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
         EffectsBeforeBind(regs, pipeline, is_indexed, index_offset, effect_first_vertex);
     }
+    const auto* fragment = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const float froyok_blend = fragment ? froyok_bloom->Composite(*fragment, image_infos) : 0.0f;
     pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
-                            {buffer_infos.data(), buffer_infos.size()});
+                            {buffer_infos.data(), buffer_infos.size()}, froyok_blend);
     if (capture_draw) {
         rt_shadow->BindAddresses(pipeline->GetLayout(), pipeline->GetGraphicsKey().motion_vectors);
     } else if (motion_draw) {

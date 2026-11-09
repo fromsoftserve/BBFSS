@@ -13,6 +13,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "bbport_settings.h"
+#include "shader_recompiler/native/froyok_composite.h"
 #include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/resource.h"
@@ -151,7 +152,8 @@ Shader::Native::ToneCurvePush ToneCurveParams() {
 
 void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
                              std::span<const vk::DescriptorImageInfo> image_infos,
-                             std::span<const vk::DescriptorBufferInfo> buffer_infos) const {
+                             std::span<const vk::DescriptorBufferInfo> buffer_infos,
+                             float froyok_blend) const {
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
@@ -175,6 +177,13 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
         scheduler.Record([layout, stage_flags, tone](vk::CommandBuffer cmdbuf) {
             cmdbuf.pushConstants(layout, stage_flags, Shader::Native::ToneCurvePushOffset,
                                  sizeof(tone), &tone);
+        });
+    }
+    if (uses_froyok_bloom) {
+        const Shader::Native::FroyokPush bloom{.blend = froyok_blend, .unused = {}};
+        scheduler.Record([layout, stage_flags, bloom](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, stage_flags, Shader::Native::FroyokPushOffset,
+                                 sizeof(bloom), &bloom);
         });
     }
 

@@ -226,7 +226,7 @@ namespace BloodborneLauncher.Core
             var builtIn = Path.GetFullPath(Path.Combine(Paths.EngineDir, "patches", "Bloodborne.xml"));
             var footprint = ResolutionFootprint();
             // The built-in file first (it lives in the package's patches folder; updates replace it):
-            // its optional patches, off until switched on here.
+            // its optional patches use their XML defaults and the player's saved choices.
             // A copy of Bloodborne.xml in another patches folder (an older package's) is never listed: it would
             // apply its frame-rate patches over the port's own (scripts/patches.py does the same).
             var files = (Directory.Exists(directory) ? Directory.GetFiles(directory, "*.xml").Concat(Directory.GetFiles(directory, "*.toml")) : Array.Empty<string>()).Where(p => !string.Equals(Path.GetFileName(p), Path.GetFileName(builtIn), StringComparison.OrdinalIgnoreCase));

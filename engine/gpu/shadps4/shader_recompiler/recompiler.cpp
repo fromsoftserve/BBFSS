@@ -10,6 +10,7 @@
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/native/froyok_composite.h"
 #include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/table_plan.h"
 #include "shader_recompiler/native/tone_curve.h"
@@ -172,6 +173,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     if (info.sw_stage == SwStage::Fragment && profile.needs_integer_interpolation_fix) {
         Shader::Optimization::InterpolatedIntegerPass(program);
     }
+    Native::ApplyFroyokComposite(program);
     // bbport: the composite's tone curve for HDR (native/tone_curve.h), off by default.
     if (Native::ToneCurveEnabled()) {
         Native::ExtendToneCurve(program);

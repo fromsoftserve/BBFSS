@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_ggx_lobes.h"
 #include "video_core/renderer_vulkan/vk_ggx_patch.h"
 #include "video_core/renderer_vulkan/vk_local_falloff.h"
+#include "video_core/renderer_vulkan/vk_local_light_unify.h"
 #include "video_core/renderer_vulkan/vk_pom_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_ssr_composite_patch.h"
@@ -138,7 +139,8 @@ std::span<const u32> Replacement(const Shader::Info& info, const Shader::Profile
             return NATIVE_MOTION_BLUR_FRAG;
         }
         Declined("Motion blur quality", info, profile, start);
-    } else if (info.pgm_hash == BloomDownsampleHash) {
+    } else if (info.pgm_hash == BloomDownsampleHash &&
+               BbSettings::Get().startup_bloom_quality == BbSettings::BloomQualityOriginal) {
         if (Fits(info, profile, start, 1, 1, 1)) {
             static std::atomic<bool> active{false};
             if (!active.exchange(true, std::memory_order_relaxed)) {
@@ -193,6 +195,8 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         std::vector<u32> patched(spv.begin(), spv.end());
         Pom::PatchPom(info.pgm_hash, true, patched);
         if (patched.size() != spv.size()) {
+            LocalLightUnify::Patch(patched, info.pgm_hash,
+                                   BbSettings::Get().startup_uniform_local_light);
             LocalFalloff::Patch(patched, info.pgm_hash,
                                 BbSettings::Get().startup_local_inverse_square,
                                 BbSettings::Get().startup_local_light_intensity);
@@ -202,12 +206,15 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
         }
     }
     std::vector<u32> lobes(spv.begin(), spv.end());
+    const bool unified = LocalLightUnify::Patch(lobes, info.pgm_hash,
+                                                BbSettings::Get().startup_uniform_local_light)
+                             .Changed();
     const bool falloff = LocalFalloff::Patch(lobes, info.pgm_hash,
                                              BbSettings::Get().startup_local_inverse_square,
                                              BbSettings::Get().startup_local_light_intensity)
                              .Changed();
     const bool lobed = PatchLobes(lobes);
-    if (PatchSharpness(lobes) || lobed || falloff) {
+    if (PatchSharpness(lobes) || lobed || falloff || unified) {
         return lobes;
     }
     return std::nullopt;

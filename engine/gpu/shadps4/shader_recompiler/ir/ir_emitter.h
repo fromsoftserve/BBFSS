@@ -49,6 +49,7 @@ public:
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
     /// bbport: a parameter of the tone curve extension (native/tone_curve.h, ToneCurvePush).
     [[nodiscard]] F32 ToneCurveParam(u32 index);
+    [[nodiscard]] F32 FroyokParam(u32 index);
 
     template <typename T = U32>
     [[nodiscard]] T GetScalarReg(IR::ScalarReg reg);

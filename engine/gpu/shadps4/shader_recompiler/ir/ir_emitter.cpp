@@ -118,6 +118,10 @@ F32 IREmitter::ToneCurveParam(u32 index) {
     return Inst<F32>(Opcode::ToneCurveParam, Imm32(index));
 }
 
+F32 IREmitter::FroyokParam(u32 index) {
+    return Inst<F32>(Opcode::FroyokParam, Imm32(index));
+}
+
 U32 IREmitter::GetUserData(IR::ScalarReg reg) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
     return Inst<U32>(Opcode::GetUserData, reg);

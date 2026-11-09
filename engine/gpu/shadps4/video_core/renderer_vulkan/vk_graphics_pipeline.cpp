@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include "shader_recompiler/native/froyok_composite.h"
 #include "shader_recompiler/native/tone_curve.h"
 #include <condition_variable>
 #include <cstdlib>
@@ -161,12 +162,17 @@ GraphicsPipeline::GraphicsPipeline(
     uses_tone_curve = std::ranges::any_of(stages, [](const Shader::Info* info) {
         return info && info->uses_tone_curve;
     });
+    uses_froyok_bloom = std::ranges::any_of(stages, [](const Shader::Info* info) {
+        return info && info->uses_froyok_bloom;
+    });
     const vk::PushConstantRange push_constants = {
         .stageFlags = AllGraphicsStageBits,
         .offset = 0,
-        .size = u32(uses_tone_curve ? Shader::Native::ToneCurvePushOffset +
-                                          sizeof(Shader::Native::ToneCurvePush)
-                                    : sizeof(Shader::PushData)),
+        .size = u32(uses_froyok_bloom ? Shader::Native::FroyokPushOffset +
+                                           sizeof(Shader::Native::FroyokPush)
+                                     : uses_tone_curve ? Shader::Native::ToneCurvePushOffset +
+                                                             sizeof(Shader::Native::ToneCurvePush)
+                                                       : sizeof(Shader::PushData)),
     };
 
     std::array<vk::DescriptorSetLayout, 2> set_layouts{*desc_layout, {}};

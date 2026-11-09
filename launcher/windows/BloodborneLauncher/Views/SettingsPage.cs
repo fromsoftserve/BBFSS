@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -299,7 +299,6 @@ namespace BloodborneLauncher.Views
                     Ws.Log(v == "beta" ? L.T("Update channel: beta.") : L.T("Update channel: stable."), LogLevel.Step);
                     _ = Ws.CheckForUpdatesAsync(quiet: false);
                 });
-            SettingToggle(SymbolRegular.Alert24, L.T("Check for updates at start"), L.F($"Looks at github.com/{Updater.Repository}/releases"), "check_updates");
             _installVersion = SmallButton(L.T("Install"), SymbolRegular.ArrowDownload24, async (_, _) => await InstallChosenVersionAsync());
             _installVersion.IsEnabled = false;
             ComboSearch.Attach(_versions);

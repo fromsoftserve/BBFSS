@@ -119,7 +119,8 @@ public:
     /// descriptors are then copied for the recording thread in one piece each).
     void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
                        std::span<const vk::DescriptorImageInfo> image_infos = {},
-                       std::span<const vk::DescriptorBufferInfo> buffer_infos = {}) const;
+                       std::span<const vk::DescriptorBufferInfo> buffer_infos = {},
+                       float froyok_blend = 0.0f) const;
 
 protected:
     [[nodiscard]] std::string GetDebugString() const;
@@ -142,6 +143,7 @@ protected:
     bool uses_push_descriptors{};
     /// bbport: the fragment shader reads Shader::Native::ToneCurvePush after the push data.
     bool uses_tone_curve{};
+    bool uses_froyok_bloom{};
     bool is_compute;
 };
 

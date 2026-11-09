@@ -151,6 +151,8 @@ struct Info : InfoPersistent {
     /// (native/gt7_tonemap.h), applied or not. Kept in the cache record's tail; records without its
     /// current tag compile again.
     bool gt7_checked{};
+    /// The Froyok composite (native/froyok_composite.h) is selected at startup. Cache-tagged.
+    bool uses_froyok_bloom{};
     bool uses_shader_clock{};
     bool uses_group_quad{};
     bool uses_group_shuffle{};

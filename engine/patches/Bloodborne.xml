@@ -252,7 +252,7 @@
             <Line Type="bytes" Address="0x0216fc09" Value="b90200000090"/>
         </PatchList>
     </Metadata>
-    <Metadata Title="Bloodborne" Name="Increased Graphics Heap Sizes" Note="The game's two graphics heaps at 3952 and 2560 MiB instead of 2287 and 886, for scenes above 1080p. Needs the larger memory pool." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+    <Metadata Title="Bloodborne" Name="Increased Graphics Heap Sizes" Note="The game's two graphics heaps at 3952 and 2560 MiB instead of 2287 and 886, for scenes above 1080p. Needs the larger memory pool." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="true">
         <PatchList>
             <Line Type="bytes" Address="0x04b36dd8" Value="000000f700000000"/>
             <Line Type="bytes" Address="0x04b36de0" Value="000000a000000000"/>

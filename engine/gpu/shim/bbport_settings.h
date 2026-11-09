@@ -105,6 +105,11 @@ enum Tonemapper : int { TonemapperOriginal = 0, TonemapperGt7 = 1, TonemapperAce
 inline constexpr const char* TonemapperNames[] = {"original", "gt7", "aces"};
 static_assert(sizeof(TonemapperNames) / sizeof(TonemapperNames[0]) == TonemapperCount);
 inline constexpr float Gt7ExposureMin = 0.25f, Gt7ExposureMax = 4.0f;
+enum BloomQuality : int { BloomQualityOriginal = 0, BloomQualityFroyok = 1, BloomQualityCount };
+inline constexpr const char* BloomQualityNames[] = {"original", "froyok"};
+static_assert(sizeof(BloomQualityNames) / sizeof(BloomQualityNames[0]) == BloomQualityCount);
+inline constexpr float FroyokBlendMin = 0.1f, FroyokBlendMax = 0.3f;
+inline constexpr float FroyokSpreadMin = 0.5f, FroyokSpreadDefault = 0.85f;
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
 inline constexpr int DlssPresetAuto = -1, DlssPresetL = 12, DlssPresetM = 13;
@@ -199,16 +204,20 @@ struct Values {
     std::atomic<bool> graphics_directional_ggx{true};
     std::atomic<bool> graphics_local_inverse_square{true};
     std::atomic<float> graphics_local_light_intensity{1.0f};
+    std::atomic<bool> graphics_uniform_local_light{false};
     std::atomic<bool> graphics_disable_player_light{true};
     // Game-shader specular upgrades applied at shader compile time (restart required).
     std::atomic<bool> graphics_local_ggx{true}, graphics_specular_aa{true}, graphics_env_ggx_tails{true};
     // Multiplies each light's specular sharpness limit; LightSharpnessMax removes the limit.
-    std::atomic<float> graphics_light_sharpness{1.0f};
+    std::atomic<float> graphics_light_sharpness{LightSharpnessMax};
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
     std::atomic<int> graphics_tonemapper{TonemapperOriginal};
     std::atomic<float> graphics_gt7_exposure{1.0f};
+    std::atomic<int> graphics_bloom_quality{BloomQualityOriginal};
+    std::atomic<float> graphics_froyok_bloom_blend{0.1f};
+    std::atomic<float> graphics_froyok_bloom_spread{FroyokSpreadDefault};
     std::atomic<float> graphics_point_fog_glow_size{0.08f}; // Lamp fog inverse-square core / radius, 0.03-0.20.
     std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};
     std::atomic<int> graphics_ao_quality{0}; // 0 regular GTAO, 1 high (full-res bitmask GTAO)
@@ -259,9 +268,10 @@ struct Values {
     bool startup_directional_ggx = true;
     bool startup_local_inverse_square = true;
     float startup_local_light_intensity = 1.0f;
+    bool startup_uniform_local_light = false;
     bool startup_disable_player_light = true;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
-    float startup_light_sharpness = 1.0f;
+    float startup_light_sharpness = LightSharpnessMax;
     int startup_ao_quality = 0;
     int startup_shadow_resolution = 0;
     int startup_local_shadow_resolution = 0;
@@ -269,6 +279,7 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
+    int startup_bloom_quality = BloomQualityOriginal;
     bool startup_hdr = false;
 };
 

@@ -83,7 +83,8 @@ bool AnyWanted() {
             return true;
         }
     }
-    return EffectShaders::GtaoActive() || EffectShaders::SsrActive();
+    return s.startup_bloom_quality == BbSettings::BloomQualityFroyok ||
+           EffectShaders::GtaoActive() || EffectShaders::SsrActive();
 }
 }
 
@@ -92,6 +93,7 @@ void Rasterizer::EffectsOnFrameEnd() {
     if (!effects_wanted) {
         point_shadow->Drop();
     }
+    froyok_bloom->OnFrameEnd();
     point_shadow->OnFrameEnd();
     rt_shadow->OnFrameEnd();
     ssgi->OnFrameEnd();
@@ -505,6 +507,13 @@ void Rasterizer::EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeli
     }
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const u64 hash = ps_info->pgm_hash;
+    if (hash == 0x9e1cb278) {
+        if (cb_descs[0].first && vs_info.pgm_hash == 0xd3ca03f3 && ps_info->images.size() == 2 &&
+            image_infos.size() >= 2) {
+            froyok_bloom->Generate(cb_descs[0].first);
+        }
+        return;
+    }
     if (hash == ShadowResolveHash && cb_descs[0].first && buffer_infos.size() >= 2 &&
         image_infos.size() >= 2) {
         volumetric_light->Integrate(cb_descs[0].first, image_infos[0],

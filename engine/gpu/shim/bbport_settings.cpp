@@ -312,6 +312,20 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                         value.c_str());
         }
         v.graphics_tonemapper=mode<0?TonemapperOriginal:mode;
+    } else if (key == "graphics_bloom_quality") {
+        int mode=-1;
+        for (int m=0;m<BloomQualityCount;++m) {
+            if (value==BloomQualityNames[m]) mode=m;
+        }
+        if (mode<0) {
+            std::printf("Settings: unknown graphics_bloom_quality '%s' (expected original or froyok); original\n",
+                        value.c_str());
+        }
+        v.graphics_bloom_quality=mode<0?BloomQualityOriginal:mode;
+    } else if (key == "graphics_froyok_bloom_blend") {
+        v.graphics_froyok_bloom_blend=Clamp(std::isfinite(f)?f:0.1f,FroyokBlendMin,FroyokBlendMax);
+    } else if (key == "graphics_froyok_bloom_spread") {
+        v.graphics_froyok_bloom_spread=Clamp(std::isfinite(f)?f:FroyokSpreadDefault,FroyokSpreadMin,FroyokSpreadDefault);
     } else if (key == "graphics_volumetric_intensity") {
         v.graphics_volumetric_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_point_fog_intensity") {
@@ -350,6 +364,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_local_inverse_square=i!=0;
     } else if (key == "graphics_local_light_intensity") {
         v.graphics_local_light_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,4.0f);
+    } else if (key == "graphics_uniform_local_light") {
+        v.graphics_uniform_local_light=i!=0;
     } else if (key == "graphics_disable_player_light") {
         v.graphics_disable_player_light=i!=0;
     } else if (key == "graphics_specular_aa") {
@@ -357,7 +373,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_env_ggx_tails") {
         v.graphics_env_ggx_tails=i!=0;
     } else if (key == "graphics_light_sharpness") {
-        v.graphics_light_sharpness=Clamp(std::isfinite(f)?f:1.0f,1.0f,LightSharpnessMax);
+        v.graphics_light_sharpness=Clamp(std::isfinite(f)?f:LightSharpnessMax,1.0f,LightSharpnessMax);
     } else if (key == "graphics_dof_intensity") {
         v.graphics_dof_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_shadow_resolution") {
@@ -610,10 +626,12 @@ void Load() {
     v.startup_frame_gen = v.frame_gen;
     v.startup_upscaler = v.upscaler;
     v.startup_motion_blur_quality = v.graphics_motion_blur_quality;
+    v.startup_bloom_quality = v.graphics_bloom_quality;
     v.startup_directional_ggx = v.graphics_directional_ggx;
     v.startup_local_ggx = v.graphics_local_ggx;
     v.startup_local_inverse_square = v.graphics_local_inverse_square;
     v.startup_local_light_intensity = v.graphics_local_light_intensity;
+    v.startup_uniform_local_light = v.graphics_uniform_local_light;
     v.startup_disable_player_light = v.graphics_disable_player_light;
     v.startup_specular_aa = v.graphics_specular_aa;
     v.startup_env_ggx_tails = v.graphics_env_ggx_tails;
@@ -786,6 +804,9 @@ void Save() {
     put("graphics_gi_strength",fixed(v.graphics_gi_strength,2));
     put("graphics_tonemapper",TonemapperNames[std::clamp(v.graphics_tonemapper.load(),0,TonemapperCount-1)]);
     put("graphics_gt7_exposure",fixed(v.graphics_gt7_exposure,2));
+    put("graphics_bloom_quality",BloomQualityNames[std::clamp(v.graphics_bloom_quality.load(),0,BloomQualityCount-1)]);
+    put("graphics_froyok_bloom_blend",fixed(v.graphics_froyok_bloom_blend,3));
+    put("graphics_froyok_bloom_spread",fixed(v.graphics_froyok_bloom_spread,3));
     put("graphics_volumetric_intensity",fixed(v.graphics_volumetric_intensity,2));
     put("graphics_point_fog_intensity",fixed(v.graphics_point_fog_intensity,2));
     put("graphics_point_fog_glow_size",fixed(v.graphics_point_fog_glow_size,3));
@@ -805,6 +826,7 @@ void Save() {
     put("graphics_local_ggx",flag(v.graphics_local_ggx));
     put("graphics_local_inverse_square",flag(v.graphics_local_inverse_square));
     put("graphics_local_light_intensity",fixed(v.graphics_local_light_intensity,2));
+    put("graphics_uniform_local_light",flag(v.graphics_uniform_local_light));
     put("graphics_disable_player_light",flag(v.graphics_disable_player_light));
     put("graphics_specular_aa",flag(v.graphics_specular_aa));
     put("graphics_env_ggx_tails",flag(v.graphics_env_ggx_tails));

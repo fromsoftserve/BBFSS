@@ -472,24 +472,37 @@ nlohmann::json ReadConfig(const fs::path& config) {
 
 std::vector<std::string> BuiltinSelection(const PatchFile& xml, const fs::path& config) {
     std::vector<std::string> enabled;
+    std::set<std::string> disabled;
     try {
         const auto settings = ReadConfig(config);
         if (settings.contains("enabled"))
             for (const auto& key : settings.at("enabled"))
                 if (key.is_string()) enabled.push_back(key.get<std::string>());
+        if (settings.contains("disabled"))
+            for (const auto& key : settings.at("disabled"))
+                if (key.is_string()) disabled.insert(key.get<std::string>());
     } catch (const std::exception&) {
         return {};
     }
     const std::string prefix = Utf8(xml.FilePath().filename()) + "/";
     std::set<std::string> known;
-    for (const XmlElement* meta : xml.Root().Iter("Metadata"))
-        if (const auto name = meta->Get("Name")) known.insert(*name);
+    std::vector<std::string> defaults;
+    for (const XmlElement* meta : xml.Root().Iter("Metadata")) {
+        if (const auto name = meta->Get("Name")) {
+            known.insert(*name);
+            if (Lower(meta->Get("isEnabled", "false")) == "true") defaults.push_back(*name);
+        }
+    }
     std::vector<std::string> out;
     for (const std::string& key : enabled) {
         if (!StartsWith(key, prefix)) continue;
         const std::string name = key.substr(prefix.size());
-        if (known.count(name) && !ManagedBuiltIn(name)) out.push_back(name);
+        if (known.count(name) && (!ManagedBuiltIn(name) || name == kHeapPatch)) out.push_back(name);
     }
+    for (const std::string& name : defaults)
+        if ((!ManagedBuiltIn(name) || name == kHeapPatch) && !disabled.count(prefix + name) &&
+            std::find(out.begin(), out.end(), name) == out.end())
+            out.push_back(name);
     return out;
 }
 

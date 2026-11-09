@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_contact_shadow.h"
 #include "video_core/renderer_vulkan/vk_depth_of_field.h"
+#include "video_core/renderer_vulkan/vk_froyok_bloom.h"
 #include "video_core/renderer_vulkan/vk_rt_shadow.h"
 #include "video_core/renderer_vulkan/vk_point_shadow.h"
 #include "video_core/renderer_vulkan/vk_sky_seam.h"
@@ -612,6 +613,7 @@ private:
     std::unique_ptr<SkySeam> sky_seam;
     std::unique_ptr<SkyZenith> sky_zenith;
     std::unique_ptr<DepthOfField> depth_of_field;
+    std::unique_ptr<FroyokBloom> froyok_bloom;
     bool effects_wanted = false;
     u32 ssr_frame = 0;
     u32 shadow_frame = 0;
