@@ -12,7 +12,10 @@
 namespace Vulkan::Ggx {
 
 constexpr uint64_t DirectionalHash = 0xd92266b9;
+constexpr size_t LegacyWords = 7981, CurrentWords = 9664;
 enum class Result { Disabled, Unrelated, Unsupported, Applied };
+
+inline bool KnownSize(size_t words) { return words == LegacyWords || words == CurrentWords; }
 
 struct Builder {
     uint32_t next, type, glsl;
@@ -45,10 +48,11 @@ struct Builder {
 inline Result Patch(uint64_t hash, bool fragment, bool enabled, std::vector<uint32_t>& spv) {
     if (!enabled) return Result::Disabled;
     if (!fragment || hash != DirectionalHash) return Result::Unrelated;
+    if (!KnownSize(spv.size())) return Result::Unsupported;
     uint32_t checksum = 2166136261u;
     for (const auto word : spv) checksum = (checksum ^ word) * 16777619u;
-    const bool legacy = spv.size() == 7981 && checksum == 0x4c359939;
-    const bool current = spv.size() == 9664 && checksum == 0xf9b58c68;
+    const bool legacy = spv.size() == LegacyWords && checksum == 0x4c359939;
+    const bool current = spv.size() == CurrentWords && checksum == 0xf9b58c68;
     if ((!legacy && !current) || spv[0] != 0x07230203) return Result::Unsupported;
     const uint32_t offset = current ? 14 : 0;
     uint32_t type = 0, boolean = 0, glsl = 0, zero = 0, one = 0, two = 0, half = 0, sixteen = 0;

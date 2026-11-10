@@ -20,8 +20,12 @@ namespace Vulkan {
 std::vector<u32> DirectionalGgxModule(u64 program_hash, bool fragment, std::span<const u32> code) {
     if (!fragment || program_hash != Ggx::DirectionalHash ||
         !BbSettings::Get().startup_directional_ggx) return {};
-    std::vector<u32> selected(code.begin(), code.end());
-    const auto result = Ggx::Patch(program_hash, fragment, true, selected);
+    std::vector<u32> selected;
+    if (Ggx::KnownSize(code.size())) {
+        selected.assign(code.begin(), code.end());
+    }
+    const auto result = selected.empty() ? Ggx::Result::Unsupported
+                                         : Ggx::Patch(program_hash, fragment, true, selected);
     if (result != Ggx::Result::Applied) {
         LOG_WARNING(Render_Vulkan,
                     "Directional GGX {:#x}: unsupported compiled module ({} words); "
@@ -49,7 +53,8 @@ void CaptureSpecularModule(u64 program_hash, u64 permutation, std::span<const u3
         const char* flag = std::getenv("BB_SPECULAR_CAPTURE");
         return flag && flag[0] == '1' && flag[1] == '\0';
     }();
-    if (!enabled || (program_hash != 0x8747a367 && program_hash != 0xd92266b9)) return;
+    if (!enabled || (program_hash != PointGridVertexShaderHash &&
+                     program_hash != DirectionalFragmentShaderHash)) return;
     const char* directory = std::getenv("BB_CAPTURE_DIR");
     if (!directory || !directory[0]) {
         std::printf("Specular capture: BB_CAPTURE_DIR is required for compiled modules\n");

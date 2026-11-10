@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_local_light_unify.h"
 #include "video_core/renderer_vulkan/vk_pom_patch.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_spirv_index.h"
 #include "video_core/renderer_vulkan/vk_ssr_composite_patch.h"
 
 namespace Vulkan::EffectShaders {
@@ -30,14 +31,39 @@ constexpr u32 CompositeLiftedChecksum = 0xa5e815fc;
 
 std::atomic<bool> gtao_active{false}, ssr_active{false}, composite_active{false};
 
-bool PatchLobes(std::vector<u32>& spv) {
-    const auto& s = BbSettings::Get();
-    return GgxLobes::Patch(spv, {s.startup_local_ggx, s.startup_specular_aa, s.startup_env_ggx_tails})
-        .Changed();
-}
-
 bool PatchSharpness(std::vector<u32>& spv) {
     return GgxLobes::ScaleLightSharpness(spv, BbSettings::Get().startup_light_sharpness) != 0;
+}
+
+bool LobesWanted() {
+    const auto& s = BbSettings::Get();
+    return s.startup_local_ggx || s.startup_specular_aa || s.startup_env_ggx_tails;
+}
+
+bool SharpnessWanted() {
+    return BbSettings::Get().startup_light_sharpness > 1.0f;
+}
+
+// PatchLobes then PatchSharpness; the module is scanned once unless the lobes rewrite it.
+bool PatchSpecular(std::vector<u32>& spv) {
+    const bool lobes_wanted = LobesWanted(), sharpness_wanted = SharpnessWanted();
+    if (!lobes_wanted && !sharpness_wanted) {
+        return false;
+    }
+    const auto& s = BbSettings::Get();
+    auto index = SpirvIndex::Build(spv);
+    const bool lobed =
+        lobes_wanted &&
+        GgxLobes::Patch(spv, {s.startup_local_ggx, s.startup_specular_aa, s.startup_env_ggx_tails},
+                        index)
+            .Changed();
+    if (!sharpness_wanted) {
+        return lobed;
+    }
+    if (lobed) {
+        index = SpirvIndex::Build(spv);
+    }
+    return GgxLobes::ScaleLightSharpness(spv, s.startup_light_sharpness, index) != 0 || lobed;
 }
 
 bool Wanted(int effect) {
@@ -200,10 +226,16 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
             LocalFalloff::Patch(patched, info.pgm_hash,
                                 BbSettings::Get().startup_local_inverse_square,
                                 BbSettings::Get().startup_local_light_intensity);
-            PatchLobes(patched);
-            PatchSharpness(patched);
+            PatchSpecular(patched);
             return patched;
         }
+    }
+    const auto& settings = BbSettings::Get();
+    const bool falloff_possible = LocalFalloff::Target(info.pgm_hash) &&
+                                  (settings.startup_uniform_local_light ||
+                                   settings.startup_local_inverse_square);
+    if (!falloff_possible && !LobesWanted() && !SharpnessWanted()) {
+        return std::nullopt;
     }
     std::vector<u32> lobes(spv.begin(), spv.end());
     const bool unified = LocalLightUnify::Patch(lobes, info.pgm_hash,
@@ -213,8 +245,8 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
                                              BbSettings::Get().startup_local_inverse_square,
                                              BbSettings::Get().startup_local_light_intensity)
                              .Changed();
-    const bool lobed = PatchLobes(lobes);
-    if (PatchSharpness(lobes) || lobed || falloff || unified) {
+    const bool specular = PatchSpecular(lobes);
+    if (specular || falloff || unified) {
         return lobes;
     }
     return std::nullopt;

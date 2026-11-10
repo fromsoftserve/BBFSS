@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "vk_spirv_index.h"
+
 namespace Vulkan::LocalFalloff {
 
 struct Stats {
@@ -37,46 +39,18 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
     if (!enabled || !Target(hash) || spv.size() < 5 || spv[0] != 0x07230203 || spv[3] == 0)
         return stats;
 
-    struct Def { size_t at; uint32_t op; };
-    std::unordered_map<uint32_t, Def> defs;
-    std::unordered_map<uint32_t, uint32_t> constants;
-    uint32_t glsl = 0, f32 = 0, floats = 0;
-    size_t first_function = 0;
-    for (size_t i = 5; i < spv.size();) {
-        const uint32_t size = spv[i] >> 16, op = spv[i] & 0xffff;
-        if (!size || size > spv.size() - i) return stats;
-        if (op == 11 && size >= 3) {
-            const char* name = reinterpret_cast<const char*>(&spv[i + 2]);
-            if (std::string_view(name, strnlen(name, (size - 2) * 4)) == "GLSL.std.450")
-                glsl = spv[i + 1];
-        }
-        if (op == 22 && size == 3 && spv[i + 2] == 32) f32 = spv[i + 1], ++floats;
-        if (op == 43 && size == 4) constants[spv[i + 2]] = spv[i + 3];
-        if ((op == 12 || op == 43 || op == 124 || (op >= 129 && op <= 136)) && size >= 3)
-            defs[spv[i + 2]] = {i, op};
-        if (op == 54 && !first_function) first_function = i;
-        i += size;
-    }
-    if (!glsl || !f32 || floats != 1 || !first_function) return stats;
+    const auto index = SpirvIndex::Build(spv, true);
+    if (!index.valid) return stats;
+    const auto& defs = index.defs;
+    const uint32_t glsl = index.glsl, f32 = index.f32;
+    const size_t first_function = index.first_function;
+    if (!glsl || !f32 || index.floats != 1 || !first_function) return stats;
 
-    const auto is_const = [&](uint32_t id, float value) {
-        const auto it = constants.find(id);
-        return it != constants.end() && it->second == std::bit_cast<uint32_t>(value);
+    const auto is_const = [&](uint32_t id, float value) { return index.IsConst(id, value); };
+    const auto ext = [&](uint32_t id, uint32_t inst, uint32_t args) {
+        return index.Ext(id, inst, args);
     };
-    const auto ext = [&](uint32_t id, uint32_t inst, uint32_t args) -> const uint32_t* {
-        const auto it = defs.find(id);
-        if (it == defs.end() || it->second.op != 12) return nullptr;
-        const uint32_t* w = &spv[it->second.at];
-        if ((w[0] >> 16) != 5 + args || w[1] != f32 || w[3] != glsl || w[4] != inst) return nullptr;
-        return w + 5;
-    };
-    const auto binary = [&](uint32_t id, uint32_t op) -> const uint32_t* {
-        const auto it = defs.find(id);
-        if (it == defs.end() || it->second.op != op) return nullptr;
-        const uint32_t* w = &spv[it->second.at];
-        if ((w[0] >> 16) != 5 || w[1] != f32) return nullptr;
-        return w + 3;
-    };
+    const auto binary = [&](uint32_t id, uint32_t op) { return index.Binary(id, op); };
     const auto distance_squared = [&](uint32_t id) {
         std::vector<uint32_t> terms;
         bool valid = true;

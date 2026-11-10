@@ -19,6 +19,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "vk_spirv_index.h"
+
 namespace Vulkan::GgxLobes {
 
 struct Options {
@@ -37,53 +39,23 @@ struct Stats {
 constexpr float EnvTailWeight = 0.14f;
 constexpr float EnvTailMips = 2.0f;
 
-inline Stats Patch(std::vector<uint32_t>& spv, const Options& options) {
+inline Stats Patch(std::vector<uint32_t>& spv, const Options& options,
+                   const SpirvIndex::Index& index) {
     Stats stats{};
-    if (spv.size() < 5 || spv[0] != 0x07230203) return stats;
+    if (!index.valid) return stats;
     if (!options.local_ggx && !options.specular_aa && !options.env_tails) return stats;
 
-    struct Def { size_t at; uint32_t op; };
-    std::unordered_map<uint32_t, Def> defs;
-    std::unordered_map<uint32_t, uint32_t> constants, vectors;
-    uint32_t glsl = 0, f32 = 0, entry = 0, floats = 0;
-    size_t first_function = 0;
-    for (size_t i = 5; i < spv.size();) {
-        const uint32_t size = spv[i] >> 16, op = spv[i] & 0xffff;
-        if (!size || size > spv.size() - i) return stats;
-        if (op == 11 && size >= 3) {
-            const char* name = reinterpret_cast<const char*>(&spv[i + 2]);
-            if (std::string_view(name, strnlen(name, (size - 2) * 4)) == "GLSL.std.450")
-                glsl = spv[i + 1];
-        }
-        if (op == 22 && size == 3 && spv[i + 2] == 32) f32 = spv[i + 1], ++floats;
-        if (op == 23 && size == 4 && spv[i + 3] == 4) vectors[spv[i + 1]] = spv[i + 2];
-        if (op == 15 && size >= 3 && spv[i + 1] == 4 && !entry) entry = spv[i + 2];
-        if (op == 43 && size == 4) constants[spv[i + 2]] = spv[i + 3];
-        if ((op == 12 || op == 43 || (op >= 129 && op <= 136)) && size >= 3)
-            defs[spv[i + 2]] = {i, op};
-        if (op == 54 && !first_function) first_function = i;
-        i += size;
-    }
-    if (!glsl || !f32 || floats != 1 || !entry || !first_function) return stats;
+    const auto& defs = index.defs;
+    const auto& vectors = index.vectors;
+    const uint32_t glsl = index.glsl, f32 = index.f32, entry = index.entry;
+    const size_t first_function = index.first_function;
+    if (!glsl || !f32 || index.floats != 1 || !entry || !first_function) return stats;
 
-    const auto is_const = [&](uint32_t id, float value) {
-        const auto it = constants.find(id);
-        return it != constants.end() && it->second == std::bit_cast<uint32_t>(value);
+    const auto is_const = [&](uint32_t id, float value) { return index.IsConst(id, value); };
+    const auto ext = [&](uint32_t id, uint32_t inst, uint32_t args) {
+        return index.Ext(id, inst, args);
     };
-    const auto ext = [&](uint32_t id, uint32_t inst, uint32_t args) -> const uint32_t* {
-        const auto it = defs.find(id);
-        if (it == defs.end() || it->second.op != 12) return nullptr;
-        const uint32_t* w = &spv[it->second.at];
-        if ((w[0] >> 16) != 5 + args || w[1] != f32 || w[3] != glsl || w[4] != inst) return nullptr;
-        return w + 5;
-    };
-    const auto binary = [&](uint32_t id, uint32_t op) -> const uint32_t* {
-        const auto it = defs.find(id);
-        if (it == defs.end() || it->second.op != op) return nullptr;
-        const uint32_t* w = &spv[it->second.at];
-        if ((w[0] >> 16) != 5 || w[1] != f32) return nullptr;
-        return w + 3;
-    };
+    const auto binary = [&](uint32_t id, uint32_t op) { return index.Binary(id, op); };
     // max(1, X) -> result id of the max, or 0.
     const auto gloss_max = [&](uint32_t id) -> uint32_t {
         const auto* a = ext(id, 40, 2);
@@ -296,6 +268,11 @@ inline Stats Patch(std::vector<uint32_t>& spv, const Options& options) {
     return stats;
 }
 
+inline Stats Patch(std::vector<uint32_t>& spv, const Options& options) {
+    if (!options.local_ggx && !options.specular_aa && !options.env_tails) return {};
+    return Patch(spv, options, SpirvIndex::Build(spv));
+}
+
 // The game limits each light's gloss exponent ("specular sharpness"):
 //   n = max(1, w * 2^(13g) / (2^(13g) * 0.0100021362 + w)),  i.e. 1/n = 1/2^(13g) + 0.01/w
 // with w a per-light sharpness. Scaling w by k equals dividing the 0.0100021362 constant by k,
@@ -304,46 +281,30 @@ inline Stats Patch(std::vector<uint32_t>& spv, const Options& options) {
 constexpr float SharpnessCap = 0.01000213623046875f;
 constexpr float SharpnessRemoved = 100.0f;
 
-inline uint32_t ScaleLightSharpness(std::vector<uint32_t>& spv, float scale) {
-    if (!(scale > 1.0f) || spv.size() < 5 || spv[0] != 0x07230203) return 0;
-    std::unordered_map<uint32_t, size_t> defs;
-    std::unordered_map<uint32_t, uint32_t> constants;
-    uint32_t glsl = 0, f32 = 0;
-    size_t first_function = 0;
-    for (size_t i = 5; i < spv.size();) {
-        const uint32_t size = spv[i] >> 16, op = spv[i] & 0xffff;
-        if (!size || size > spv.size() - i) return 0;
-        if (op == 11 && size >= 3) {
-            const char* name = reinterpret_cast<const char*>(&spv[i + 2]);
-            if (std::string_view(name, strnlen(name, (size - 2) * 4)) == "GLSL.std.450")
-                glsl = spv[i + 1];
-        }
-        if (op == 22 && size == 3 && spv[i + 2] == 32) f32 = f32 ? ~0u : spv[i + 1];
-        if (op == 43 && size == 4) constants[spv[i + 2]] = spv[i + 3];
-        if ((op == 12 || op == 133) && size >= 3) defs[spv[i + 2]] = i;
-        if (op == 54 && !first_function) first_function = i;
-        i += size;
-    }
-    if (!glsl || !f32 || f32 == ~0u || !first_function) return 0;
-    const auto is_const = [&](uint32_t id, float value) {
-        const auto it = constants.find(id);
-        return it != constants.end() && it->second == std::bit_cast<uint32_t>(value);
-    };
+inline uint32_t ScaleLightSharpness(std::vector<uint32_t>& spv, float scale,
+                                    const SpirvIndex::Index& index) {
+    if (!(scale > 1.0f) || !index.valid) return 0;
+    const auto& defs = index.defs;
+    const uint32_t glsl = index.glsl, f32 = index.sole_f32;
+    if (!glsl || !f32 || f32 == ~0u || !index.first_function) return 0;
+    const size_t first_function = index.first_function;
+    const auto is_const = [&](uint32_t id, float value) { return index.IsConst(id, value); };
     // exp2(13 * g) or exp2(g * 13)
     const auto gloss_base = [&](uint32_t id) {
         const auto it = defs.find(id);
         if (it == defs.end()) return false;
-        const uint32_t* e = &spv[it->second];
+        const uint32_t* e = &spv[it->second.at];
         if ((e[0] & 0xffff) != 12 || (e[0] >> 16) != 6 || e[1] != f32 || e[3] != glsl || e[4] != 29)
             return false;
         const auto m = defs.find(e[5]);
         if (m == defs.end()) return false;
-        const uint32_t* w = &spv[m->second];
+        const uint32_t* w = &spv[m->second.at];
         return (w[0] & 0xffff) == 133 && (w[0] >> 16) == 5 && w[1] == f32 &&
                (is_const(w[3], 13) || is_const(w[4], 13));
     };
     std::vector<size_t> sites;
-    for (const auto& [id, at] : defs) {
+    for (const auto& [id, def] : defs) {
+        const size_t at = def.at;
         const uint32_t* w = &spv[at];
         if ((w[0] & 0xffff) != 133 || (w[0] >> 16) != 5 || w[1] != f32) continue;
         for (int side = 0; side < 2; ++side)
@@ -357,6 +318,11 @@ inline uint32_t ScaleLightSharpness(std::vector<uint32_t>& spv, float scale) {
     spv.insert(spv.begin() + first_function, std::begin(constant), std::end(constant));
     for (const size_t at : sites) spv[at + 4] = id;
     return uint32_t(sites.size());
+}
+
+inline uint32_t ScaleLightSharpness(std::vector<uint32_t>& spv, float scale) {
+    if (!(scale > 1.0f)) return 0;
+    return ScaleLightSharpness(spv, scale, SpirvIndex::Build(spv));
 }
 
 } // namespace Vulkan::GgxLobes
