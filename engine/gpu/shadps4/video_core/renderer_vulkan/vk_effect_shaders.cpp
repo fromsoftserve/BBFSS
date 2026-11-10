@@ -225,7 +225,7 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
                                    BbSettings::Get().startup_uniform_local_light);
             LocalFalloff::Patch(patched, info.pgm_hash,
                                 BbSettings::Get().startup_local_inverse_square,
-                                BbSettings::Get().startup_local_light_intensity);
+                                BbSettings::Get().startup_local_light_intensity, BbSettings::Get().startup_local_light_core);
             PatchSpecular(patched);
             return patched;
         }
@@ -243,7 +243,7 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
                              .Changed();
     const bool falloff = LocalFalloff::Patch(lobes, info.pgm_hash,
                                              BbSettings::Get().startup_local_inverse_square,
-                                             BbSettings::Get().startup_local_light_intensity)
+                                             BbSettings::Get().startup_local_light_intensity, BbSettings::Get().startup_local_light_core)
                              .Changed();
     const bool specular = PatchSpecular(lobes);
     if (specular || falloff || unified) {

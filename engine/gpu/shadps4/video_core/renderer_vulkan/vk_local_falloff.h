@@ -2,6 +2,7 @@
 #pragma once
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -31,10 +32,23 @@ inline bool Target(uint32_t hash) {
     }
 }
 
-// Equal spherical-volume energy gives old = 4*pi*r^3/30 and new = 8*pi*r/3,
-// so the inverse-square curve is scaled by r^2/20 before applying user intensity.
+inline constexpr float DefaultCore = 0.15f;
+
+// The light is a sphere of radius core * r rather than a point, so the curve is
+//   1 / (x^2 + core^2) - 1 / (1 + core^2),  x = d / r,
+// which stays finite at the light (a point source's 1/d^2 blows out whatever stands next to
+// it). It is scaled to the old curve's spherical-volume energy: old (1 - x)^2 integrates to
+// 4*pi/30, the new one to 4*pi * (1 - core*atan(1/core) - 1/(3*(1 + core^2))); core 0 gives the
+// plain inverse square and its factor 1/20.
+inline float EnergyScale(float core) {
+    const float volume = core > 1e-4f ? 1.0f - core * std::atan(1.0f / core) -
+                                            1.0f / (3.0f * (1.0f + core * core))
+                                      : 2.0f / 3.0f;
+    return 1.0f / (30.0f * volume);
+}
+
 inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = true,
-                   float intensity = 1.0f) {
+                   float intensity = 1.0f, float core = DefaultCore) {
     Stats stats{};
     if (!enabled || !Target(hash) || spv.size() < 5 || spv[0] != 0x07230203 || spv[3] == 0)
         return stats;
@@ -87,7 +101,7 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
     };
 
     struct Standard {
-        uint32_t result, d2, inverse_radius, zero, one;
+        uint32_t result, scaled_d2, zero, one;
     };
     std::map<size_t, Standard> standard;
     std::map<std::pair<uint32_t, uint32_t>, uint32_t> diffuse;
@@ -105,8 +119,7 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
             if (!product) continue;
             for (int side = 0; side < 2; ++side) {
                 if (distance_squared(product[side]))
-                    standard[def.at] = {id, product[side], product[1 - side],
-                                        clamp[1], clamp[2]};
+                    standard[def.at] = {id, clamp[0], clamp[1], clamp[2]};
             }
         } else if (def.op == 12) {
             const auto* max = ext(id, 40, 2);
@@ -120,7 +133,7 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
     }
 
     struct Special {
-        uint32_t result, native, inverse_radius;
+        uint32_t result, scaled_d2, zero, one;
     };
     std::map<size_t, Special> special;
     for (const auto& [id, def] : defs) {
@@ -135,41 +148,43 @@ inline Stats Patch(std::vector<uint32_t>& spv, uint32_t hash, bool enabled = tru
             if (!distance_squared(product[side])) continue;
             const auto inverse_radius = source(product[1 - side]);
             const auto native = diffuse.find({product[side], inverse_radius});
-            if (native != diffuse.end()) special[def.at] = {id, native->second, product[1 - side]};
+            if (native != diffuse.end()) special[def.at] = {id, clamp[0], clamp[1], clamp[2]};
         }
     }
     if (standard.empty() && special.empty()) return stats;
 
     uint32_t next = spv[3];
-    const uint32_t energy = next++;
+    core = std::isfinite(core) && core > 0.0f ? core : 0.0f;
+    const uint32_t energy = next++, core_squared = next++, edge = next++;
     const uint32_t constant[] = {
-        (4u << 16) | 43, f32, energy, std::bit_cast<uint32_t>(intensity * 0.05f),
+        (4u << 16) | 43, f32, energy, std::bit_cast<uint32_t>(intensity * EnergyScale(core)),
+        (4u << 16) | 43, f32, core_squared, std::bit_cast<uint32_t>(core * core),
+        (4u << 16) | 43, f32, edge, std::bit_cast<uint32_t>(1.0f / (1.0f + core * core)),
     };
     std::vector<uint32_t> patched(spv.begin(), spv.begin() + 5);
+    // result = max(0, 1 / (d^2/r^2 + core^2) - 1 / (1 + core^2)) * energy
+    const auto emit = [&](uint32_t result, uint32_t scaled_d2, uint32_t zero, uint32_t one) {
+        const uint32_t sum = next++, inverse = next++, difference = next++, matched = next++;
+        const uint32_t instructions[] = {
+            (5u << 16) | 129, f32, sum, scaled_d2, core_squared,
+            (5u << 16) | 136, f32, inverse, one, sum,
+            (5u << 16) | 131, f32, difference, inverse, edge,
+            (7u << 16) | 12, f32, matched, glsl, 40, zero, difference,
+            (5u << 16) | 133, f32, result, matched, energy,
+        };
+        patched.insert(patched.end(), std::begin(instructions), std::end(instructions));
+    };
     for (size_t i = 5; i < spv.size();) {
         const uint32_t size = spv[i] >> 16;
         if (i == first_function)
             patched.insert(patched.end(), std::begin(constant), std::end(constant));
         if (const auto site = standard.find(i); site != standard.end()) {
             const auto& s = site->second;
-            const uint32_t inverse = next++, difference = next++, matched = next++, scale = next++;
-            const uint32_t instructions[] = {
-                (5u << 16) | 136, f32, inverse, s.one, s.d2,
-                (5u << 16) | 131, f32, difference, inverse, s.inverse_radius,
-                (7u << 16) | 12, f32, matched, glsl, 40, s.zero, difference,
-                (5u << 16) | 136, f32, scale, energy, s.inverse_radius,
-                (5u << 16) | 133, f32, s.result, matched, scale,
-            };
-            patched.insert(patched.end(), std::begin(instructions), std::end(instructions));
+            emit(s.result, s.scaled_d2, s.zero, s.one);
             ++stats.standard;
         } else if (const auto site = special.find(i); site != special.end()) {
             const auto& s = site->second;
-            const uint32_t scale = next++;
-            const uint32_t instructions[] = {
-                (5u << 16) | 136, f32, scale, energy, s.inverse_radius,
-                (5u << 16) | 133, f32, s.result, s.native, scale,
-            };
-            patched.insert(patched.end(), std::begin(instructions), std::end(instructions));
+            emit(s.result, s.scaled_d2, s.zero, s.one);
             ++stats.special;
         } else {
             patched.insert(patched.end(), spv.begin() + i, spv.begin() + i + size);
