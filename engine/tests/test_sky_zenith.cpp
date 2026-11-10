@@ -20,7 +20,7 @@
 namespace {
 constexpr unsigned W = 2048, H = 512, InputBytes = W * H * 4, OutputBytes = W * H * 8;
 constexpr unsigned GeometryOffset = InputBytes + OutputBytes;
-constexpr unsigned ValidationOffset = GeometryOffset + 8192;
+constexpr unsigned ValidationOffset = GeometryOffset + 8192, ValidationBytes = (2 + 12 * 3) * 4;
 float Half(unsigned value) {
     const unsigned exponent = (value >> 10) & 31u, mantissa = value & 1023u;
     assert(!(value & 32768u) && exponent < 31);
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         return memory;
     };
     const VkBufferCreateInfo bi{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = ValidationOffset + 4, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        .size = ValidationOffset + ValidationBytes, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VkBuffer buffer;
     CHECK(vkCreateBuffer(device, &bi, nullptr, &buffer));
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
         {VK_NULL_HANDLE, views[1], VK_IMAGE_LAYOUT_GENERAL},
         {VK_NULL_HANDLE, views[2], VK_IMAGE_LAYOUT_GENERAL}}};
     const std::array<VkDescriptorBufferInfo, 2> buffer_infos{{
-        {buffer, GeometryOffset, 1826 * 4}, {buffer, ValidationOffset, 4}}};
+        {buffer, GeometryOffset, 1826 * 4}, {buffer, ValidationOffset, ValidationBytes}}};
     std::array<VkWriteDescriptorSet, 5> writes{};
     for (unsigned i = 0; i < 5; ++i) writes[i] =
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
          .pImageInfo = i < 3 ? &image_infos[i] : nullptr,
          .pBufferInfo = i >= 3 ? &buffer_infos[i - 3] : nullptr};
     vkUpdateDescriptorSets(device, 5, writes.data(), 0, nullptr);
-    const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
     const VkPipelineLayoutCreateInfo li{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1, .pSetLayouts = &set_layout, .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push};
@@ -181,11 +181,11 @@ int main(int argc, char** argv) {
     auto download = upload;
     download.bufferOffset = InputBytes;
     std::vector<unsigned short> baseline(W * H * 4);
-    for (unsigned test = 0; test < 8; ++test) {
+    for (unsigned test = 0; test < 5; ++test) {
         std::memcpy(mapped, source.data(), source.size());
         if (test == 2) static_cast<unsigned char*>(mapped)[0] = 255;
         auto* geometry = reinterpret_cast<unsigned*>(static_cast<char*>(mapped) + GeometryOffset);
-        geometry[1824] = test == 0 || test == 5 || test == 7 ? 0 : 1;
+        geometry[1824] = test == 0 ? 0 : 1;
         CHECK(vkResetCommandBuffer(cmd, 0));
         const VkCommandBufferBeginInfo begin{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         CHECK(vkBeginCommandBuffer(cmd, &begin));
@@ -203,10 +203,10 @@ int main(int argc, char** argv) {
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
         }
         vkCmdCopyBufferToImage(cmd, buffer, images[0], VK_IMAGE_LAYOUT_GENERAL, 1, &upload);
-        struct Params { unsigned mip, count, mode; float strength; };
-        const Params params{0, 1824, test >= 6 ? 3u : test >= 4 ? 1u : 0u, 0.4f};
+        struct Params { unsigned mip, count, force; };
+        const Params params{0, 1824, test == 4 ? 0u : 1u};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, &params);
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
         for (unsigned i = 0; i < 3; ++i) {
             const VkMemoryBarrier b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
@@ -231,10 +231,19 @@ int main(int argc, char** argv) {
             .commandBufferCount = 1, .pCommandBuffers = &cmd};
         CHECK(vkQueueSubmit(queue, 1, &submit, {}));
         CHECK(vkQueueWaitIdle(queue));
-        const bool matched = test == 1 || test == 3 || test == 4 || test == 6;
-        const auto verified = *reinterpret_cast<unsigned*>(
+        const bool matched = test == 1 || test == 3 || test == 4;
+        const auto* validation_words = reinterpret_cast<const unsigned*>(
             static_cast<char*>(mapped) + ValidationOffset);
+        const auto verified = validation_words[0];
         assert(verified == unsigned(matched));
+        assert(validation_words[1] == verified);
+        // Test 4 repeats test 3's inputs without forcing: nothing is left to dispatch.
+        for (unsigned mip = 0; mip < 12; ++mip) {
+            const unsigned stale = test != 4;
+            assert(validation_words[2 + mip * 3] == stale * (std::max(W >> mip, 1u) + 7) / 8);
+            assert(validation_words[3 + mip * 3] == stale * (std::max(H >> mip, 1u) + 7) / 8);
+            assert(validation_words[4 + mip * 3] == stale);
+        }
         const auto* output = reinterpret_cast<const unsigned short*>(
             static_cast<const char*>(mapped) + InputBytes);
         if (test == 0) std::copy_n(output, baseline.size(), baseline.data());
@@ -244,12 +253,7 @@ int main(int argc, char** argv) {
             for (unsigned c = 0; c < 3; ++c) {
                 const float original = Half(baseline[at + c]), value = Half(output[at + c]);
                 assert(std::isfinite(value));
-                if (test == 4) {
-                    const std::array<float, 3> flat{0.03f, 0.05f, 0.08f};
-                    assert(std::abs(value - flat[c]) < 0.00005f);
-                    continue;
-                }
-                if (!matched || y >= (test == 6 ? 224u : 96u)) {
+                if (!matched || y >= 96u) {
                     // Compare the actual GPU sRGB decode, not a CPU approximation of it.
                     if (test == 2 && at + c == 0) assert(value == 1.0f);
                     else assert(output[at + c] == baseline[at + c]);
@@ -262,54 +266,14 @@ int main(int argc, char** argv) {
             }
             assert(std::abs(Half(output[at + 3]) - float(source[at + 3]) / 255.0f) < 0.0004f);
         }
-        if (test == 6) {
-            std::array<std::array<double, 3>, H> row_mean{};
-            for (unsigned y = 0; y < H; ++y) for (unsigned x = 0; x < W; ++x)
-                for (unsigned c = 0; c < 3; ++c)
-                    row_mean[y][c] += Half(baseline[(y * W + x) * 4 + c]) / double(W);
-            double previous_amount = 0.4;
-            for (unsigned y = 0; y <= 224; ++y) {
-                const double t = std::clamp((double(y) + 0.5) / 224, 0.0, 1.0);
-                const double amount = 0.4 * (1 - t * t * t * (t * (t * 6 - 15) + 10));
-                assert(amount <= previous_amount && previous_amount - amount < 0.009);
-                previous_amount = amount;
-                std::array<double, 3> smooth{};
-                double weights = 0;
-                for (int i = -32; i <= 32; ++i) {
-                    const double weight = std::exp(-double(i * i) / 288);
-                    const auto& sample = row_mean[std::clamp(int(y) + i, 0, int(H) - 1)];
-                    for (unsigned c = 0; c < 3; ++c) smooth[c] += sample[c] * weight;
-                    weights += weight;
-                }
-                for (unsigned x = 0; x < W; x += 127) for (unsigned c = 0; c < 3; ++c) {
-                    const unsigned at = (y * W + x) * 4 + c;
-                    const double original = Half(baseline[at]);
-                    const double expected = original + amount * (smooth[c] / weights - original);
-                    // The reference and the two image stores each round to half precision.
-                    if (std::abs(Half(output[at]) - expected) >= 0.0015 * std::max(expected, 0.01)) {
-                        std::fprintf(stderr, "Transition mismatch %u,%u channel %u: %.8f expected %.8f\n",
-                                     x, y, c, Half(output[at]), expected);
-                        std::abort();
-                    }
-                }
-            }
-            assert(previous_amount == 0);
-        }
-        if (matched && test != 4) {
+        if (matched) {
             std::printf("Zenith horizontal variation ratio %.4f\n", variation_after / variation_before);
             assert(variation_after < variation_before * 0.95);
-            if (test == 6) assert(variation_after > variation_before * 0.55);
             const auto horizontal_reference = [&](int x, int y) {
                 std::array<double, 3> sum{}, center{};
                 for (unsigned c = 0; c < 3; ++c)
                     center[c] = Half(baseline[(y * W + x) * 4 + c]);
                 double weights = 0;
-                if (test == 6) {
-                    for (unsigned i = 0; i < W; ++i) for (unsigned c = 0; c < 3; ++c)
-                        sum[c] += Half(baseline[(unsigned(y) * W + i) * 4 + c]);
-                    for (auto& value : sum) value /= W;
-                    return sum;
-                }
                 for (int i = -64; i <= 64; ++i) {
                     const unsigned sample = (unsigned(y) * W + unsigned((x + i + int(W)) % int(W))) * 4;
                     double distance = 0;
@@ -327,20 +291,19 @@ int main(int argc, char** argv) {
                 const auto center = horizontal_reference(x, 0);
                 std::array<double, 3> sum{};
                 double weights = 0;
-                const int radius = test == 6 ? 32 : 8;
-                const double sigma = test == 6 ? 12 : 3;
+                const int radius = 8;
+                const double sigma = 3;
                 for (int i = -radius; i <= radius; ++i) {
                     const auto sample = horizontal_reference(x, std::max(0, i));
                     double distance = 0;
                     for (unsigned c = 0; c < 3; ++c) distance += std::pow(sample[c] - center[c], 2);
                     const double weight = std::exp(-double(i * i) / (2 * sigma * sigma) -
-                        (test == 6 ? 0 : distance / (2 * 0.004 * 0.004)));
+                        distance / (2 * 0.004 * 0.004));
                     for (unsigned c = 0; c < 3; ++c) sum[c] += sample[c] * weight;
                     weights += weight;
                 }
                 for (unsigned c = 0; c < 3; ++c)
-                    if (test != 6)
-                        assert(std::abs(Half(output[x * 4 + c]) - sum[c] / weights) < 0.00001);
+                    assert(std::abs(Half(output[x * 4 + c]) - sum[c] / weights) < 0.00001);
             }
         }
     }

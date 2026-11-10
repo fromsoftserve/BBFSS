@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "video_core/renderer_vulkan/vk_sky_zenith.h"
 #include <algorithm>
-#include <cerrno>
-#include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <span>
 #include "video_core/host_shaders/sky_zenith_validate_comp.h"
@@ -16,12 +13,17 @@
 namespace Vulkan {
 namespace {
 constexpr vk::ImageSubresourceRange AllMips{vk::ImageAspectFlagBits::eColor, 0, 12, 0, 1};
+// verified, applied, then 12 mips of indirect dispatch arguments (see sky_zenith.comp).
+constexpr u32 ValidationBytes = (2 + 12 * 3) * 4;
+constexpr u32 ArgsOffset = 2 * 4;
 void ComputeBarrier(vk::CommandBuffer cmd) {
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader |
+                        vk::PipelineStageFlagBits2::eDrawIndirect,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
+                         vk::AccessFlagBits2::eIndirectCommandRead};
     cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 }
@@ -31,10 +33,6 @@ SkyZenith::SkyZenith(const Instance& instance_, Scheduler& scheduler_)
     const char* setting = std::getenv("BB_SKY_ZENITH_FIX");
     enabled = setting && setting[0] == '1' && setting[1] == '\0';
     if (!enabled) return;
-    const char* isolation = std::getenv("BB_SKY_ZENITH_ISOLATE");
-    const bool isolate = isolation && isolation[0] == '1' && isolation[1] == '\0';
-    mode = isolate ? 2u : 1u;
-    if (const char* file = std::getenv("BB_SKY_ZENITH_MODE_FILE")) mode_file = file;
     const auto device = instance.GetDevice();
     sampler = Check<"create sky zenith sampler">(device.createSamplerUnique({
         .magFilter = vk::Filter::eNearest, .minFilter = vk::Filter::eNearest,
@@ -50,24 +48,24 @@ SkyZenith::SkyZenith(const Instance& instance_, Scheduler& scheduler_)
         {2, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
         {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
         {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute}}};
-    for (u32 i = 0; i < passes.size(); ++i) {
-        auto& pass = passes[i];
-        pass.set = Check<"create sky zenith descriptors">(device.createDescriptorSetLayoutUnique({
-            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
-            .bindingCount = u32(bindings.size()), .pBindings = bindings.data()}));
-        const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 16};
-        pass.layout = Check<"create sky zenith layout">(device.createPipelineLayoutUnique({
-            .setLayoutCount = 1, .pSetLayouts = &*pass.set,
-            .pushConstantRangeCount = 1, .pPushConstantRanges = &push}));
+    set = Check<"create sky zenith descriptors">(device.createDescriptorSetLayoutUnique({
+        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .bindingCount = u32(bindings.size()), .pBindings = bindings.data()}));
+    const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 12};
+    layout = Check<"create sky zenith layout">(device.createPipelineLayoutUnique({
+        .setLayoutCount = 1, .pSetLayouts = &*set,
+        .pushConstantRangeCount = 1, .pPushConstantRanges = &push}));
+    for (u32 i = 0; i < pipelines.size(); ++i) {
         const auto module = CompileSPV(codes[i], device);
-        pass.pipeline = Check<"create sky zenith pipeline">(device.createComputePipelineUnique(
+        pipelines[i] = Check<"create sky zenith pipeline">(device.createComputePipelineUnique(
             {}, vk::ComputePipelineCreateInfo{
                 .stage = {.stage = vk::ShaderStageFlagBits::eCompute, .module = module, .pName = "main"},
-                .layout = *pass.layout}));
+                .layout = *layout}));
         device.destroyShaderModule(module);
     }
     validation = std::make_unique<VideoCore::Buffer>(
-        instance, 0, 4, VideoCore::MemoryType::DeviceLocal, "Dream panorama validation");
+        instance, 0, ValidationBytes, VideoCore::MemoryType::DeviceLocal,
+        "Dream panorama validation");
     horizontal = VideoCore::UniqueImage(device, instance.GetAllocator());
     result = VideoCore::UniqueImage(device, instance.GetAllocator());
     const vk::ImageCreateInfo info{
@@ -93,35 +91,17 @@ SkyZenith::SkyZenith(const Instance& instance_, Scheduler& scheduler_)
 }
 SkyZenith::~SkyZenith() = default;
 
-vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source,
+// The validate pass runs on every call: the geometry buffer is rewritten on the GPU by the sky
+// seam pass for each draw, so its verdict is only known there. It also decides, on the GPU,
+// whether the filter passes have work: they are dispatched indirectly with zero groups unless
+// the source changed (force) or the verdict differs from the one the result was filtered with.
+vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source, const SourceKey& key,
                               vk::DescriptorBufferInfo geometry, u32 count) {
     if (!enabled || !source.imageView || !geometry.buffer) return {};
-    if (!mode_file.empty() && polls++ % 30 == 0) {
-        if (FILE* file = std::fopen(mode_file.c_str(), "r")) {
-            u32 next;
-            float next_strength = 0.4f;
-            char extra;
-            char text[128]{};
-            const bool read = std::fgets(text, sizeof(text), file) != nullptr;
-            const int fields = read ? std::sscanf(text, "%u %f %c", &next, &next_strength, &extra) : 0;
-            const bool valid_fields = fields == 2 ||
-                (fields == 1 && std::sscanf(text, "%u %c", &next, &extra) == 1);
-            if (valid_fields && next <= 3 && std::isfinite(next_strength) &&
-                next_strength >= 0.0f && next_strength <= 1.0f) {
-                if (next != mode || next_strength != strength)
-                    std::printf("Sky zenith diagnostic mode %u, strength %.2f\n", next, next_strength);
-                mode = next;
-                strength = next_strength;
-            } else {
-                std::printf("Sky zenith: invalid diagnostic mode; retaining mode %u\n", mode);
-            }
-            std::fclose(file);
-        } else if (errno != ENOENT) {
-            std::printf("Sky zenith: diagnostic mode file read failed (%d)\n", errno);
-        }
-    }
-    if (mode == 0) return {};
     source.sampler = *sampler;
+    const u32 force = cached && key.stable && key == cached_key ? 0u : 1u;
+    cached = key.stable;
+    cached_key = key;
     scheduler.EndRendering();
     if (!initialized) {
         initialized = true;
@@ -141,16 +121,15 @@ vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source,
     for (u32 step = 0; step < 25; ++step) {
         const u32 pass_index = step == 0 ? 0 : (step % 2 ? 1 : 2);
         const u32 mip = step == 0 ? 0 : (step - 1) / 2;
-        const auto& pass = passes[pass_index];
         const std::array<vk::DescriptorImageInfo, 3> images{source,
             vk::DescriptorImageInfo{{}, *horizontal_views[mip], vk::ImageLayout::eGeneral},
             vk::DescriptorImageInfo{{}, *result_views[mip], vk::ImageLayout::eGeneral}};
         const std::array<vk::DescriptorBufferInfo, 2> buffers{
-            geometry, vk::DescriptorBufferInfo{validation->Handle(), 0, 4}};
-        struct Params { u32 mip, count, mode; float strength; };
-        const Params params{mip, count, mode == 2 ? 1u : mode == 3 ? 3u : 0u, strength};
-        scheduler.Record([images, buffers, params, pass_index,
-                          pipe = *pass.pipeline, layout = *pass.layout](vk::CommandBuffer cmd) {
+            geometry, vk::DescriptorBufferInfo{validation->Handle(), 0, ValidationBytes}};
+        struct Params { u32 mip, count, force; };
+        const Params params{mip, count, force};
+        scheduler.Record([images, buffers, params, pass_index, args = validation->Handle(),
+                          pipe = *pipelines[pass_index], layout = *layout](vk::CommandBuffer cmd) {
             ComputeBarrier(cmd);
             std::array<vk::WriteDescriptorSet, 5> writes{};
             for (u32 i = 0; i < 5; ++i) {
@@ -164,10 +143,11 @@ vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source,
             cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipe);
             cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
             cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), &params);
-            const u32 width = std::max(1u, 2048u >> params.mip);
-            const u32 height = std::max(1u, 512u >> params.mip);
-            cmd.dispatch(pass_index == 0 ? 1u : (width + 7) / 8,
-                         pass_index == 0 ? 1u : (height + 7) / 8, 1);
+            if (pass_index == 0) {
+                cmd.dispatch(1, 1, 1);
+            } else {
+                cmd.dispatchIndirect(args, ArgsOffset + params.mip * 12);
+            }
         });
     }
     scheduler.Record([](vk::CommandBuffer cmd) {

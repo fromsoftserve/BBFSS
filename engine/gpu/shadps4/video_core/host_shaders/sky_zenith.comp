@@ -5,8 +5,11 @@ layout(set = 0, binding = 0) uniform sampler2D panorama;
 layout(set = 0, binding = 1, rgba16f) uniform image2D horizontal_image;
 layout(set = 0, binding = 2, rgba16f) uniform image2D result_image;
 layout(set = 0, binding = 3, std430) readonly buffer Geometry { uint geometry[]; };
-layout(set = 0, binding = 4, std430) buffer Validation { uint verified; };
-layout(push_constant) uniform Params { uint level; uint count; uint isolate; float strength; } p;
+// verified: this call's geometry/panorama verdict. applied: the verdict the cached result was
+// filtered with. args: per-mip indirect dispatch sizes of the filter passes (zero when the
+// cached result is still valid).
+layout(set = 0, binding = 4, std430) buffer Validation { uint verified; uint applied; uint args[36]; };
+layout(push_constant) uniform Params { uint level; uint count; uint force; } p;
 
 vec3 encoded(vec3 linear_rgb) {
     return mix(12.92 * linear_rgb,
@@ -37,7 +40,16 @@ bool known_panorama() {
 void main() {
 #ifdef VALIDATE
     if (any(notEqual(gl_GlobalInvocationID, uvec3(0)))) return;
-    verified = geometry[p.count] == 1u && known_panorama() ? 1u : 0u;
+    uint verdict = geometry[p.count] == 1u && known_panorama() ? 1u : 0u;
+    bool stale = p.force != 0u || applied != verdict;
+    verified = verdict;
+    applied = verdict;
+    for (uint mip = 0; mip < 12u; ++mip) {
+        uvec2 groups = (uvec2(max(2048u >> mip, 1u), max(512u >> mip, 1u)) + 7u) / 8u;
+        args[mip * 3u] = stale ? groups.x : 0u;
+        args[mip * 3u + 1u] = stale ? groups.y : 0u;
+        args[mip * 3u + 2u] = stale ? 1u : 0u;
+    }
 #else
     ivec2 at = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = textureSize(panorama, int(p.level));
@@ -47,33 +59,16 @@ void main() {
     float luminance = dot(original.rgb, vec3(0.2126, 0.7152, 0.0722));
     float amount = (1.0 - smoothstep(32.0, 96.0, base_y)) *
                    (1.0 - smoothstep(0.03, 0.08, luminance));
-    if (p.isolate == 3u) {
-        // Restore authored variation gradually, without a brightness-dependent boundary.
-        float t = clamp(base_y / 224.0, 0.0, 1.0);
-        amount = p.strength * (1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0));
-    }
     vec3 value = original.rgb;
-#ifdef HORIZONTAL
-    if (verified == 1u && p.isolate == 3u) {
-        if (at.x != 0) return;
-        vec3 sum = vec3(0);
-        for (int x = 0; x < size.x; ++x)
-            sum += texelFetch(panorama, ivec2(x, at.y), int(p.level)).rgb;
-        imageStore(horizontal_image, at, vec4(sum / float(size.x), original.a));
-        return;
-    }
-#endif
-    if (verified == 1u && p.isolate == 1u) {
-        value = vec3(0.03, 0.05, 0.08);
-    } else if (verified == 1u && amount > 0.0) {
+    if (verified == 1u && amount > 0.0) {
 #ifdef HORIZONTAL
         int radius = max(1, int(64u >> p.level));
         float sigma = max(0.75, 24.0 / exp2(float(p.level)));
         vec3 center = original.rgb;
 #else
-        int radius = max(1, int((p.isolate == 3u ? 32u : 8u) >> p.level));
-        float sigma = max(0.75, (p.isolate == 3u ? 12.0 : 3.0) / exp2(float(p.level)));
-        vec3 center = imageLoad(horizontal_image, p.isolate == 3u ? ivec2(0, at.y) : at).rgb;
+        int radius = max(1, int(8u >> p.level));
+        float sigma = max(0.75, 3.0 / exp2(float(p.level)));
+        vec3 center = imageLoad(horizontal_image, at).rgb;
 #endif
         vec3 sum = vec3(0);
         float weights = 0.0;
@@ -82,13 +77,11 @@ void main() {
             ivec2 sample_at = ivec2((at.x + i + size.x) % size.x, at.y);
             vec3 sample_rgb = texelFetch(panorama, sample_at, int(p.level)).rgb;
 #else
-            ivec2 sample_at = ivec2(p.isolate == 3u ? 0 : at.x,
-                                   clamp(at.y + i, 0, size.y - 1));
+            ivec2 sample_at = ivec2(at.x, clamp(at.y + i, 0, size.y - 1));
             vec3 sample_rgb = imageLoad(horizontal_image, sample_at).rgb;
 #endif
             vec3 delta = sample_rgb - center;
-            float color_distance = p.isolate == 3u ? 0.0 :
-                                   dot(delta, delta) / (2.0 * 0.004 * 0.004);
+            float color_distance = dot(delta, delta) / (2.0 * 0.004 * 0.004);
             float weight = exp(-float(i * i) / (2.0 * sigma * sigma) - color_distance);
             sum += sample_rgb * weight;
             weights += weight;
