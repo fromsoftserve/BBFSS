@@ -10,6 +10,7 @@
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_sun_vsm.h"
 
 #include <vk_mem_alloc.h>
 
@@ -116,6 +117,10 @@ private:
         // World bounds measured by the sun VSM (min xyz, max xyz), when has_box.
         std::array<float, 6> box{};
         bool has_box = false;
+        // The sun VSM's culling result for `cull_box` under the camera signature `cull_serial`.
+        std::array<float, 6> cull_box{};
+        u64 cull_serial = 0;
+        bool culled = false;
     };
     struct Build {
         Entry* entry;
@@ -160,6 +165,14 @@ private:
     // World copies recorded so far, and the count at the last VSM pass (its changed casters).
     u64 copies = 0;
     u64 vsm_copies = 0;
+    // Reused each frame: SunVsm::Record reads the casters synchronously.
+    std::vector<SunVsm::Caster> vsm_casters;
+    // What the culling of the kept casters depends on besides their boxes, as of the last frame
+    // it ran; `cull_serial` changes whenever it differs (0: none yet).
+    std::vector<std::array<float, 12>> cull_volumes;
+    std::array<float, 12> cull_view{}, cull_inv_view{};
+    std::array<float, 2> cull_proj{};
+    u64 cull_serial = 0;
 
     Buffer capture_addresses, both_addresses, params, positions, scratch, instance_data,
         tlas_storage, tlas_scratch;

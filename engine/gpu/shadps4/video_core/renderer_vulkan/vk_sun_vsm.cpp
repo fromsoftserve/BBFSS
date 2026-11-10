@@ -417,7 +417,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
     cleared = true;
     const vk::DeviceSize draws_offset = vk::DeviceSize(slot) * SlotDraws * sizeof(Draw);
     scheduler.EndRendering();
-    // Recorded in five stages (setup, caster bounds, binning, page draws, sampling).
+    // Recorded in five steps (setup, caster bounds, binning, page draws, sampling).
     auto body =
         [in, push, clear, reset, draws_offset, changed_count, changed_triangles,
          bounds_copies = std::move(bounds_copies),
@@ -427,7 +427,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
          physical_view = physical_view, sampler = *sampler, compute_pipeline = *compute_pipeline,
          compute_layout = *compute_layout, draw_pipeline = *draw_pipeline,
          clear_pipeline = *clear_pipeline,
-         draw_layout = *draw_layout](vk::CommandBuffer cmdbuf, int stage) mutable {
+         draw_layout = *draw_layout](vk::CommandBuffer cmdbuf) mutable {
             const auto memory = [&](vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
                                     vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
                 const vk::MemoryBarrier2 barrier{.srcStageMask = src, .srcAccessMask = src_access,
@@ -436,7 +436,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
             };
             constexpr auto ReadWrite =
                 vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
-            if (stage == 0) {
+            {
             if (clear) {
                 cmdbuf.fillBuffer(state, 0, VK_WHOLE_SIZE, 0);
             }
@@ -516,18 +516,17 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                 run(mode, x, (groups + x - 1) / x);
             };
             const u32 width_groups = (in.width + 7) / 8, height_groups = (in.height + 7) / 8;
-            if (stage == 0) {
+            // Stages 0 to 2 share one binding: only the page draw binds another pipeline.
+            {
                 bind_compute();
                 run(ModeSetup | (reset ? ResetBit : 0u), (TableEntries + 63) / 64, 1);
                 run(ModeMark, width_groups, height_groups);
                 run_linear(ModeInvalidate, TableEntries);
                 run_linear(ModeFreeList, PhysicalPages);
                 run_linear(ModeAllocate, TableEntries);
-                return;
             }
-            if (stage == 1) {
+            {
                 if (changed_count) {
-                    bind_compute();
                     const Push main = push;
                     push.draw_count = changed_count;
                     push.triangle_count = changed_triangles;
@@ -548,20 +547,16 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                                vk::AccessFlagBits2::eShaderWrite);
                     }
                 }
-                return;
             }
-            if (stage == 2) {
-            bind_compute();
+            {
             run_linear(ModeResolve, TableEntries);
             run_linear(ModeBin, push.triangle_count);
             run(ModeFinalize, 1, 1);
             memory(Compute, vk::AccessFlagBits2::eShaderWrite,
                    vk::PipelineStageFlagBits2::eDrawIndirect | vk::PipelineStageFlagBits2::eVertexShader,
-                   vk::AccessFlagBits2::eIndirectCommandRead | vk::AccessFlagBits2::eShaderRead);
-            return;
-            }
-            if (stage == 3) {
-
+                   vk::AccessFlagBits2::eIndirectCommandRead | vk::AccessFlagBits2::                   eShaderRead);
+                               }
+                               {
             const vk::RenderingAttachmentInfo depth_attachment{
                 .imageView = physical_view,
                 .imageLayout = vk::ImageLayout::eGeneral,
@@ -600,18 +595,15 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                 .image = physical,
                 .subresourceRange = {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1},
             };
-            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_sample});
-            return;
-            }
-            bind_compute();
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers =             &to_sample});
+                        }
+                        bind_compute();
             run(ModeSample, width_groups, height_groups);
         };
     EffectPass::Mark(15, "sun virtual shadow map");
     scheduler.RecordCrumb({.name = "Sun virtual shadow map"},
                           [body = std::move(body)](vk::CommandBuffer cmdbuf) mutable {
-                              for (int stage = 0; stage < 5; ++stage) {
-                                  body(cmdbuf, stage);
-                              }
+                              body(cmdbuf);
                           });
     // The guest pipelines' dynamic state must be emitted again after the page draw.
     scheduler.GetDynamicState().Invalidate();

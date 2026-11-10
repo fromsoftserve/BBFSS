@@ -955,7 +955,8 @@ bool RtShadow::Record(const Inputs& in) {
         }
         const auto camera = camera_motion.PassMatrices();
         if (vsm && vsm->Ready() && camera.valid) {
-            std::vector<SunVsm::Caster> casters;
+            auto& casters = vsm_casters;
+            casters.clear();
             casters.reserve(frame_entries.size());
             for (Entry* entry : frame_entries) {
                 if (entry->mask == ShadowMask && entry->world.buffer && entry->copied) {
@@ -1030,6 +1031,15 @@ bool RtShadow::Record(const Inputs& in) {
                 }
                 return distance2 > FarMeters * FarMeters;
             };
+            const std::array<float, 2> camera_proj{camera.proj[0], camera.proj[1]};
+            if (!cull_serial || cull_volumes != frame_volumes || cull_view != camera.view ||
+                cull_inv_view != camera.inv_view || cull_proj != camera_proj) {
+                cull_volumes = frame_volumes;
+                cull_view = camera.view;
+                cull_inv_view = camera.inv_view;
+                cull_proj = camera_proj;
+                ++cull_serial;
+            }
             for (const auto& item : entries) {
                 Entry* entry = item.second.get();
                 if (entry && entry->mask == ShadowMask && entry->seen_frame != frame &&
@@ -1039,9 +1049,15 @@ bool RtShadow::Record(const Inputs& in) {
                         entry->box = *box;
                         entry->has_box = true;
                     }
-                    const bool cascade = entry->has_box && in_cascade(entry->box);
-                    if (cascade || (entry->has_box && in_view(entry->box))) {
-                        continue;
+                    if (entry->has_box) {
+                        if (entry->cull_serial != cull_serial || entry->cull_box != entry->box) {
+                            entry->culled = in_cascade(entry->box) || in_view(entry->box);
+                            entry->cull_box = entry->box;
+                            entry->cull_serial = cull_serial;
+                        }
+                        if (entry->culled) {
+                            continue;
+                        }
                     }
                     casters.push_back({entry->world.address, entry->indices.address,
                                        entry->triangles, false, entry->copied_at > vsm_copies});
