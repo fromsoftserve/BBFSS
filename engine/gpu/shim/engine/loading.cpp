@@ -174,7 +174,7 @@ void Tick(std::uint64_t pacer) {
     if ((loading && !was) || cinematic != g_cinematic)
         g_generation.fetch_add(1, std::memory_order_relaxed);
     g_cinematic = cinematic;
-    if (g_fast_allowed) SetLoadingPace(loading && !CutscenePlaying());
+    if (g_fast_allowed) SetLoadingPace(loading && !cinematic);
 
     if (loading && !was) {
         g_load_began = now;

@@ -31,9 +31,6 @@ public:
     }
     [[nodiscard]] bool Wanted() const;
     [[nodiscard]] bool Complete() const;
-    [[nodiscard]] bool KeepMap() const noexcept {
-        return alpha_casters != 0;
-    }
 
     struct Draw {
         u64 shader = 0;
@@ -187,7 +184,6 @@ private:
     u32 rebuilt_triangles = 0;
     u64 scratch_used = 0;
     u64 entry_bytes = 0;
-    u32 alpha_casters = 0;
     u32 missed = 0;
     u32 tlas_count = 0;
     u32 rays = 2;

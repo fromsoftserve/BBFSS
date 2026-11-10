@@ -288,10 +288,14 @@ void ScreenSpaceGI::OnFrameEnd() {
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
                                   std::array<float, 2> jitter) {
-    if (done_this_frame || failed || !color_id || !depth_id ||
-        (!BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed) &&
-         !rt_shadow.Wanted()) ||
-        !Ready()) {
+    if (done_this_frame || failed || !color_id || !depth_id || !Ready()) {
+        return;
+    }
+    if (!BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed) &&
+        !(rt_shadow.Wanted() &&
+          BbSettings::Get().graphics_rt_bounce.load(std::memory_order_relaxed))) {
+        probe_history_valid = false;
+        reflection_history_valid = false;
         return;
     }
     const auto proj = camera_motion.PassProjection();
@@ -508,7 +512,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
         }
         const bool rays = use_rays && probe_ray.image && probe_ray.width == ray_width &&
                           probe_ray.height == ray_height && probe_ray_dist.image &&
-                          probe_ray_dist.width == ray_width;
+                          probe_ray_dist.width == ray_width &&
+                          probe_ray_dist.height == ray_height;
         const bool run_rays = rays && reflection_strength > 0.0f;
         static bool printed_probes = false;
         if (!printed_probes) {

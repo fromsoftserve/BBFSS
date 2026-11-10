@@ -15,7 +15,6 @@ public:
     bool Enabled() const { return enabled; }
     vk::Buffer Correct(vk::DescriptorBufferInfo positions, vk::DescriptorBufferInfo uv,
                        u32 position_stride, u32 uv_stride, u32 count);
-    u32 CaptureVerification();
     vk::DescriptorBufferInfo VerificationBuffer() const;
 private:
     const Instance& instance;

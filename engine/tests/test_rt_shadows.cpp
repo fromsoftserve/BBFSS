@@ -685,7 +685,6 @@ struct FilterPush {
     unsigned offsets = 0;
     int radius = 2;
     float width = W, height = H;
-    unsigned keep_map = 0;
 };
 struct LabPush {
     Mat4 to_view;

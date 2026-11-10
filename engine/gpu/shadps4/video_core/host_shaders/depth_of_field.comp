@@ -208,12 +208,13 @@ void main() {
         focus.y != 1.0 || camera.w != 1.0) return;
     float strength = foreground_strength(p);
     if (strength == 0.0) return;
-    ivec2 tile = p / near_tile_size();
+    int tile_size = near_tile_size();
+    ivec2 tile = p / tile_size;
     float search_radius = 0.0;
+    ivec2 count = (ivec2(pc.size) + tile_size - 1) / tile_size;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             ivec2 s = tile + ivec2(x, y);
-            ivec2 count = (ivec2(pc.size) + near_tile_size() - 1) / near_tile_size();
             if (all(greaterThanEqual(s, ivec2(0))) && all(lessThan(s, count)))
                 search_radius = max(search_radius, texelFetch(near_tiles, s, 0).r);
         }

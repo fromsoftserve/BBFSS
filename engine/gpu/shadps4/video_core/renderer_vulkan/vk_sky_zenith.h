@@ -15,7 +15,6 @@ public:
     bool Enabled() const { return enabled; }
     vk::ImageView Filter(vk::DescriptorImageInfo source,
                          vk::DescriptorBufferInfo geometry, u32 count);
-    u32 CaptureVerification();
 private:
     struct Pass {
         vk::UniqueDescriptorSetLayout set;

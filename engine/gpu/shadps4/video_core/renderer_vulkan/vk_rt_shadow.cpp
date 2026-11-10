@@ -62,9 +62,8 @@ struct FilterPush {
     u32 buf_off;
     s32 radius;
     std::array<float, 2> size;
-    u32 keep_map;
 };
-static_assert(sizeof(FilterPush) == 20);
+static_assert(sizeof(FilterPush) == 16);
 
 struct UnprojectPush {
     std::array<float, 12> rows;
@@ -1084,7 +1083,6 @@ bool RtShadow::Record(const Inputs& in) {
         .buf_off = in.constants_offset_word,
         .radius = 2,
         .size = {float(in.width), float(in.height)},
-        .keep_map = KeepMap() ? 1u : 0u,
     };
     EffectPass::Mark(14, "ray traced sun");
     scheduler.RecordCrumb(
@@ -1233,7 +1231,6 @@ void RtShadow::OnFrameEnd() {
     scratch_used = 0;
     new_triangles = 0;
     rebuilt_triangles = 0;
-    alpha_casters = 0;
     missed = 0;
     tlas_count = 0;
     frame_entries.clear();

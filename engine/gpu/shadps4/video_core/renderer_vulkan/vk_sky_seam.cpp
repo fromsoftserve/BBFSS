@@ -3,7 +3,6 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/sky_seam_comp.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -96,37 +95,5 @@ vk::Buffer SkySeam::Correct(vk::DescriptorBufferInfo positions, vk::DescriptorBu
         std::printf("Sky seam: GPU geometry/UV validation active; nonmatching streams retain original UVs\n");
     }
     return output->Handle();
-}
-
-u32 SkySeam::CaptureVerification() {
-    VideoCore::Buffer readback(
-        instance, 0, 8, VideoCore::MemoryType::HostCached,
-        "Sky seam capture verification");
-    scheduler.Record([src = output->Handle(), dst = readback.Handle(), count = capture_count]
-                     (vk::CommandBuffer cmd) {
-        const vk::MemoryBarrier2 before{
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
-        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
-        const vk::BufferCopy copy{count * 4, 0, 8};
-        cmd.copyBuffer(src, dst, copy);
-        const vk::MemoryBarrier2 after{
-            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-            .dstAccessMask = vk::AccessFlagBits2::eHostRead};
-        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
-    });
-    // Explicit frame captures already synchronize; normal rendering never reads this back.
-    scheduler.Finish();
-    readback.Invalidate(0, readback.SizeBytes());
-    u32 verified;
-    std::memcpy(&verified, readback.mapped_data.data(), sizeof verified);
-    u32 hash;
-    std::memcpy(&hash, readback.mapped_data.data() + 4, sizeof hash);
-    std::printf("Sky seam capture: verified %u, geometry/UV hash %08x\n", verified, hash);
-    return verified;
 }
 }

@@ -88,7 +88,7 @@ void ContactShadow::OnShadowDraw(VideoCore::ImageId target, const Inputs& inputs
     use_rt = inputs.uniforms && rt_shadow.Complete();
     if (use_rt) {
         use_contact = false;
-        use_pcss = use_pcss && rt_shadow.KeepMap();
+        use_pcss = false;
     }
     use_filter = use_pcss;
     if ((!use_contact && !use_filter && !use_rt && !rt_shadow.Wanted()) || !Ready()) {

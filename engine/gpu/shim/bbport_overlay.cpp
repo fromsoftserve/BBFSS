@@ -854,7 +854,7 @@ void PictureSection() {
     const auto slider = [&](const char* english, const char* russian, std::atomic<float>& value, float lo,
                             float hi, const char* format = "%.2f") {
         if (const char* label = Item(english, russian)) {
-            moved |= Slider(label, value, lo, hi, format);
+            moved |= Slider(label, value, lo, hi, format, ImGuiSliderFlags_AlwaysClamp);
         }
     };
     slider("Brightness", "Яркость", s.graphics_brightness, 0.0f, 3.0f);
@@ -991,7 +991,7 @@ void DebugSection() {
             "не меняются. Требуется перезапуск."));
     }
     if (const char* label = Item("Local-light intensity", "Интенсивность локальных источников")) {
-        Slider(label, s.graphics_local_light_intensity, 0.0f, 4.0f, "%.2fx");
+        Slider(label, s.graphics_local_light_intensity, 0.0f, 4.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
         Hint(BbSettings::MenuText(
             "1.00x by default. Matches the old and inverse-square falloff curves' integrated energy "
             "over each point or spot light's radius, then applies this multiplier to diffuse and "
@@ -1043,7 +1043,7 @@ void DebugSection() {
         const bool removed = s.graphics_light_sharpness >= BbSettings::LightSharpnessMax;
         Slider(label, s.graphics_light_sharpness, 1.0f, BbSettings::LightSharpnessMax,
                removed ? BbSettings::MenuText("Unlimited", "Без ограничения") : "%.1fx",
-               ImGuiSliderFlags_Logarithmic);
+               ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
         Hint(BbSettings::MenuText(
             "Unlimited by default. The game caps how tight sun and lamp highlights can get on "
             "glossy surfaces; the sun is capped hardest. Higher values let glossy highlights become "

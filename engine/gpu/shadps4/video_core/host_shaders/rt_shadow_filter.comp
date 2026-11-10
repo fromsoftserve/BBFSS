@@ -15,7 +15,6 @@ layout(push_constant) uniform Constants {
     uint buf_off;
     int radius;
     vec2 size;
-    uint keep_map;
 };
 
 uint base;
@@ -84,6 +83,6 @@ void main() {
                              0.0, 1.0);
     vec4 c = imageLoad(shadow_img, pixel);
     const float lit = 1.0 - fade * (1.0 - vis);
-    c.a = keep_map != 0u ? min(c.a, lit) : lit;
+    c.a = lit;
     imageStore(shadow_img, pixel, c);
 }

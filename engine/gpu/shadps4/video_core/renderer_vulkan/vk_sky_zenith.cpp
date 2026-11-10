@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <span>
 #include "video_core/host_shaders/sky_zenith_validate_comp.h"
 #include "video_core/host_shaders/sky_zenith_horizontal_comp.h"
@@ -180,30 +179,5 @@ vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source,
         cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
     });
     return *result_view;
-}
-
-u32 SkyZenith::CaptureVerification() {
-    VideoCore::Buffer readback(instance, 0, 4, VideoCore::MemoryType::HostCached,
-                               "Sky zenith capture verification");
-    scheduler.Record([src = validation->Handle(), dst = readback.Handle()](vk::CommandBuffer cmd) {
-        const vk::MemoryBarrier2 before{
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
-        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
-        cmd.copyBuffer(src, dst, vk::BufferCopy{0, 0, 4});
-        const vk::MemoryBarrier2 after{
-            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-            .dstAccessMask = vk::AccessFlagBits2::eHostRead};
-        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
-    });
-    scheduler.Finish();
-    readback.Invalidate(0, 4);
-    u32 verified;
-    std::memcpy(&verified, readback.mapped_data.data(), sizeof(verified));
-    return verified;
 }
 }

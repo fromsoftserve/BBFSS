@@ -26,6 +26,7 @@ vec4 row(uint i) { return vec4(c(i), c(i + 1u), c(i + 2u), c(i + 3u)); }
 bool finite3(vec3 v) { return !any(isnan(v)) && !any(isinf(v)); }
 
 float inscatter(vec3 ray, vec3 centre, float radius, float along, float q, float begin, float end) {
+    if (end <= begin) return 0.0;
     float ds = (end - begin) / float(SEGMENTS);
     float energy = 0.0;
     float previous = atan((begin - along) / q);
