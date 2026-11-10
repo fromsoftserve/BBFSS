@@ -271,8 +271,9 @@ void FroyokBloom::Generate(VideoCore::ImageId id) {
 
 float FroyokBloom::Composite(const Shader::Info& fragment,
                              std::span<vk::DescriptorImageInfo> image_infos) {
+    // image_infos holds the fragment stage's four images followed by their samplers.
     if (!ready || fragment.pgm_hash != Shader::Native::FroyokCompositeHash ||
-        !fragment.uses_froyok_bloom || fragment.images.size() != 4 || image_infos.size() != 4 ||
+        !fragment.uses_froyok_bloom || fragment.images.size() != 4 || image_infos.size() < 4 ||
         upsampled.empty()) {
         return 0.0f;
     }
