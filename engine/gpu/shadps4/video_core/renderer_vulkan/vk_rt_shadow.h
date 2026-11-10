@@ -172,6 +172,7 @@ private:
     std::vector<std::array<float, 12>> cull_volumes;
     std::array<float, 12> cull_view{}, cull_inv_view{};
     std::array<float, 2> cull_proj{};
+    std::size_t cull_drawn = 0;
     u64 cull_serial = 0;
 
     Buffer capture_addresses, both_addresses, params, positions, scratch, instance_data,
@@ -204,7 +205,8 @@ private:
     struct Stats {
         u64 draws = 0, camera_draws = 0, not_ortho = 0, no_camera = 0, alpha = 0, unsupported = 0,
             over_budget = 0, instanced = 0, dynamic_draws = 0, strips = 0, frames = 0, instances = 0,
-            triangles = 0, shared_builds = 0, missed = 0, incomplete = 0;
+            triangles = 0, shared_builds = 0, missed = 0, incomplete = 0, vsm_kept = 0,
+            vsm_culled = 0;
     } stats;
 };
 

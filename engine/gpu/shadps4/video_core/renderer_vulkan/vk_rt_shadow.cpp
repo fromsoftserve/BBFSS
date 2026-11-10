@@ -990,6 +990,16 @@ bool RtShadow::Record(const Inputs& in) {
                 }
                 return false;
             };
+            const auto far_off = [&](const std::array<float, 6>& box) {
+                constexpr float FarMeters = 50.0f;
+                float distance2 = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const float eye = camera.inv_view[k * 4 + 3];
+                    const float d = std::max({box[k] - eye, eye - box[k + 3], 0.0f});
+                    distance2 += d * d;
+                }
+                return distance2 > FarMeters * FarMeters;
+            };
             // A kept caster the game would surely draw is one it no longer has (a swapped level of
             // detail, a removed object): wholly in view, or in view and far off. Near casters
             // partly in view are left: the game culls their shadows by its own visibility.
@@ -1021,22 +1031,42 @@ bool RtShadow::Record(const Inputs& in) {
                 if (inside) {
                     return true;
                 }
-                constexpr float FarMeters = 50.0f;
-                float distance2 = 0.0f;
+                return far_off(box);
+            };
+            // A caster the game draws now in nearly the same place as a kept one has replaced it
+            // (a swapped level of detail): their boxes overlap by half of their union or more.
+            const auto replaced = [&](const std::array<float, 6>& box) {
+                constexpr float Pad = 5e-4f;
+                float volume = 1.0f;
                 for (int k = 0; k < 3; ++k) {
-                    const float eye = camera.inv_view[k * 4 + 3];
-                    const float d = std::max({box[k] - eye, eye - box[k + 3], 0.0f});
-                    distance2 += d * d;
+                    volume *= box[k + 3] - box[k] + 2.0f * Pad;
                 }
-                return distance2 > FarMeters * FarMeters;
+                for (const Entry* drawn : frame_entries) {
+                    if (drawn->mask != ShadowMask || !drawn->has_box) {
+                        continue;
+                    }
+                    float overlap = 1.0f, other = 1.0f;
+                    for (int k = 0; k < 3; ++k) {
+                        overlap *= std::max(std::min(box[k + 3], drawn->box[k + 3]) -
+                                                std::max(box[k], drawn->box[k]) + 2.0f * Pad,
+                                            0.0f);
+                        other *= drawn->box[k + 3] - drawn->box[k] + 2.0f * Pad;
+                    }
+                    if (overlap * 3.0f >= volume + other) {
+                        return true;
+                    }
+                }
+                return false;
             };
             const std::array<float, 2> camera_proj{camera.proj[0], camera.proj[1]};
             if (!cull_serial || cull_volumes != frame_volumes || cull_view != camera.view ||
-                cull_inv_view != camera.inv_view || cull_proj != camera_proj) {
+                cull_inv_view != camera.inv_view || cull_proj != camera_proj ||
+                cull_drawn != frame_entries.size()) {
                 cull_volumes = frame_volumes;
                 cull_view = camera.view;
                 cull_inv_view = camera.inv_view;
                 cull_proj = camera_proj;
+                cull_drawn = frame_entries.size();
                 ++cull_serial;
             }
             for (const auto& item : entries) {
@@ -1050,14 +1080,21 @@ bool RtShadow::Record(const Inputs& in) {
                     }
                     if (entry->has_box) {
                         if (entry->cull_serial != cull_serial || entry->cull_box != entry->box) {
-                            entry->culled = in_cascade(entry->box) || in_view(entry->box);
+                            // Inside a cascade the game still culls nearby casters by its own
+                            // visibility, so one there is only gone when far off or replaced.
+                            const bool by_view = in_view(entry->box);
+                            entry->culled = by_view ||
+                                            (in_cascade(entry->box) &&
+                                             (far_off(entry->box) || replaced(entry->box)));
                             entry->cull_box = entry->box;
                             entry->cull_serial = cull_serial;
                         }
                         if (entry->culled) {
+                            ++stats.vsm_culled;
                             continue;
                         }
                     }
+                    ++stats.vsm_kept;
                     casters.push_back({entry->world.address, entry->indices.address,
                                        entry->triangles, false, entry->copied_at > vsm_copies});
                 }
@@ -1190,14 +1227,17 @@ void RtShadow::OnFrameEnd() {
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
                     "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
                     "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
-                    "%.1f, missed %.1f a frame; %llu frames fell back to the game's shadows\n",
+                    "%.1f, missed %.1f, kept casters %.1f drawn %.1f culled a frame; %llu frames fell "
+                    "back to the game's shadows\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
                     double(stats.alpha) / f, double(stats.not_ortho) / f, double(stats.no_camera) / f,
                     double(stats.unsupported) / f, double(stats.instanced) / f,
                     double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
                     double(stats.shared_builds) / f, double(stats.strips) / f,
-                    double(stats.missed) / f, static_cast<unsigned long long>(stats.incomplete));
+                    double(stats.missed) / f, double(stats.vsm_kept) / f,
+                    double(stats.vsm_culled) / f,
+                    static_cast<unsigned long long>(stats.incomplete));
         stats = {};
     }
     ++frame;
