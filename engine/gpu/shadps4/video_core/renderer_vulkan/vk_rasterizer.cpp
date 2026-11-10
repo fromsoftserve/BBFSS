@@ -35,6 +35,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_compile_queue.h"
+#include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/renderer_vulkan/vk_gpu_savings.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_occlusion.h"
@@ -5339,8 +5340,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
-    // same image through the guest's native descriptor during this draw.
-    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
+    // same image through the guest's native descriptor during this draw. AO stays at its native
+    // target size: reduced proxies warp the projection shared by SSAO and both GTAO variants.
+    const auto* fragment = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const bool ao_pass = fragment && fragment->pgm_hash == EffectShaders::SsaoHash;
+    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1 && !ao_pass;
     // BB_SCENE_DEBUG=<file>: once the file exists, why the passes of one frame keep the
     // native size (see NoteFrameStart).
     const bool debug_pass = scene_debug_frame && scene_started;
