@@ -20,6 +20,39 @@ Lantern Engine runs your own copy of Bloodborne on Windows and Linux: a launcher
 2. Run `Lantern Engine` in the unpacked folder, pick your game folder and press **Play**. From a terminal: `./lantern.sh /path/to/CUSA03173`.
 3. It needs a Vulkan driver (Mesa or NVIDIA), Python 3 and glibc 2.38 or newer (Ubuntu 24.04, Fedora 39, Arch, SteamOS 3.6, Bazzite). From 0.9.37 beta 7 the launcher updates itself on Linux too, and DLSS Super Resolution works on RTX cards with NVIDIA's driver (DLSS Frame Generation is Windows only).
 
+## In-game menu / ini-only graphics settings
+
+These `graphics_*` keys in `lantern.ini` have no control in the Windows launcher. Change them in the in-game overlay menu (**Insert**) or by editing the ini. Defaults are from `engine/gpu/shim/bbport_settings.h`.
+
+| Key | What it does | Default |
+|---|---|---|
+| `graphics_tonemapper` | Tonemapper: `original`, `gt7` or `aces` | `original` |
+| `graphics_gt7_exposure` | Exposure for the GT7 tonemapper | `1.0` |
+| `graphics_bloom_quality` | Bloom: `original` or `froyok` | `original` |
+| `graphics_froyok_bloom_blend` | Froyok bloom blend | `0.1` |
+| `graphics_froyok_bloom_spread` | Froyok bloom spread | `0.85` |
+| `graphics_sun_vsm` | Variance shadow maps for the sun | off |
+| `graphics_rt_point_shadows` | Ray-traced point-light shadows | off |
+| `graphics_rt_bounce` | Ray-traced bounce lighting | on |
+| `graphics_gi_probes` | Global-illumination probes | off |
+| `graphics_gi_reflections` | GI reflections | off |
+| `graphics_gi_reflections_full_res` | Full-resolution GI reflections | off |
+| `graphics_gi_reflection_strength` | GI reflection strength | `1.0` |
+| `graphics_gi_wet_ground` | Wet-ground reflections amount | `0.5` |
+| `graphics_smooth_normals` | Smooth surface normals | on |
+| `graphics_directional_ggx` | GGX specular for directional lights | on |
+| `graphics_local_ggx` | GGX specular for local lights | on |
+| `graphics_local_inverse_square` | Inverse-square falloff for local lights | on |
+| `graphics_local_light_intensity` | Local light intensity | `1.0` |
+| `graphics_uniform_local_light` | Uniform local light | off |
+| `graphics_disable_player_light` | Disable the player's light | on |
+| `graphics_specular_aa` | Specular anti-aliasing | on |
+| `graphics_env_ggx_tails` | GGX tails for environment reflections | on |
+| `graphics_light_sharpness` | Light sharpness | `100.0` |
+| `graphics_dof_intensity` | Depth-of-field intensity | `1` |
+
+Experimental environment-only toggles (no ini key): `BB_SKY_ZENITH_FIX=1` enables the sky zenith fix (off by default); `BB_SKY_SEAM_FIX` controls the sky seam fix, which is on by default and disabled with `BB_SKY_SEAM_FIX=0`.
+
 ## Sponsors
 
 Seamless co-op runs on a server in Frankfurt, sponsored by [1337 Hosting](https://1337hosting.com). Thank you!

@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$Destination,
     [string]$Version = '0.9.9',
-    [string]$RuntimeBin = 'C:\msys64\clang64\bin'
+    [string]$RuntimeBin = 'C:\msys64\clang64\bin',
+    [switch]$RequireDlss
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -23,11 +24,17 @@ foreach ($name in 'patches', 'data', 'licenses') {
 foreach ($name in 'gpu-cache.id', 'gpu-cache.legacy.id', 'bloodborne.ico', 'nvngx_dlss.dll', 'LICENSE-DLSS-SDK.txt') {
     if (Test-Path -LiteralPath "$root\engine\out\$name") {
         Copy-Item -LiteralPath "$root\engine\out\$name" -Destination $bin
+    } elseif ($name -eq 'nvngx_dlss.dll' -and $RequireDlss) {
+        throw 'nvngx_dlss.dll is missing from engine\out (DLSS fetch failed?) and -RequireDlss was set'
+    } else {
+        Write-Warning "Optional runtime file not found, skipped: engine\out\$name"
     }
 }
 foreach ($name in 'fsr4_shaders', 'fsr4_411', 'fsr4vk') {
     if (Test-Path -LiteralPath "$root\engine\$name") {
         Copy-Item -LiteralPath "$root\engine\$name" -Destination "$destination\engine" -Recurse
+    } else {
+        Write-Warning "Optional runtime directory not found, skipped: engine\$name"
     }
 }
 foreach ($name in 'LICENSE', 'NOTICE', 'README.md') {
@@ -78,18 +85,6 @@ $source = [IO.Compression.ZipFile]::Open("$destination\BBFSS-source.zip", [IO.Co
 try {
     $paths = @(& git -C $root ls-files --recurse-submodules)
     if ($LASTEXITCODE) { throw 'Cannot enumerate source files' }
-    $paths += @('tools/package-bbfss.ps1', 'tools/bbfss-default.ini', 'tools/BBFSS-README.txt',
-        'engine/start/performance.inc', 'engine/tests/test_point_volumetric.cpp',
-        'engine/tests/test_builtin_performance.py',
-        'engine/tests/test_motion_blur.cpp',
-        'engine/tests/test_exposure_policy.cpp',
-        'engine/tests/test_native_exposure.cpp',
-        'engine/gpu/shim/engine/exposure_policy.h',
-        'engine/gpu/shim/engine/auto_exposure.h',
-        'engine/gpu/shim/engine/auto_exposure.cpp',
-        'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur.glsl',
-        'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur.frag',
-        'engine/gpu/shadps4/video_core/host_shaders/native_motion_blur_test.comp')
     foreach ($relative in ($paths | Sort-Object -Unique)) {
         $local = Join-Path $root ($relative.Replace('/', '\'))
         if (Test-Path -LiteralPath $local -PathType Leaf) {

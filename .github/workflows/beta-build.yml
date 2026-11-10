@@ -45,6 +45,8 @@ jobs:
             mingw-w64-clang-x86_64-ninja
             mingw-w64-clang-x86_64-pkgconf
             mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-python-numpy
+            mingw-w64-clang-x86_64-ccache
             mingw-w64-clang-x86_64-sdl3
             mingw-w64-clang-x86_64-boost
             mingw-w64-clang-x86_64-fmt
@@ -66,6 +68,15 @@ jobs:
             mingw-w64-clang-x86_64-zlib
             mingw-w64-clang-x86_64-expat
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('engine/gpu/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ hashFiles('engine/gpu/CMakeLists.txt') }}-
+            ccache-${{ runner.os }}-
+
       - name: Build engine
         shell: msys2 {0}
         env:
@@ -73,6 +84,10 @@ jobs:
           CXX: clang++
           BB_PGO: "off"
           BB_JOBS: "4"
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 1G
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
           # CI gets the newest MSYS2 libc++, which no longer includes these transitively;
           # some third-party sources (sirit, FidelityFX) relied on that.
           CXXFLAGS: >-
@@ -84,10 +99,19 @@ jobs:
           bash engine/build.sh
           rc=$?
           set -e
+          ccache -s || true
           if [ "$rc" -ne 0 ]; then
             tail -n 200 engine/out/gpu-build.log 2>/dev/null || true
             exit "$rc"
           fi
+
+      - name: Run Python tests
+        shell: msys2 {0}
+        working-directory: engine/tests
+        run: >-
+          python -m unittest -v
+          test_builtin_performance test_engine_assets test_windows_frame_rate
+          test_ggx_directional_replay test_ggx_directional_timing test_ggx_directional_patch
 
       - name: Run settings test
         shell: msys2 {0}
@@ -120,7 +144,7 @@ jobs:
         run: |
           $dest = Join-Path $env:RUNNER_TEMP 'BBFSS'
           $bin = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'clang64\bin'
-          ./tools/package-bbfss.ps1 -Destination $dest -Version $env:BBFSS_VERSION -RuntimeBin $bin
+          ./tools/package-bbfss.ps1 -Destination $dest -Version $env:BBFSS_VERSION -RuntimeBin $bin -RequireDlss
           "dir=$dest" >> $env:GITHUB_OUTPUT
           "name=BBFSS-beta-$($env:GITHUB_SHA.Substring(0,7))" >> $env:GITHUB_OUTPUT
 
@@ -131,4 +155,4 @@ jobs:
           path: ${{ steps.package.outputs.dir }}
           if-no-files-found: error
           compression-level: 6
-          retention-days: 90
+          retention-days: 14

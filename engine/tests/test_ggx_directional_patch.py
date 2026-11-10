@@ -9,11 +9,13 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "re"))
 import ggx_directional_patch as patch
 
-ORIGINALS = [Path(value) for value in sys.argv[1:]]
+ORIGINALS = [Path(value) for value in sys.argv[1:] if Path(value).is_file()]
 sys.argv[1:] = []
+needs_originals = unittest.skipUnless(ORIGINALS, "no original shader paths given")
 
 
 class GgxDirectionalPatchTests(unittest.TestCase):
+    @needs_originals
     def test_unknown_and_already_patched_inputs_are_rejected(self):
         with self.assertRaises(ValueError):
             patch.check_original(b"")
@@ -28,6 +30,7 @@ class GgxDirectionalPatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     patch.check_original(result.read_bytes())
 
+    @needs_originals
     def test_native_is_default_and_bit_exact(self):
         for source in ORIGINALS:
             with tempfile.TemporaryDirectory() as temporary:
@@ -40,6 +43,7 @@ class GgxDirectionalPatchTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     patch.generate(source, source)
 
+    @needs_originals
     def test_all_explicit_calibrations_validate(self):
         for source in ORIGINALS:
             with tempfile.TemporaryDirectory() as temporary:
