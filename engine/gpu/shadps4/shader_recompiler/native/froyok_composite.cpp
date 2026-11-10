@@ -99,9 +99,8 @@ std::optional<CompositeChannel> StockBloom(const ToneCurveMatch& match,
     return std::nullopt;
 }
 
-IR::Value Blend(IR::IREmitter& ir, const IR::Value& original, const IR::Value& bloom) {
-    const IR::F32 amount = ir.FPClamp(ir.FroyokParam(0), ir.Imm32(BbSettings::FroyokBlendMin),
-                                      ir.Imm32(BbSettings::FroyokBlendMax));
+IR::Value Blend(IR::IREmitter& ir, const IR::F32& amount, const IR::Value& original,
+                 const IR::Value& bloom) {
     return ir.FPAdd(IR::F32{original},
                     ir.FPMul(amount, ir.FPSub(IR::F32{bloom}, IR::F32{original})));
 }
@@ -168,11 +167,21 @@ bool ApplyFroyokComposite(IR::Program& program) {
         return decline("an original bloom channel is missing");
     }
 
+    // The shared blend amount is emitted before the first of the three scene additions.
+    const auto first_scene = std::ranges::find_if(block.Instructions(), [&](const IR::Inst& inst) {
+        return std::ranges::any_of(matches, [&](const ToneCurveMatch& match) {
+            return match.scene == &inst;
+        });
+    });
+    IR::IREmitter at_first{block, IR::Block::InstructionList::s_iterator_to(*first_scene)};
+    const IR::F32 amount = at_first.FPClamp(at_first.FroyokParam(0),
+                                            at_first.Imm32(BbSettings::FroyokBlendMin),
+                                            at_first.Imm32(BbSettings::FroyokBlendMax));
     for (size_t index = 0; index < matches.size(); ++index) {
         ToneCurveMatch& match = matches[index];
         const CompositeChannel& channel = *channels[match_channels[index]];
         IR::IREmitter at_scene{block, IR::Block::InstructionList::s_iterator_to(*match.scene)};
-        match.scene->SetArg(1, Blend(at_scene, channel.scene, channel.bloom));
+        match.scene->SetArg(1, Blend(at_scene, amount, channel.scene, channel.bloom));
         channel.stock_addition->SetArg(channel.stock_addend, channel.stock_scene);
     }
     program.info.uses_froyok_bloom = true;

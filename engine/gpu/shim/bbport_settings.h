@@ -109,7 +109,10 @@ enum BloomQuality : int { BloomQualityOriginal = 0, BloomQualityFroyok = 1, Bloo
 inline constexpr const char* BloomQualityNames[] = {"original", "froyok"};
 static_assert(sizeof(BloomQualityNames) / sizeof(BloomQualityNames[0]) == BloomQualityCount);
 inline constexpr float FroyokBlendMin = 0.1f, FroyokBlendMax = 0.3f;
-inline constexpr float FroyokSpreadMin = 0.5f, FroyokSpreadDefault = 0.85f;
+inline constexpr float FroyokSpreadMin = 0.5f, FroyokSpreadDefault = 0.85f, FroyokSpreadMax = FroyokSpreadDefault;
+inline constexpr float WetGroundMin = 0.0f, WetGroundMax = 1.0f, WetGroundDefault = 0.5f;
+inline constexpr float DofIntensityMin = 0.0f, DofIntensityMax = 3.0f;
+inline constexpr float LocalLightIntensityMin = 0.0f, LocalLightIntensityMax = 4.0f;
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
 inline constexpr int DlssPresetAuto = -1, DlssPresetL = 12, DlssPresetM = 13;
@@ -198,7 +201,7 @@ struct Values {
     std::atomic<bool> graphics_gi_reflections{false};
     std::atomic<bool> graphics_gi_reflections_full_res{false};
     std::atomic<float> graphics_gi_reflection_strength{1.0f};
-    std::atomic<float> graphics_gi_wet_ground{0.5f};
+    std::atomic<float> graphics_gi_wet_ground{WetGroundDefault};
     std::atomic<bool> graphics_smooth_normals{true}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<bool> graphics_directional_ggx{true};

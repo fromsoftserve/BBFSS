@@ -60,9 +60,10 @@ constexpr float PqM1 = 0.1593017578125f, PqM2 = 78.84375f, PqC1 = 0.8359375f, Pq
                 PqC3 = 18.6875f;
 // The scene value (k * x, the curve's own units) where the alternatives meet the game's curve.
 constexpr float MatchPoint = 0.3f;
+constexpr float AcesA = 0.0245786f, AcesB = 0.000090537f, AcesC = 0.983729f, AcesD = 0.4329510f,
+                AcesE = 0.238081f;
 constexpr float AcesFit(float v) {
-    return (v * (v + 0.0245786f) - 0.000090537f) /
-           (v * (0.983729f * v + 0.4329510f) + 0.238081f);
+    return (v * (v + AcesA) - AcesB) / (v * (AcesC * v + AcesD) + AcesE);
 }
 
 // ACES fitted input/output transforms. Their rows sum to one, so AcesFit is also the neutral response.
@@ -466,8 +467,8 @@ bool ApplyGt7ToneMap(IR::Program& program, const RuntimeInfo& runtime_info, Pool
         for (size_t c = 0; c < 3; ++c) {
             const F32 v = aces_input[c];
             aces_fitted[c] = e.Div(
-                e.Sub(e.Mul(v, e.Add(v, e.C(0.0245786f))), e.C(0.000090537f)),
-                e.Add(e.Mul(v, e.Add(e.Mul(v, e.C(0.983729f)), e.C(0.4329510f))), e.C(0.238081f)));
+                e.Sub(e.Mul(v, e.Add(v, e.C(AcesA))), e.C(AcesB)),
+                e.Add(e.Mul(v, e.Add(e.Mul(v, e.C(AcesC)), e.C(AcesD))), e.C(AcesE)));
         }
         const Vec3 aces_out = e.Apply(AcesOutput, aces_fitted);
         Vec3 result;

@@ -745,7 +745,7 @@ void PictureSection() {
     }
     if (const char* label = Item("Wet ground", "Мокрая земля")) {
         ImGui::BeginDisabled(!s.graphics_gi_probes || !s.graphics_gi_reflections);
-        Slider(label, s.graphics_gi_wet_ground, 0.0f, 1.0f, "%.2f",
+        Slider(label, s.graphics_gi_wet_ground, BbSettings::WetGroundMin, BbSettings::WetGroundMax, "%.2f",
                ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         Hint(BbSettings::MenuText(
@@ -820,7 +820,7 @@ void PictureSection() {
         }
         if (const char* label = Item("Froyok internal bloom spread", "Внутренний разброс Froyok")) {
             Slider(label, s.graphics_froyok_bloom_spread, BbSettings::FroyokSpreadMin,
-                   BbSettings::FroyokSpreadDefault, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                   BbSettings::FroyokSpreadMax, "%.2f", ImGuiSliderFlags_AlwaysClamp);
             Hint(BbSettings::MenuText(
                 "Live, default 0.85. The tent-filtered lower-resolution contribution at each "
                 "upsample step; 0.5 narrows the glow, 0.85 gives the widest spread.",
@@ -876,7 +876,7 @@ void PictureSection() {
     slider("Lamp fog glow size", "Размер свечения тумана ламп", s.graphics_point_fog_glow_size, 0.03f, 0.20f,
            "%.3f");
     if (const char* label = Item("Depth of field intensity", "Интенсивность глубины резкости")) {
-        Slider(label, s.graphics_dof_intensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        Slider(label, s.graphics_dof_intensity, BbSettings::DofIntensityMin, BbSettings::DofIntensityMax, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
         Hint(BbSettings::MenuText(
             "Live multiplier applied after each map's authored DOF settings. "
             "0 removes blur, 1 preserves the default, 3 triples the modern blur radii. "
@@ -934,6 +934,12 @@ void PictureSection() {
             Store(s.graphics_sun_vsm, false, true);
             Store(s.graphics_rt_point_shadows, false, true);
             Store(s.graphics_native_sss, false, true);
+            Store(s.graphics_gi_probes, false, true);
+            Store(s.graphics_gi_reflections, false, true);
+            Store(s.graphics_gi_reflections_full_res, false, true);
+            Store(s.graphics_tonemapper, int(BbSettings::TonemapperOriginal), true);
+            Store(s.graphics_gt7_exposure, 1.0f, true);
+            Store(s.graphics_bloom_quality, int(BbSettings::BloomQualityOriginal), true);
             Store(s.graphics_dof_intensity, 1.0f, true);
             Store(s.graphics_brightness, 1.0f, true);
             Store(s.graphics_contrast, 1.0f, true);
@@ -991,7 +997,7 @@ void DebugSection() {
             "не меняются. Требуется перезапуск."));
     }
     if (const char* label = Item("Local-light intensity", "Интенсивность локальных источников")) {
-        Slider(label, s.graphics_local_light_intensity, 0.0f, 4.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        Slider(label, s.graphics_local_light_intensity, BbSettings::LocalLightIntensityMin, BbSettings::LocalLightIntensityMax, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
         Hint(BbSettings::MenuText(
             "1.00x by default. Matches the old and inverse-square falloff curves' integrated energy "
             "over each point or spot light's radius, then applies this multiplier to diffuse and "

@@ -325,15 +325,15 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_froyok_bloom_blend") {
         v.graphics_froyok_bloom_blend=Clamp(std::isfinite(f)?f:0.1f,FroyokBlendMin,FroyokBlendMax);
     } else if (key == "graphics_froyok_bloom_spread") {
-        v.graphics_froyok_bloom_spread=Clamp(std::isfinite(f)?f:FroyokSpreadDefault,FroyokSpreadMin,FroyokSpreadDefault);
+        v.graphics_froyok_bloom_spread=Clamp(std::isfinite(f)?f:FroyokSpreadDefault,FroyokSpreadMin,FroyokSpreadMax);
     } else if (key == "graphics_volumetric_intensity") {
-        v.graphics_volumetric_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+        v.graphics_volumetric_intensity=Clamp(std::isfinite(f)?f:1.0f,DofIntensityMin,DofIntensityMax);
     } else if (key == "graphics_point_fog_intensity") {
-        v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+        v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,DofIntensityMin,DofIntensityMax);
     } else if (key == "graphics_point_fog_glow_size") {
         v.graphics_point_fog_glow_size=Clamp(std::isfinite(f)?f:0.08f,0.03f,0.20f);
     } else if (key == "graphics_ssr_intensity") {
-        v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+        v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,DofIntensityMin,DofIntensityMax);
     } else if (key == "graphics_auto_exposure") {
         v.graphics_auto_exposure=i!=0;
     } else if (key == "graphics_sun_vsm") {
@@ -351,7 +351,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_gi_reflection_strength") {
         v.graphics_gi_reflection_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
     } else if (key == "graphics_gi_wet_ground") {
-        v.graphics_gi_wet_ground=Clamp(std::isfinite(f)?f:0.5f,0.0f,1.0f);
+        v.graphics_gi_wet_ground=Clamp(std::isfinite(f)?f:0.5f,WetGroundMin,WetGroundMax);
     } else if (key == "graphics_smooth_normals") {
         v.graphics_smooth_normals=i!=0;
     } else if (key == "graphics_native_sss") {
@@ -363,7 +363,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_local_inverse_square") {
         v.graphics_local_inverse_square=i!=0;
     } else if (key == "graphics_local_light_intensity") {
-        v.graphics_local_light_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,4.0f);
+        v.graphics_local_light_intensity=Clamp(std::isfinite(f)?f:1.0f,LocalLightIntensityMin,LocalLightIntensityMax);
     } else if (key == "graphics_uniform_local_light") {
         v.graphics_uniform_local_light=i!=0;
     } else if (key == "graphics_disable_player_light") {
@@ -375,7 +375,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_light_sharpness") {
         v.graphics_light_sharpness=Clamp(std::isfinite(f)?f:LightSharpnessMax,1.0f,LightSharpnessMax);
     } else if (key == "graphics_dof_intensity") {
-        v.graphics_dof_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+        v.graphics_dof_intensity=Clamp(std::isfinite(f)?f:1.0f,DofIntensityMin,DofIntensityMax);
     } else if (key == "graphics_shadow_resolution") {
         v.graphics_shadow_resolution=std::clamp(i,0,2);
     } else if (key == "graphics_local_shadow_resolution") {

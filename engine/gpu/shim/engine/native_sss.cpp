@@ -25,6 +25,7 @@ struct Owner {
 };
 std::array<Owner, 16> g_owners{};
 bool g_disable_owned = false;
+std::atomic<bool> g_owned{false};
 std::uint8_t g_disable_baseline = 0;
 
 template <typename T> bool Read(std::uint64_t at, T& value) {
@@ -78,13 +79,20 @@ void Restore() {
             host_log("native skin SSS: force-disable changed externally; preserving it");
         g_disable_owned = false;
     }
+    g_owned.store(false, std::memory_order_relaxed);
+}
+bool NothingToRelease() {
+    return !g_owned.load(std::memory_order_relaxed) &&
+           g_status.load(std::memory_order_relaxed) == Status::Off;
 }
 }
 
 void BeforeRender(std::uint64_t context) {
     if (!g_image) return;
+    const bool enabled = BbSettings::Get().graphics_native_sss.load(std::memory_order_relaxed);
+    if (!enabled && NothingToRelease()) return;
     std::scoped_lock lock(g_mutex);
-    if (!BbSettings::Get().graphics_native_sss.load(std::memory_order_relaxed)) {
+    if (!enabled) {
         Restore();
         Publish(Status::Off);
         return;
@@ -96,6 +104,15 @@ void BeforeRender(std::uint64_t context) {
         return;
     }
     Owner* slot = nullptr;
+    // Steady state: the view is already owned and unchanged. Retired owners are only
+    // re-validated (to free slots) when a new or changed view appears; Restore() still
+    // validates every owner before writing through it.
+    for (auto& owner : g_owners)
+        if (owner.context == view.context && owner.resources == view.resources) {
+            slot = &owner;
+            break;
+        }
+    if (!slot)
     for (auto& owner : g_owners) {
         if (owner.context && owner.context != view.context) {
             Owner current;
@@ -118,6 +135,7 @@ void BeforeRender(std::uint64_t context) {
         return;
     }
     if (!slot->context) *slot = view;
+    g_owned.store(true, std::memory_order_relaxed);
     if (!g_disable_owned) {
         g_disable_baseline = disabled;
         g_disable_owned = true;
@@ -138,7 +156,8 @@ bool Install(std::uint8_t* image, std::size_t size) {
     return true;
 }
 void Tick() {
-    if (!g_image || BbSettings::Get().graphics_native_sss.load(std::memory_order_relaxed)) return;
+    if (!g_image || BbSettings::Get().graphics_native_sss.load(std::memory_order_relaxed) ||
+        NothingToRelease()) return;
     std::scoped_lock lock(g_mutex);
     Restore();
     Publish(Status::Off);
