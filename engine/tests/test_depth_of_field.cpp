@@ -36,6 +36,7 @@ struct Params {
     uint32_t cb, vb, width, height;
     float intensity = 1.0f, delta_seconds = 1.0f / 60.0f;
     uint32_t reset_focus = 1;
+    uint32_t tile_size = 0;
 };
 
 uint16_t Half(float value) {
@@ -385,7 +386,8 @@ int main() {
         t.Upload(staging, output, stock.data());
         t.Upload(staging, raw_depth, depths.data());
         t.Begin();
-        Params p{C, V, W, H, intensity, dt, uint32_t(reset)};
+        const uint32_t tile_size = uint32_t(std::ceil((10.0f / 1080) * H * intensity)) + 1;
+        Params p{C, V, W, H, intensity, dt, uint32_t(reset), tile_size};
         t.Dispatch(0, p, 1, 1);
         t.Dispatch(1, p, (W + 7) / 8, (H + 7) / 8);
         t.Dispatch(2, p, 1, 1);
@@ -394,7 +396,6 @@ int main() {
         t.Dispatch(4, p, (HW + 7) / 8, (HH + 7) / 8);
         t.Dispatch(5, p, (W + 7) / 8, (H + 7) / 8);
         if (intensity > 0 && enable_near) {
-            uint32_t tile_size = uint32_t(std::ceil((10.0f / 1080) * H * intensity)) + 1;
             t.Dispatch(7, p, (W + tile_size - 1) / tile_size, (H + tile_size - 1) / tile_size);
             t.Dispatch(8, p, (W + 7) / 8, (H + 7) / 8);
         }

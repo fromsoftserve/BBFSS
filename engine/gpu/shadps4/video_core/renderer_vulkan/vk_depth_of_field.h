@@ -49,14 +49,25 @@ private:
         float intensity = 1.0f;
         float delta_seconds = 0.0f;
         u32 reset_focus = 1;
+        u32 tile_size = 0;
     };
-    static_assert(sizeof(Params) == 28);
+    static_assert(sizeof(Params) == 32);
+    struct ViewEntry {
+        vk::Image image;
+        u64 uid = 0;
+        vk::Format format{};
+        vk::ImageView view;
+        u64 last_use = 0;
+    };
+    static constexpr size_t MaxWrites = 8;
+    enum class Edge : u32 { Both, First, Middle, Last };
     bool Enabled() const;
     void Fallback(const char* reason);
+    vk::ImageView CachedView(const VideoCore::Image& image);
     Target Access(VideoCore::ImageId id, bool write);
     void EnsureImages(u32 width, u32 height);
     void Dispatch(Stage stage, const Params& params, u32 width, u32 height,
-                  std::span<const vk::WriteDescriptorSet> writes);
+                  std::span<const vk::WriteDescriptorSet> writes, Edge edge = Edge::Both);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -78,5 +89,7 @@ private:
     u32 width = 0, height = 0;
     bool enabled = true, camera_ready = false, encoded = false, kernel_ready = false;
     bool fallback_reported = false;
+    std::array<ViewEntry, 4> view_cache{};
+    u64 view_uses = 0;
 };
 } // namespace Vulkan

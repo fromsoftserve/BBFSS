@@ -34,6 +34,7 @@ layout(push_constant) uniform Params {
     float intensity;
     float delta_seconds;
     uint reset_focus;
+    uint tile_size;
 } pc;
 
 bool finite(float v) { return !isnan(v) && !isinf(v); }
@@ -68,7 +69,7 @@ float near_radius(float z, ivec2 p) {
            (10.0 / 1080.0) * float(pc.size.y) * pc.intensity;
 }
 float max_near_radius() { return (10.0 / 1080.0) * float(pc.size.y) * pc.intensity; }
-int near_tile_size() { return max(1, int(ceil(max_near_radius())) + 1); }
+int near_tile_size() { return max(1, int(pc.tile_size)); }
 
 #if defined(NEAR_TILES)
 shared uint tile_radius[64];

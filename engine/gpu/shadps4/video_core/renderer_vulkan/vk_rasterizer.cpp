@@ -2606,8 +2606,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.endQuery(query.pool, query.index);
         }
     });
-    EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
-    DepthOfFieldAfterDraw(pipeline, state);
+    // The Froyok pyramid must see the defocused image, so DOF's recombination goes first.
+    const auto* epilogue_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (epilogue_ps && epilogue_ps->pgm_hash == 0x9e1cb278) {
+        DepthOfFieldAfterDraw(pipeline, state);
+        EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
+    } else {
+        EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
+        DepthOfFieldAfterDraw(pipeline, state);
+    }
     if (spatial_ao->Enabled()) {
         HqAoAfterDraw(pipeline, state);
     }
@@ -6460,9 +6467,16 @@ bool Rasterizer::SkyBeforeRendering(const AmdGpu::Regs& regs, const GraphicsPipe
             if (image == bound_images.end()) {
                 continue;
             }
+            const auto& sky_image = texture_cache.GetImage(*image);
+            SkyZenith::SourceKey sky_key{sky_image.GetImage(), sky_image.image_uid, 0,
+                                         False(sky_image.flags & VideoCore::ImageFlagBits::Dirty)};
+            for (const u64 mip_hash : sky_image.mip_hashes) {
+                sky_key.hash = sky_key.hash * 0x9E3779B97F4A7C15ull + mip_hash + 1;
+            }
             runtime.FlushBarriers();
             if (const auto view =
-                    sky_zenith->Filter(image_infos[index], sky_seam->VerificationBuffer(), count)) {
+                    sky_zenith->Filter(image_infos[index], sky_key, sky_seam->VerificationBuffer(),
+                                       count)) {
                 image_infos[index].imageView = view;
                 image_infos[index].imageLayout = vk::ImageLayout::eGeneral;
             }

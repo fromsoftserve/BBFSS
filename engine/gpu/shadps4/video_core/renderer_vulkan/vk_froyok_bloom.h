@@ -43,19 +43,25 @@ private:
         u32 width{}, height{};
     };
     struct Push {
-        std::array<float, 2> source_size;
         std::array<u32, 2> destination_size;
         std::array<float, 2> pixel_size;
         float blend;
-        u32 unused;
     };
-    static_assert(sizeof(Push) == 32);
+    static_assert(sizeof(Push) == 20);
+    struct ViewEntry {
+        vk::Image image;
+        u64 uid = 0;
+        vk::Format format{};
+        vk::ImageView view;
+        u64 last_use = 0;
+    };
 
     bool Ready();
+    vk::ImageView CachedView(const VideoCore::Image& image);
     Source Access(VideoCore::ImageId id);
     bool EnsureImages(u32 width, u32 height);
     void Dispatch(u32 stage, const Push& push, vk::ImageView current,
-                  vk::ImageView previous, const Image& output);
+                  vk::ImageView previous, const Image& output, bool first, bool last);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -69,6 +75,8 @@ private:
     std::vector<Image> downsampled, upsampled;
     u32 width{}, height{};
     bool tried{}, failed{}, ready{}, reported{};
+    std::array<ViewEntry, 4> view_cache{};
+    u64 view_uses = 0;
 };
 
 } // namespace Vulkan

@@ -55,6 +55,14 @@ void Barrier(vk::CommandBuffer cmd) {
         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite};
     cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
+void ComputeBarrier(vk::CommandBuffer cmd) {
+    const vk::MemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
+    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+}
 } // namespace
 
 DepthOfField::DepthOfField(const Instance& instance_, Scheduler& scheduler_,
@@ -101,7 +109,45 @@ DepthOfField::DepthOfField(const Instance& instance_, Scheduler& scheduler_,
         instance, 0, 48, VideoCore::MemoryType::DeviceLocal, "DOF camera, kernel and autofocus");
 }
 
-DepthOfField::~DepthOfField() = default;
+DepthOfField::~DepthOfField() {
+    // The presenter finished the GPU's work before the rasterizer goes.
+    const auto device = instance.GetDevice();
+    for (const auto& entry : view_cache) {
+        if (entry.view) {
+            device.destroyImageView(entry.view);
+        }
+    }
+}
+
+vk::ImageView DepthOfField::CachedView(const VideoCore::Image& image) {
+    const vk::Image handle = image.GetImage();
+    const vk::Format format = image.info.pixel_format;
+    ViewEntry* oldest = &view_cache[0];
+    for (auto& entry : view_cache) {
+        if (entry.view && entry.image == handle && entry.uid == image.image_uid &&
+            entry.format == format) {
+            entry.last_use = ++view_uses;
+            return entry.view;
+        }
+        if (entry.last_use < oldest->last_use) {
+            oldest = &entry;
+        }
+    }
+    const auto device = instance.GetDevice();
+    if (oldest->view) {
+        scheduler.DeferOperation([device, view = oldest->view] { device.destroyImageView(view); });
+    }
+    *oldest = {
+        .image = handle,
+        .uid = image.image_uid,
+        .format = format,
+        .view = Check<"create DOF HDR view">(device.createImageView({
+            .image = handle, .viewType = vk::ImageViewType::e2D,
+            .format = format, .subresourceRange = ColorRange})),
+        .last_use = ++view_uses,
+    };
+    return oldest->view;
+}
 
 bool DepthOfField::Enabled() const {
     return enabled && BbSettings::Get().effects[BbSettings::EffectDof].load(
@@ -143,11 +189,7 @@ DepthOfField::Target DepthOfField::Access(VideoCore::ImageId id, bool write) {
         Fallback("HDR target lacks storage support");
         return {};
     }
-    const auto device = instance.GetDevice();
-    const auto view = Check<"create DOF HDR view">(device.createImageView({
-        .image = image.GetImage(), .viewType = vk::ImageViewType::e2D,
-        .format = image.info.pixel_format, .subresourceRange = ColorRange}));
-    scheduler.DeferOperation([device, view] { device.destroyImageView(view); });
+    const auto view = CachedView(image);
     runtime.Transit(&image, vk::ImageLayout::eGeneral, Compute, access);
     runtime.FlushBarriers();
     return {view, image.info.size.width, image.info.size.height};
@@ -197,38 +239,54 @@ void DepthOfField::EnsureImages(u32 w, u32 h) {
 }
 
 void DepthOfField::Dispatch(Stage stage, const Params& params, u32 w, u32 h,
-                            std::span<const vk::WriteDescriptorSet> writes) {
+                            std::span<const vk::WriteDescriptorSet> writes, Edge edge) {
+    ASSERT(writes.size() <= MaxWrites);
     // Descriptor pointers are borrowed by the caller; record copies the pointed-to data.
-    std::vector<vk::DescriptorImageInfo> images(writes.size());
-    std::vector<vk::DescriptorBufferInfo> buffers(writes.size());
-    std::vector<vk::WriteDescriptorSet> owned(writes.begin(), writes.end());
-    for (size_t i = 0; i < writes.size(); ++i) {
-        if (writes[i].pImageInfo) {
+    std::array<vk::DescriptorImageInfo, MaxWrites> images{};
+    std::array<vk::DescriptorBufferInfo, MaxWrites> buffers{};
+    std::array<u32, MaxWrites> bindings{};
+    std::array<vk::DescriptorType, MaxWrites> types{};
+    std::array<bool, MaxWrites> is_image{};
+    const u32 count = u32(writes.size());
+    for (u32 i = 0; i < count; ++i) {
+        bindings[i] = writes[i].dstBinding;
+        types[i] = writes[i].descriptorType;
+        is_image[i] = writes[i].pImageInfo != nullptr;
+        if (is_image[i]) {
             images[i] = *writes[i].pImageInfo;
-            owned[i].pImageInfo = &images[i];
         } else {
             buffers[i] = *writes[i].pBufferInfo;
-            owned[i].pBufferInfo = &buffers[i];
         }
     }
+    const bool full_before = edge == Edge::Both || edge == Edge::First;
+    const bool full_after = edge == Edge::Both || edge == Edge::Last;
     scheduler.Record(
-        [params, w, h, images = std::move(images), buffers = std::move(buffers),
-         writes = std::move(owned), pipeline = *pipelines[stage],
-         pipeline_layout = *layout](vk::CommandBuffer cmd) {
-            Barrier(cmd);
-            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
-            auto descriptors = writes;
-            for (size_t i = 0; i < descriptors.size(); ++i) {
-                if (descriptors[i].pImageInfo)
-                    descriptors[i].pImageInfo = &images[i];
-                else
-                    descriptors[i].pBufferInfo = &buffers[i];
+        [params, w, h, count, images, buffers, bindings, types, is_image, full_before, full_after,
+         pipeline = *pipelines[stage], pipeline_layout = *layout](vk::CommandBuffer cmd) {
+            if (full_before) {
+                Barrier(cmd);
+            } else {
+                ComputeBarrier(cmd);
             }
-            cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, pipeline_layout, 0, descriptors);
+            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+            std::array<vk::WriteDescriptorSet, MaxWrites> descriptors;
+            for (u32 i = 0; i < count; ++i) {
+                descriptors[i] = {.dstBinding = bindings[i], .descriptorCount = 1,
+                                  .descriptorType = types[i]};
+                if (is_image[i]) {
+                    descriptors[i].pImageInfo = &images[i];
+                } else {
+                    descriptors[i].pBufferInfo = &buffers[i];
+                }
+            }
+            cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, pipeline_layout, 0,
+                                     count, descriptors.data());
             cmd.pushConstants(pipeline_layout, vk::ShaderStageFlagBits::eCompute,
                               0, sizeof(params), &params);
             cmd.dispatch(w, h, 1);
-            Barrier(cmd);
+            if (full_after) {
+                Barrier(cmd);
+            }
         });
 }
 
@@ -291,7 +349,7 @@ void DepthOfField::Composite(VideoCore::ImageId target_id, VAddr sharp_address, 
     const auto* source_image = texture_cache.TryGetImage(source, source_uid);
     if (!source_image || sharp_address != source_address ||
         blur_address != blur_target || target_id == source || !sharp.imageView ||
-        (source_image && texture_cache.GetImage(target_id).GetImage() == source_image->GetImage()) ||
+        texture_cache.GetImage(target_id).GetImage() == source_image->GetImage() ||
         !HasWords(constants, offset, 78)) {
         Fallback("unrecognized DOF resource chain");
         return;
@@ -303,6 +361,8 @@ void DepthOfField::Composite(VideoCore::ImageId target_id, VAddr sharp_address, 
         Fallback("DOF source and output extents differ");
         return;
     }
+    const float raw_intensity =
+        BbSettings::Get().graphics_dof_intensity.load(std::memory_order_relaxed);
     const vk::DescriptorBufferInfo gpu_state{state->Handle(), 0, 48};
     const vk::DescriptorImageInfo si{*sampler, sharp.imageView, sharp.imageLayout};
     const vk::DescriptorImageInfo di{*sampler, *depth.view, vk::ImageLayout::eGeneral};
@@ -310,30 +370,33 @@ void DepthOfField::Composite(VideoCore::ImageId target_id, VAddr sharp_address, 
     const vk::DescriptorImageInfo hi{*sampler, *half_depth.view, vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo bi{*sampler, *blurred.view, vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo out{{}, target.view, vk::ImageLayout::eGeneral};
-    const float intensity = BbSettings::Get().graphics_dof_intensity.load(std::memory_order_relaxed);
+    const float intensity = std::clamp(
+        std::isfinite(raw_intensity) ? raw_intensity : 1.0f, 0.0f, 3.0f);
+    const u32 tile_size = std::max(1u, u32(std::ceil((10.0f / 1080.0f) * height * intensity)) + 1);
     const auto now = std::chrono::steady_clock::now();
     const float elapsed = std::chrono::duration<float>(now - last_focus).count();
-    const Params params{offset / 4, 0, width, height,
-                        std::clamp(std::isfinite(intensity) ? intensity : 1.0f, 0.0f, 3.0f),
-                        std::clamp(elapsed, 0.0f, 0.1f), u32(focus_reset || elapsed > 0.25f)};
+    const Params params{offset / 4, 0, width, height, intensity,
+                        std::clamp(elapsed, 0.0f, 0.1f), u32(focus_reset || elapsed > 0.25f),
+                        tile_size};
     last_focus = now;
     focus_reset = false;
     const std::array focus_writes{Write(2, gpu_state), Write(4, Sampled, di)};
-    Dispatch(Focus, params, 1, 1, focus_writes);
+    Dispatch(Focus, params, 1, 1, focus_writes, Edge::First);
     const u32 half_w = (width + 1) / 2, half_h = (height + 1) / 2;
     const std::array prep_writes{Write(0, constants), Write(2, gpu_state),
         Write(3, Sampled, si), Write(4, Sampled, di), Write(9, Storage, pi),
         Write(10, Storage, hi)};
-    Dispatch(Prepare, params, (half_w + 7) / 8, (half_h + 7) / 8, prep_writes);
+    Dispatch(Prepare, params, (half_w + 7) / 8, (half_h + 7) / 8, prep_writes, Edge::Middle);
     const std::array gather_writes{Write(0, constants), Write(2, gpu_state),
         Write(5, Sampled, pi), Write(6, Sampled, hi), Write(11, Storage, bi)};
-    Dispatch(Gather, params, (half_w + 7) / 8, (half_h + 7) / 8, gather_writes);
+    Dispatch(Gather, params, (half_w + 7) / 8, (half_h + 7) / 8, gather_writes, Edge::Middle);
     const std::array resolve_writes{Write(0, constants), Write(2, gpu_state),
         Write(3, Sampled, si), Write(4, Sampled, di), Write(6, Sampled, hi),
         Write(7, Sampled, bi), Write(12, Storage, out)};
-    Dispatch(Resolve, params, (width + 7) / 8, (height + 7) / 8, resolve_writes);
-    if (params.intensity > 0.0f) {
-        const u32 tile_size = u32(std::ceil((10.0f / 1080.0f) * height * params.intensity)) + 1;
+    const bool near_pass = intensity > 0.0f;
+    Dispatch(Resolve, params, (width + 7) / 8, (height + 7) / 8, resolve_writes,
+             near_pass ? Edge::Middle : Edge::Last);
+    if (near_pass) {
         const u32 tiles_w = (width + tile_size - 1) / tile_size;
         const u32 tiles_h = (height + tile_size - 1) / tile_size;
         if (!near_tiles.image || near_tile_size != tile_size ||
@@ -372,10 +435,10 @@ void DepthOfField::Composite(VideoCore::ImageId target_id, VAddr sharp_address, 
         const vk::DescriptorImageInfo tiles{*sampler, *near_tiles.view, vk::ImageLayout::eGeneral};
         const std::array tile_writes{Write(2, gpu_state), Write(4, Sampled, di),
                                     Write(13, Storage, tiles)};
-        Dispatch(NearTiles, params, tiles_w, tiles_h, tile_writes);
+        Dispatch(NearTiles, params, tiles_w, tiles_h, tile_writes, Edge::Middle);
         const std::array near_writes{Write(2, gpu_state), Write(3, Sampled, si),
             Write(4, Sampled, di), Write(12, Storage, out), Write(14, Sampled, tiles)};
-        Dispatch(Near, params, (width + 7) / 8, (height + 7) / 8, near_writes);
+        Dispatch(Near, params, (width + 7) / 8, (height + 7) / 8, near_writes, Edge::Last);
     }
 }
 } // namespace Vulkan

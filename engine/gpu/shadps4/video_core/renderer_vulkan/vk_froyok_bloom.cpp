@@ -32,6 +32,14 @@ void Barrier(vk::CommandBuffer cmd) {
         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite};
     cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
+void ComputeBarrier(vk::CommandBuffer cmd) {
+    const vk::MemoryBarrier2 barrier{
+        .srcStageMask = Compute,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .dstStageMask = Compute,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
+    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+}
 }
 
 FroyokBloom::FroyokBloom(const Instance& instance_, Scheduler& scheduler_,
@@ -40,7 +48,45 @@ FroyokBloom::FroyokBloom(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_},
       scene_targets{scene_targets_} {}
 
-FroyokBloom::~FroyokBloom() = default;
+FroyokBloom::~FroyokBloom() {
+    // The presenter finished the GPU's work before the rasterizer goes.
+    const auto device = instance.GetDevice();
+    for (const auto& entry : view_cache) {
+        if (entry.view) {
+            device.destroyImageView(entry.view);
+        }
+    }
+}
+
+vk::ImageView FroyokBloom::CachedView(const VideoCore::Image& image) {
+    const vk::Image handle = image.GetImage();
+    const vk::Format format = image.info.pixel_format;
+    ViewEntry* oldest = &view_cache[0];
+    for (auto& entry : view_cache) {
+        if (entry.view && entry.image == handle && entry.uid == image.image_uid &&
+            entry.format == format) {
+            entry.last_use = ++view_uses;
+            return entry.view;
+        }
+        if (entry.last_use < oldest->last_use) {
+            oldest = &entry;
+        }
+    }
+    const auto device = instance.GetDevice();
+    if (oldest->view) {
+        scheduler.DeferOperation([device, view = oldest->view] { device.destroyImageView(view); });
+    }
+    *oldest = {
+        .image = handle,
+        .uid = image.image_uid,
+        .format = format,
+        .view = Check<"create Froyok HDR view">(device.createImageView({
+            .image = handle, .viewType = vk::ImageViewType::e2D,
+            .format = format, .subresourceRange = ColorRange})),
+        .last_use = ++view_uses,
+    };
+    return oldest->view;
+}
 
 void FroyokBloom::OnFrameEnd() {
     ready = false;
@@ -98,18 +144,14 @@ FroyokBloom::Source FroyokBloom::Access(VideoCore::ImageId id) {
         const auto proxy = scene_targets.Read(id, info);
         return {proxy.view, scene_targets.Size().width, scene_targets.Size().height};
     }
-    const auto device = instance.GetDevice();
-    const auto view = Check<"create Froyok HDR view">(device.createImageView({
-        .image = image.GetImage(), .viewType = vk::ImageViewType::e2D,
-        .format = image.info.pixel_format, .subresourceRange = ColorRange}));
-    scheduler.DeferOperation([device, view] { device.destroyImageView(view); });
+    const auto view = CachedView(image);
     runtime.Transit(&image, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
     return {view, image.info.size.width, image.info.size.height};
 }
 
 bool FroyokBloom::EnsureImages(u32 w, u32 h) {
-    if (width == w && height == h && !downsampled.empty() && !upsampled.empty()) {
+    if (width == w && height == h && !downsampled.empty()) {
         return true;
     }
     const u32 levels = std::max(1, int(std::floor(std::log2(std::min(w, h)))) - 3);
@@ -132,13 +174,13 @@ bool FroyokBloom::EnsureImages(u32 w, u32 h) {
                 });
         }
         images->clear();
-        images->resize(levels);
+        images->resize(images == &downsampled ? levels : levels - 1);
     }
     width = w;
     height = h;
     const auto device = instance.GetDevice();
     for (auto* images : {&downsampled, &upsampled}) {
-        for (u32 level = 0; level < levels; ++level) {
+        for (u32 level = 0; level < images->size(); ++level) {
             Image& image = (*images)[level];
             image.width = std::max(1u, (w >> level) / 2);
             image.height = std::max(1u, (h >> level) / 2);
@@ -168,16 +210,20 @@ bool FroyokBloom::EnsureImages(u32 w, u32 h) {
 }
 
 void FroyokBloom::Dispatch(u32 stage, const Push& push, vk::ImageView current,
-                           vk::ImageView previous, const Image& output) {
+                           vk::ImageView previous, const Image& output, bool first, bool last) {
     const vk::DescriptorImageInfo in{stage == 2 ? vk::Sampler(*upsample_sampler)
                                                 : vk::Sampler(*downsample_sampler),
                                      current, vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo before{*upsample_sampler, previous, vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo out{{}, *output.view, vk::ImageLayout::eGeneral};
     const u32 groups_x = (output.width + 7) / 8, groups_y = (output.height + 7) / 8;
-    scheduler.Record([push, groups_x, groups_y, in, before, out, pipeline = *pipelines[stage],
-                      layout = *layout](vk::CommandBuffer cmd) {
-        Barrier(cmd);
+    scheduler.Record([push, groups_x, groups_y, in, before, out, first, last,
+                      pipeline = *pipelines[stage], layout = *layout](vk::CommandBuffer cmd) {
+        if (first) {
+            Barrier(cmd);
+        } else {
+            ComputeBarrier(cmd);
+        }
         const std::array descriptors{
             vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
                                    .descriptorType = vk::DescriptorType::eCombinedImageSampler,
@@ -192,7 +238,9 @@ void FroyokBloom::Dispatch(u32 stage, const Push& push, vk::ImageView current,
         cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, descriptors);
         cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
         cmd.dispatch(groups_x, groups_y, 1);
-        Barrier(cmd);
+        if (last) {
+            Barrier(cmd);
+        }
     });
 }
 
@@ -211,30 +259,35 @@ void FroyokBloom::Generate(VideoCore::ImageId id) {
         }
         return;
     }
-    Push push{.source_size = {float(source.width), float(source.height)},
-              .destination_size = {downsampled[0].width, downsampled[0].height},
-              .pixel_size = {1.0f / source.width, 1.0f / source.height}, .blend = 0.0f, .unused = 0};
-    Dispatch(1, push, source.view, source.view, downsampled[0]);
+    const u32 total = u32(downsampled.size() * 2 - 1);
+    u32 issued = 0;
+    const auto run = [&](u32 stage, const Push& push, vk::ImageView current,
+                         vk::ImageView previous, const Image& output) {
+        const bool first = issued == 0;
+        const bool last = ++issued == total;
+        Dispatch(stage, push, current, previous, output, first, last);
+    };
+    Push push{.destination_size = {downsampled[0].width, downsampled[0].height},
+              .pixel_size = {1.0f / source.width, 1.0f / source.height}, .blend = 0.0f};
+    run(1, push, source.view, source.view, downsampled[0]);
     for (size_t level = 1; level < downsampled.size(); ++level) {
         const Image& previous = downsampled[level - 1];
         const Image& output = downsampled[level];
-        push = {.source_size = {float(previous.width), float(previous.height)},
-                .destination_size = {output.width, output.height},
-                .pixel_size = {1.0f / previous.width, 1.0f / previous.height}, .blend = 0.0f, .unused = 0};
-        Dispatch(0, push, *previous.view, *previous.view, output);
+        push = {.destination_size = {output.width, output.height},
+                .pixel_size = {1.0f / previous.width, 1.0f / previous.height}, .blend = 0.0f};
+        run(0, push, *previous.view, *previous.view, output);
     }
     for (size_t level = downsampled.size() - 1; level-- > 0;) {
         const Image& current = downsampled[level];
         const Image& previous = level + 1 == downsampled.size() - 1 ? downsampled.back()
                                                                       : upsampled[level + 1];
         const Image& output = upsampled[level];
-        push = {.source_size = {float(previous.width), float(previous.height)},
-                .destination_size = {output.width, output.height},
+        push = {.destination_size = {output.width, output.height},
                 .pixel_size = {1.0f / output.width, 1.0f / output.height},
                 .blend = std::clamp(BbSettings::Get().graphics_froyok_bloom_spread.load(
                                          std::memory_order_relaxed), BbSettings::FroyokSpreadMin,
-                                     BbSettings::FroyokSpreadDefault), .unused = 0};
-        Dispatch(2, push, *current.view, *previous.view, output);
+                                     BbSettings::FroyokSpreadDefault)};
+        run(2, push, *current.view, *previous.view, output);
     }
     ready = true;
 }
@@ -242,7 +295,8 @@ void FroyokBloom::Generate(VideoCore::ImageId id) {
 float FroyokBloom::Composite(const Shader::Info& fragment,
                              std::span<vk::DescriptorImageInfo> image_infos) {
     if (!ready || fragment.pgm_hash != Shader::Native::FroyokCompositeHash ||
-        !fragment.uses_froyok_bloom || fragment.images.size() != 4 || image_infos.size() != 4) {
+        !fragment.uses_froyok_bloom || fragment.images.size() != 4 || image_infos.size() != 4 ||
+        upsampled.empty()) {
         return 0.0f;
     }
     ready = false;
