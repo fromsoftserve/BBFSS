@@ -2608,7 +2608,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     });
     // The Froyok pyramid must see the defocused image, so DOF's recombination goes first.
     const auto* epilogue_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    if (epilogue_ps && epilogue_ps->pgm_hash == 0x9e1cb278) {
+    if (epilogue_ps && epilogue_ps->pgm_hash == DofRecombinePixelShaderHash) {
         DepthOfFieldAfterDraw(pipeline, state);
         EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
     } else {
@@ -6499,7 +6499,7 @@ void Rasterizer::DepthOfFieldAfterDraw(const GraphicsPipeline* pipeline, const R
     const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
     if (!ps_info || !cb_descs[0].first ||
         (ps_info->pgm_hash != 0xf55643de && ps_info->pgm_hash != 0xfbe7c4b6 &&
-         ps_info->pgm_hash != 0xe80526cc && ps_info->pgm_hash != 0x9e1cb278)) {
+         ps_info->pgm_hash != 0xe80526cc && ps_info->pgm_hash != DofRecombinePixelShaderHash)) {
         return;
     }
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -6531,7 +6531,7 @@ void Rasterizer::DepthOfFieldAfterDraw(const GraphicsPipeline* pipeline, const R
         depth_of_field->Kernel(texture_cache.GetImage(cb_descs[0].first).info.guest_address,
                                constants, offset, buffer_infos[vertex],
                                push_data.buf_offsets[vertex]);
-    } else if (ps_info->pgm_hash == 0x9e1cb278 && vs_info.pgm_hash == 0xd3ca03f3 &&
+    } else if (ps_info->pgm_hash == DofRecombinePixelShaderHash && vs_info.pgm_hash == DofRecombineVertexShaderHash &&
                ps_info->images.size() == 2 && image_infos.size() >= 2 &&
                state.num_color_attachments == 1 && state.num_layers == 1) {
         depth_of_field->Composite(cb_descs[0].first,

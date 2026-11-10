@@ -13,6 +13,7 @@
 
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -42,14 +43,7 @@ ivec2 tileCount() {
     return (ivec2(size) + TILE - 1) / TILE;
 }
 
-float viewZ(float depth) {
-    return proj.w / min(depth - proj.z, -1e-8);
-}
-
-vec3 viewPos(vec2 pixel, float z) {
-    const vec2 ndc = (pixel - jitter) / size * 2.0 - 1.0;
-    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
-}
+#include "ssgi_common.glsl"
 
 vec3 prevViewPos(vec2 pixel, float z) {
     const vec2 ndc = (pixel - prev_jitter) / size * 2.0 - 1.0;
@@ -417,8 +411,8 @@ void main() {
         // Once history has settled, clamp one-ray outliers so a lucky hit on a lamp does not
         // flash the whole probe.
         if (hist.a >= 4.0) {
-            const float luma = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
-            const float limit = 4.0 * dot(hist.rgb, vec3(0.2126, 0.7152, 0.0722)) + 0.05;
+            const float luma = luminance(radiance);
+            const float limit = 4.0 * luminance(hist.rgb) + 0.05;
             radiance *= luma > limit ? limit / luma : 1.0;
         }
         radiance = mix(hist.rgb, radiance, 1.0 / count);
@@ -1049,7 +1043,7 @@ void main() {
     if (albedo_on > 0.5) {
         albedo = texelFetch(albedo_tex, pixel, 0).rgb;
     } else {
-        const float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        const float luma = luminance(color.rgb);
         albedo = ALBEDO * mix(vec3(1.0), clamp(color.rgb / max(luma, 1e-3), 0.0, 2.5), 0.6);
     }
     const float ao = ao_amount > 0.0

@@ -2,6 +2,7 @@
 
 #version 460
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -41,10 +42,7 @@ const float ENERGY = 0.5;
 const float FEEDBACK = 0.5;
 const float HISTORY_TOLERANCE = 0.04;
 
-vec3 viewPos(vec2 pixel, float z) {
-    const vec2 ndc = (pixel - jitter) / size * 2.0 - 1.0;
-    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
-}
+#include "ssgi_common.glsl"
 
 bool historyCoord(vec3 pos, out vec2 hf, out float zp) {
     const vec4 v = vec4(pos, 1.0);

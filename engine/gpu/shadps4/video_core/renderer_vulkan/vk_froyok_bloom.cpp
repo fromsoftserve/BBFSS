@@ -24,22 +24,6 @@ namespace {
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 constexpr vk::ImageSubresourceRange ColorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 
-void Barrier(vk::CommandBuffer cmd) {
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-}
-void ComputeBarrier(vk::CommandBuffer cmd) {
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = Compute,
-        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-        .dstStageMask = Compute,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-}
 }
 
 FroyokBloom::FroyokBloom(const Instance& instance_, Scheduler& scheduler_,
@@ -195,14 +179,7 @@ bool FroyokBloom::EnsureImages(u32 w, u32 h) {
                 .image = vk::Image(image.image), .viewType = vk::ImageViewType::e2D,
                 .format = vk::Format::eR16G16B16A16Sfloat, .subresourceRange = ColorRange}));
             scheduler.Record([target = vk::Image(image.image)](vk::CommandBuffer cmd) {
-                const vk::ImageMemoryBarrier2 barrier{
-                    .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
-                    .dstStageMask = Compute, .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                    .oldLayout = vk::ImageLayout::eUndefined, .newLayout = vk::ImageLayout::eGeneral,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = target, .subresourceRange = ColorRange};
-                cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+                EffectPass::InitGeneral(cmd, target, ColorRange);
             });
         }
     }
@@ -220,9 +197,9 @@ void FroyokBloom::Dispatch(u32 stage, const Push& push, vk::ImageView current,
     scheduler.Record([push, groups_x, groups_y, in, before, out, first, last,
                       pipeline = *pipelines[stage], layout = *layout](vk::CommandBuffer cmd) {
         if (first) {
-            Barrier(cmd);
+            EffectPass::FullBarrier(cmd);
         } else {
-            ComputeBarrier(cmd);
+            EffectPass::ComputeBarrier(cmd);
         }
         const std::array descriptors{
             vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
@@ -239,7 +216,7 @@ void FroyokBloom::Dispatch(u32 stage, const Push& push, vk::ImageView current,
         cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
         cmd.dispatch(groups_x, groups_y, 1);
         if (last) {
-            Barrier(cmd);
+            EffectPass::FullBarrier(cmd);
         }
     });
 }
@@ -286,7 +263,7 @@ void FroyokBloom::Generate(VideoCore::ImageId id) {
                 .pixel_size = {1.0f / output.width, 1.0f / output.height},
                 .blend = std::clamp(BbSettings::Get().graphics_froyok_bloom_spread.load(
                                          std::memory_order_relaxed), BbSettings::FroyokSpreadMin,
-                                     BbSettings::FroyokSpreadDefault)};
+                                     BbSettings::FroyokSpreadMax)};
         run(2, push, *current.view, *previous.view, output);
     }
     ready = true;

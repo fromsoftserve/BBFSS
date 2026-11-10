@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
 
@@ -24,9 +25,7 @@ constexpr u64 ShadowResolveHash = 0xf55643de;
 constexpr u64 ShadowBlurHash = 0x11ffdfb5;
 constexpr u64 PointLightsFullHash = 0x9f9ef267;
 constexpr u64 HdrPostHash = 0xccbf44a6;
-constexpr u64 DirectionalTableHash = 0xd92266b9;
 constexpr u64 SceneTargetHash = 0x32e47788;
-constexpr u64 PointGridVertexHash = 0x8747a367;
 
 constexpr u32 PointLightCount(u64 hash) {
     switch (hash) {
@@ -507,9 +506,9 @@ void Rasterizer::EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeli
     }
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const u64 hash = ps_info->pgm_hash;
-    if (hash == 0x9e1cb278) {
-        if (cb_descs[0].first && vs_info.pgm_hash == 0xd3ca03f3 && ps_info->images.size() == 2 &&
-            image_infos.size() >= 2) {
+    if (hash == DofRecombinePixelShaderHash) {
+        if (cb_descs[0].first && vs_info.pgm_hash == DofRecombineVertexShaderHash &&
+            ps_info->images.size() == 2 && image_infos.size() >= 2) {
             froyok_bloom->Generate(cb_descs[0].first);
         }
         return;
@@ -526,12 +525,12 @@ void Rasterizer::EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeli
                                      .shadow_map = image_infos[1].imageView,
                                      .shadow_layout = image_infos[1].imageLayout,
                                      .constants_offset_word = PackedOffsets(push_data)});
-    } else if (hash == DirectionalTableHash && !buffer_infos.empty()) {
+    } else if (hash == DirectionalFragmentShaderHash && !buffer_infos.empty()) {
         volumetric_light->Tint(buffer_infos[0], push_data.buf_offsets[0] & 255u);
     } else if (const u32 count = PointLightCount(hash);
                count != 0 && (pipeline->GetGraphicsKey().mrt_mask & 3) == 3 && cb_descs[0].first &&
                cb_descs[1].first && buffer_infos.size() >= 2) {
-        if (vs_info.pgm_hash != PointGridVertexHash || ps_info->buffers.size() < 2 ||
+        if (vs_info.pgm_hash != PointGridVertexShaderHash || ps_info->buffers.size() < 2 ||
             ps_info->buffers[0].IsSpecial() || ps_info->buffers[1].IsSpecial()) {
             return;
         }

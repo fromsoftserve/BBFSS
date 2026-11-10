@@ -6,6 +6,7 @@
 #include "video_core/host_shaders/sky_zenith_validate_comp.h"
 #include "video_core/host_shaders/sky_zenith_horizontal_comp.h"
 #include "video_core/host_shaders/sky_zenith_vertical_comp.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -16,16 +17,6 @@ constexpr vk::ImageSubresourceRange AllMips{vk::ImageAspectFlagBits::eColor, 0, 
 // verified, applied, then 12 mips of indirect dispatch arguments (see sky_zenith.comp).
 constexpr u32 ValidationBytes = (2 + 12 * 3) * 4;
 constexpr u32 ArgsOffset = 2 * 4;
-void ComputeBarrier(vk::CommandBuffer cmd) {
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader |
-                        vk::PipelineStageFlagBits2::eDrawIndirect,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
-                         vk::AccessFlagBits2::eIndirectCommandRead};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-}
 }
 
 SkyZenith::SkyZenith(const Instance& instance_, Scheduler& scheduler_)
@@ -130,7 +121,12 @@ vk::ImageView SkyZenith::Filter(vk::DescriptorImageInfo source, const SourceKey&
         const Params params{mip, count, force};
         scheduler.Record([images, buffers, params, pass_index, args = validation->Handle(),
                           pipe = *pipelines[pass_index], layout = *layout](vk::CommandBuffer cmd) {
-            ComputeBarrier(cmd);
+            EffectPass::MemoryBarrier(
+                cmd, vk::PipelineStageFlagBits2::eAllCommands,
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eDrawIndirect,
+                vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
+                    vk::AccessFlagBits2::eIndirectCommandRead);
             std::array<vk::WriteDescriptorSet, 5> writes{};
             for (u32 i = 0; i < 5; ++i) {
                 writes[i] = {.dstBinding = i, .descriptorCount = 1,

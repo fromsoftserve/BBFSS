@@ -13,6 +13,8 @@ namespace Vulkan {
 
 inline constexpr u64 DirectionalFragmentShaderHash = 0xd92266b9;
 inline constexpr u64 PointGridVertexShaderHash = 0x8747a367;
+inline constexpr u64 DofRecombinePixelShaderHash = 0x9e1cb278;
+inline constexpr u64 DofRecombineVertexShaderHash = 0xd3ca03f3;
 
 /**
  * @brief Creates a vulkan shader module from SPIR-V bytecode.

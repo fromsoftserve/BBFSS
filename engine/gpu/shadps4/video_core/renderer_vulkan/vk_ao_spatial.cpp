@@ -8,6 +8,7 @@
 #include "video_core/host_shaders/gtao_denoise_comp.h"
 #include "video_core/host_shaders/gtao_denoise_full_comp.h"
 #include "video_core/host_shaders/gtao_full_comp.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
@@ -41,14 +42,6 @@ static_assert(sizeof(FullParams) == 16);
 u32 SmoothNormalsBit() {
     return BbSettings::Get().graphics_smooth_normals.load(std::memory_order_relaxed) ? 0x80000000u
                                                                                      : 0u;
-}
-
-void Barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 source,
-             vk::AccessFlags2 source_access, vk::PipelineStageFlags2 destination,
-             vk::AccessFlags2 destination_access) {
-    const vk::MemoryBarrier2 barrier{.srcStageMask = source, .srcAccessMask = source_access,
-        .dstStageMask = destination, .dstAccessMask = destination_access};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
 void ToGeneral(vk::CommandBuffer cmd, vk::Image image) {
@@ -236,7 +229,7 @@ void SpatialAo::Filter(VideoCore::ImageId id, const VideoCore::ImageViewInfo& in
          temp_image = vk::Image(scratch.image), temp = *scratch.view,
          denoise_pipeline = *denoise.pipeline, denoise_layout = *denoise.layout,
          copy_pipeline = *copy.pipeline, copy_layout = *copy.layout](vk::CommandBuffer cmd) {
-            Barrier(cmd, All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            EffectPass::MemoryBarrier(cmd, All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
                 Compute, ReadWrite);
             if (created) ToGeneral(cmd, temp_image);
             const auto run = [&](vk::Pipeline pipeline, vk::PipelineLayout layout,
@@ -259,9 +252,9 @@ void SpatialAo::Filter(VideoCore::ImageId id, const VideoCore::ImageViewInfo& in
                 cmd.dispatch((params.extent[0] + 7) / 8, (params.extent[1] + 7) / 8, 1);
             };
             run(denoise_pipeline, denoise_layout, target, temp);
-            Barrier(cmd, Compute, ReadWrite, Compute, ReadWrite);
+            EffectPass::MemoryBarrier(cmd, Compute, ReadWrite, Compute, ReadWrite);
             run(copy_pipeline, copy_layout, temp, target);
-            Barrier(cmd, Compute, ReadWrite,
+            EffectPass::MemoryBarrier(cmd, Compute, ReadWrite,
                 All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
         });
     if (!reported) {
@@ -323,7 +316,7 @@ void SpatialAo::FullResolution(VideoCore::ImageId id, const VideoCore::ImageView
          sampler = *sampler, full_pipeline = *full.pipeline, full_layout = *full.layout,
          denoise_pipeline = *full_denoise.pipeline,
          denoise_layout = *full_denoise.layout](vk::CommandBuffer cmd) {
-            Barrier(cmd, All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            EffectPass::MemoryBarrier(cmd, All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
                 Compute, ReadWrite);
             if (created) ToGeneral(cmd, temp_image);
             const vk::DescriptorImageInfo depth_info{{}, depth.imageView, depth.imageLayout};
@@ -350,7 +343,7 @@ void SpatialAo::FullResolution(VideoCore::ImageId id, const VideoCore::ImageView
             cmd.pushConstants(full_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(gather),
                               &gather);
             cmd.dispatch((gather.extent[0] + 7) / 8, (gather.extent[1] + 7) / 8, 1);
-            Barrier(cmd, Compute, ReadWrite, Compute, ReadWrite);
+            EffectPass::MemoryBarrier(cmd, Compute, ReadWrite, Compute, ReadWrite);
 
             const vk::DescriptorImageInfo output_info{{}, target, vk::ImageLayout::eGeneral};
             const std::array<vk::WriteDescriptorSet, 4> denoise_writes{{
@@ -368,7 +361,7 @@ void SpatialAo::FullResolution(VideoCore::ImageId id, const VideoCore::ImageView
             cmd.pushConstants(denoise_layout, vk::ShaderStageFlagBits::eCompute, 0,
                               sizeof(filter), &filter);
             cmd.dispatch((filter.extent[0] + 7) / 8, (filter.extent[1] + 7) / 8, 1);
-            Barrier(cmd, Compute, ReadWrite,
+            EffectPass::MemoryBarrier(cmd, Compute, ReadWrite,
                 All, vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
         });
     if (!full_reported) {

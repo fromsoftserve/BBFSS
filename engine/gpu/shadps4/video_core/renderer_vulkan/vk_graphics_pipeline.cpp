@@ -555,9 +555,9 @@ GraphicsPipeline::GraphicsPipeline(
     if (const char* flag = std::getenv("BB_SPECULAR_CAPTURE");
         flag && flag[0] == '1' && flag[1] == '\0' &&
         infos[u32(Shader::SwStage::Fragment)] &&
-        infos[u32(Shader::SwStage::Fragment)]->pgm_hash == 0xd92266b9 &&
+        infos[u32(Shader::SwStage::Fragment)]->pgm_hash == DirectionalFragmentShaderHash &&
         infos[u32(Shader::SwStage::Vertex)] &&
-        infos[u32(Shader::SwStage::Vertex)]->pgm_hash == 0x8747a367) {
+        infos[u32(Shader::SwStage::Vertex)]->pgm_hash == PointGridVertexShaderHash) {
         if (const char* directory = std::getenv("BB_CAPTURE_DIR"); directory && directory[0]) {
             std::ostringstream name;
             name << "pipeline-" << std::hex << std::hash<GraphicsPipelineKey>{}(key) << ".txt";

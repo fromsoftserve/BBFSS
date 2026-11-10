@@ -159,6 +159,9 @@ function(add_host_shader FILENAME SHADER_NAME)
     if (FILENAME MATCHES "^sun_vsm")
         list(APPEND INCLUDES ${SHADER_SRC}/sun_vsm.glsl)
     endif()
+    if (FILENAME MATCHES "^ssgi")
+        list(APPEND INCLUDES ${SHADER_SRC}/ssgi_common.glsl)
+    endif()
     add_custom_command(OUTPUT ${OUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DIR}
         COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -o ${OUT} --vn ${SYMBOL} ${STAGE} ${DEFINES} ${SHADER_SRC}/${FILENAME}

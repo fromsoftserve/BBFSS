@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/sky_seam_comp.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -68,12 +69,11 @@ vk::Buffer SkySeam::Correct(vk::DescriptorBufferInfo positions, vk::DescriptorBu
     scheduler.Record(
         [buffers, params, pipe = *pipeline, pl = *layout](vk::CommandBuffer cmd) {
             // Also orders reuse of the owned UV stream after the previous vertex fetch.
-            const vk::MemoryBarrier2 before{
-                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-                .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
-            cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
+            EffectPass::MemoryBarrier(
+                cmd, vk::PipelineStageFlagBits2::eAllCommands,
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                vk::PipelineStageFlagBits2::eComputeShader,
+                vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
             std::array<vk::WriteDescriptorSet, 3> writes{};
             for (u32 i = 0; i < writes.size(); ++i)
                 writes[i] = {.dstBinding = i, .descriptorCount = 1,

@@ -2,6 +2,7 @@
 
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -26,14 +27,7 @@ layout(push_constant) uniform Constants {
 const float PI = 3.14159265358979;
 const float HALF_PI = 1.57079632679490;
 
-float viewZ(float depth) {
-    return proj.w / min(depth - proj.z, -1e-8);
-}
-
-vec3 viewPos(vec2 pixel, float z) {
-    const vec2 ndc = (pixel - jitter) / size * 2.0 - 1.0;
-    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
-}
+#include "ssgi_common.glsl"
 
 #if defined(PREP)
 

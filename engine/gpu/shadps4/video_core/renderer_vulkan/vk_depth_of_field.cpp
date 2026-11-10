@@ -19,6 +19,7 @@
 #include "video_core/host_shaders/depth_of_field_focus_comp.h"
 #include "video_core/host_shaders/depth_of_field_near_tiles_comp.h"
 #include "video_core/host_shaders/depth_of_field_near_comp.h"
+#include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -46,22 +47,6 @@ vk::WriteDescriptorSet Write(u32 binding, vk::DescriptorType type,
                               const vk::DescriptorImageInfo& info) {
     return {.dstBinding = binding, .descriptorCount = 1, .descriptorType = type,
             .pImageInfo = &info};
-}
-void Barrier(vk::CommandBuffer cmd) {
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-}
-void ComputeBarrier(vk::CommandBuffer cmd) {
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
-    cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 } // namespace
 
@@ -222,14 +207,7 @@ void DepthOfField::EnsureImages(u32 w, u32 h) {
             .image = vk::Image(image.image), .viewType = vk::ImageViewType::e2D,
             .format = format, .subresourceRange = ColorRange}));
         scheduler.Record([target = vk::Image(image.image)](vk::CommandBuffer cmd) {
-            const vk::ImageMemoryBarrier2 barrier{
-                .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
-                .dstStageMask = Compute, .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                .oldLayout = vk::ImageLayout::eUndefined, .newLayout = vk::ImageLayout::eGeneral,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = target, .subresourceRange = ColorRange};
-            cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+            EffectPass::InitGeneral(cmd, target, ColorRange);
         });
     };
     create(depth, w, h, vk::Format::eR32Sfloat);
@@ -264,9 +242,9 @@ void DepthOfField::Dispatch(Stage stage, const Params& params, u32 w, u32 h,
         [params, w, h, count, images, buffers, bindings, types, is_image, full_before, full_after,
          pipeline = *pipelines[stage], pipeline_layout = *layout](vk::CommandBuffer cmd) {
             if (full_before) {
-                Barrier(cmd);
+                EffectPass::FullBarrier(cmd);
             } else {
-                ComputeBarrier(cmd);
+                EffectPass::ComputeBarrier(cmd);
             }
             cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             std::array<vk::WriteDescriptorSet, MaxWrites> descriptors;
@@ -285,7 +263,7 @@ void DepthOfField::Dispatch(Stage stage, const Params& params, u32 w, u32 h,
                               0, sizeof(params), &params);
             cmd.dispatch(w, h, 1);
             if (full_after) {
-                Barrier(cmd);
+                EffectPass::FullBarrier(cmd);
             }
         });
 }
@@ -422,14 +400,7 @@ void DepthOfField::Composite(VideoCore::ImageId target_id, VAddr sharp_address, 
                 .image = vk::Image(near_tiles.image), .viewType = vk::ImageViewType::e2D,
                 .format = vk::Format::eR32Sfloat, .subresourceRange = ColorRange}));
             scheduler.Record([image = vk::Image(near_tiles.image)](vk::CommandBuffer cmd) {
-                const vk::ImageMemoryBarrier2 b{
-                    .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
-                    .dstStageMask = Compute, .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                    .oldLayout = vk::ImageLayout::eUndefined, .newLayout = vk::ImageLayout::eGeneral,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = image, .subresourceRange = ColorRange};
-                cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+                EffectPass::InitGeneral(cmd, image, ColorRange);
             });
         }
         const vk::DescriptorImageInfo tiles{*sampler, *near_tiles.view, vk::ImageLayout::eGeneral};

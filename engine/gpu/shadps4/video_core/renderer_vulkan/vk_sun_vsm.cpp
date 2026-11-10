@@ -428,19 +428,13 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
          compute_layout = *compute_layout, draw_pipeline = *draw_pipeline,
          clear_pipeline = *clear_pipeline,
          draw_layout = *draw_layout](vk::CommandBuffer cmdbuf) mutable {
-            const auto memory = [&](vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
-                                    vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
-                const vk::MemoryBarrier2 barrier{.srcStageMask = src, .srcAccessMask = src_access,
-                                                 .dstStageMask = dst, .dstAccessMask = dst_access};
-                cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-            };
             constexpr auto ReadWrite =
                 vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
             {
             if (clear) {
                 cmdbuf.fillBuffer(state, 0, VK_WHOLE_SIZE, 0);
             }
-            memory(vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryWrite |
+            EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryWrite |
                                                                  vk::AccessFlagBits2::eMemoryRead,
                    Compute | vk::PipelineStageFlagBits2::eDrawIndirect |
                        vk::PipelineStageFlagBits2::eVertexShader,
@@ -508,7 +502,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                 cmdbuf.pushConstants(compute_layout, vk::ShaderStageFlagBits::eCompute, 0,
                                      sizeof(push), &push);
                 cmdbuf.dispatch(x, y, 1);
-                memory(Compute, vk::AccessFlagBits2::eShaderWrite, Compute, ReadWrite);
+                EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, Compute, ReadWrite);
             };
             const auto run_linear = [&](u32 mode, u32 threads) {
                 const u32 groups = std::max((threads + 63) / 64, 1u);
@@ -538,11 +532,11 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                     // The changed casters' kept bounds go back to the host, which drops kept
                     // casters the game would have drawn.
                     if (!bounds_copies.empty()) {
-                        memory(Compute, vk::AccessFlagBits2::eShaderWrite,
+                        EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
                                vk::PipelineStageFlagBits2::eCopy,
                                vk::AccessFlagBits2::eTransferRead);
                         cmdbuf.copyBuffer(bounds, bounds_readback, bounds_copies);
-                        memory(vk::PipelineStageFlagBits2::eCopy,
+                        EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eCopy,
                                vk::AccessFlagBits2::eTransferRead, Compute,
                                vk::AccessFlagBits2::eShaderWrite);
                     }
@@ -552,7 +546,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
             run_linear(ModeResolve, TableEntries);
             run_linear(ModeBin, push.triangle_count);
             run(ModeFinalize, 1, 1);
-            memory(Compute, vk::AccessFlagBits2::eShaderWrite,
+            EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
                    vk::PipelineStageFlagBits2::eDrawIndirect | vk::PipelineStageFlagBits2::eVertexShader,
                    vk::AccessFlagBits2::eIndirectCommandRead | vk::AccessFlagBits2::                   eShaderRead);
                                }

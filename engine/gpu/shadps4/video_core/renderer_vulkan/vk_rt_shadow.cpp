@@ -750,13 +750,7 @@ void RtShadow::RecordBuilds() {
         {.name = "Ray tracing geometry"},
         [job, positions = positions.buffer, unproject_pipeline = *unproject_pipeline,
          unproject_layout = *unproject_layout](vk::CommandBuffer cmdbuf) {
-            const auto memory = [&](vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
-                                    vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
-                const vk::MemoryBarrier2 barrier{.srcStageMask = src, .srcAccessMask = src_access,
-                                                 .dstStageMask = dst, .dstAccessMask = dst_access};
-                cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-            };
-            memory(vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryWrite, Compute,
+            EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryWrite, Compute,
                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
             const vk::DescriptorBufferInfo position_info{positions, 0, VK_WHOLE_SIZE};
             const vk::WriteDescriptorSet write{.dstBinding = 0,
@@ -770,7 +764,7 @@ void RtShadow::RecordBuilds() {
                                      &push);
                 cmdbuf.dispatch((push.count + 63) / 64, 1, 1);
             }
-            memory(Compute, vk::AccessFlagBits2::eShaderWrite,
+            EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
                    AsBuild | vk::PipelineStageFlagBits2::eCopy,
                    vk::AccessFlagBits2::eAccelerationStructureReadKHR |
                        vk::AccessFlagBits2::eAccelerationStructureWriteKHR |
@@ -782,11 +776,11 @@ void RtShadow::RecordBuilds() {
                 cmdbuf.copyBuffer(positions, dst, region);
             }
             if (!job->copies.empty()) {
-                memory(vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite,
+                EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite,
                        Compute | vk::PipelineStageFlagBits2::eVertexShader,
                        vk::AccessFlagBits2::eShaderRead);
             }
-            memory(AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
+            EffectPass::MemoryBarrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
                    vk::AccessFlagBits2::eAccelerationStructureReadKHR |
                        vk::AccessFlagBits2::eAccelerationStructureWriteKHR);
         });
@@ -1107,12 +1101,6 @@ bool RtShadow::Record(const Inputs& in) {
          sampler = *sampler, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
          filter_pipeline = *filter_pipeline,
          filter_layout = *filter_layout](vk::CommandBuffer cmdbuf) {
-            const auto memory = [&](vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
-                                    vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
-                const vk::MemoryBarrier2 barrier{.srcStageMask = src, .srcAccessMask = src_access,
-                                                 .dstStageMask = dst, .dstAccessMask = dst_access};
-                cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
-            };
             const vk::ImageMemoryBarrier2 to_general{
                 .srcStageMask = Compute,
                 .dstStageMask = Compute,
@@ -1153,7 +1141,7 @@ bool RtShadow::Record(const Inputs& in) {
                                      sizeof(trace), &trace);
                 cmdbuf.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
             }
-            memory(Compute, vk::AccessFlagBits2::eShaderWrite, Compute,
+            EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, Compute,
                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
             const std::array<vk::WriteDescriptorSet, 5> filter_writes{{
                 {.dstBinding = 0, .descriptorCount = 1,
@@ -1171,7 +1159,7 @@ bool RtShadow::Record(const Inputs& in) {
             cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, filter_layout, 0, filter_writes);
             cmdbuf.pushConstants(filter_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(filter), &filter);
             cmdbuf.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
-            memory(Compute, vk::AccessFlagBits2::eShaderWrite, vk::PipelineStageFlagBits2::eAllCommands,
+            EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, vk::PipelineStageFlagBits2::eAllCommands,
                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
         });
     return true;
