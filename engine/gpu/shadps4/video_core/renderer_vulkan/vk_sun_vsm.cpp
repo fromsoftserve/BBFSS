@@ -20,21 +20,27 @@ constexpr u32 Physical = 4096;
 constexpr u32 TableEntries = 16 * 32 * 32;
 constexpr u32 PhysicalPages = 1024;
 constexpr u32 MaxDraws = 8192;
-// Per frame slot: the casters, then the changed casters (each caster plus each removed one).
-constexpr u32 SlotDraws = 3 * MaxDraws;
+// Per frame slot: the casters, then the changed casters (each caster plus each removed one), then
+// the casters to verify against the scene depth.
+constexpr u32 SlotDraws = 4 * MaxDraws;
 constexpr u32 ChangedFirst = MaxDraws;
+constexpr u32 VerifyFirst = 3 * MaxDraws;
+// Threads per verified caster (one triangle each: its centroid and first vertex).
+constexpr u32 VerifySamples = 128;
 constexpr u32 MaxItems = 12u << 20;
 constexpr u32 Slots = 4;
 // Bounds slots outlive one frame's casters only by the removed ones, so two per draw suffice.
 constexpr u32 BoundsSlots = 2 * MaxDraws;
-constexpr u32 BoundsWords = 12;
+// Words per bounds slot (sun_vsm.comp): 0-5 this frame's gathered bounds, 6-11 the kept bounds,
+// 12 sampled points tested against the scene depth, 13 of those floating.
+constexpr u32 BoundsWords = 14;
 // sun_vsm.glsl: args, clear args, eight counters, eight words, six vec4, 16 cascades of 32
 // bytes, 16 bounds, 24 bytes per table entry and 12 per physical page.
 constexpr vk::DeviceSize StateBytes =
     16 + 16 + 32 + 32 + 6 * 16 + 16 * 32 + 16 * 16 + 24 * TableEntries + 12 * PhysicalPages;
 constexpr vk::DeviceSize ClearArgsOffset = 16;
 constexpr u32 ResetBit = 1u << 8;
-constexpr u32 CasterDynamic = 1, CasterFresh = 2, CasterRemoved = 4;
+constexpr u32 CasterDynamic = 1, CasterFresh = 2, CasterRemoved = 4, CasterVerify = 8;
 
 enum Mode : u32 {
     ModeSetup = 0,
@@ -49,6 +55,8 @@ enum Mode : u32 {
     ModeBin,
     ModeFinalize,
     ModeSample,
+    ModeVerifyReset,
+    ModeVerify,
 };
 
 struct Push {
@@ -306,17 +314,25 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
             slot_ticks[slot] = 0;
             const auto* words = static_cast<const float*>(bounds_readback.mapped) +
                                 vk::DeviceSize(slot) * BoundsSlots * BoundsWords;
-            for (const auto& [address, bounds_slot] : slot_casters[slot]) {
-                const auto it = tracked.find(address);
-                if (it == tracked.end() || it->second.slot != bounds_slot) {
+            for (const Readback& item : slot_casters[slot]) {
+                const auto it = tracked.find(item.address);
+                if (it == tracked.end() || it->second.slot != item.slot) {
                     continue;
                 }
+                const float* at = words + item.slot * BoundsWords;
                 std::array<float, 6> box;
-                std::memcpy(box.data(), words + bounds_slot * BoundsWords + 6, sizeof(box));
+                std::memcpy(box.data(), at + 6, sizeof(box));
                 if (box[0] <= box[3]) {
-                    boxes[address] = box;
+                    boxes[item.address] = box;
                 } else {
-                    boxes.erase(address);
+                    boxes.erase(item.address);
+                }
+                if (item.verify) {
+                    Verified& result = verdicts[item.address];
+                    std::memcpy(&result.tested, at + 12, 4);
+                    std::memcpy(&result.floating, at + 13, 4);
+                    result.floating = std::min(result.floating, result.tested);
+                    result.fresh = true;
                 }
             }
         }
@@ -328,11 +344,13 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
     }
     auto* table = static_cast<Draw*>(draws.mapped) + slot * SlotDraws;
     auto* changed = table + ChangedFirst;
+    auto* verify_table = table + VerifyFirst;
     // The cached pages are dropped when the map missed a frame: what moved meanwhile is unknown.
     const bool reset = !cleared || drawn_frame + 1 != frame;
     if (reset) {
         tracked.clear();
         boxes.clear();
+        verdicts.clear();
         for (auto& list : slot_casters) {
             list.clear();
         }
@@ -343,7 +361,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         previous.clear();
     }
     current.clear();
-    u32 count = 0, triangles = 0, changed_count = 0, changed_triangles = 0;
+    u32 count = 0, triangles = 0, changed_count = 0, changed_triangles = 0, verify_count = 0;
     for (const Caster& caster : casters) {
         if (count == MaxDraws || !caster.vertices || !caster.indices || !caster.triangles) {
             continue;
@@ -362,16 +380,28 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         }
         it->second.seen = frame;
         current.push_back(caster.vertices);
+        // Kept casters are verified one frame in four, staggered by bounds slot.
+        const bool verify = caster.verify && (frame + it->second.slot) % 4 == 0;
+        if (!caster.verify) {
+            verdicts.erase(caster.vertices);
+        }
         const Draw draw{caster.vertices, caster.indices, triangles, caster.triangles,
-                        it->second.slot, flags};
+                        it->second.slot, flags | (verify ? CasterVerify : 0u)};
         table[count++] = draw;
         triangles += caster.triangles;
+        if (flags != 0 || caster.changed || verify) {
+            slot_casters[slot].push_back({caster.vertices, it->second.slot, verify});
+        }
         if (flags != 0 || caster.changed) {
-            slot_casters[slot].emplace_back(caster.vertices, it->second.slot);
             changed[changed_count] = draw;
             changed[changed_count].first = changed_triangles;
             ++changed_count;
             changed_triangles += caster.triangles;
+        }
+        if (verify) {
+            verify_table[verify_count] = draw;
+            verify_table[verify_count].first = 0;
+            ++verify_count;
         }
     }
     if (!count) {
@@ -388,16 +418,17 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
         free_slots.push_back(it->second.slot);
         tracked.erase(it);
         boxes.erase(address);
+        verdicts.erase(address);
     }
     std::swap(previous, current);
     drawn_frame = frame;
     slot_ticks[slot] = scheduler.CurrentTick();
-    // Only the changed casters' kept bounds come back to the host.
+    // The changed casters' kept bounds and the verified casters' counters come back to the host.
     const vk::DeviceSize bounds_bytes = vk::DeviceSize(BoundsWords) * 4;
     std::vector<vk::BufferCopy> bounds_copies;
     bounds_copies.reserve(slot_casters[slot].size());
-    for (const auto& [address, bounds_slot] : slot_casters[slot]) {
-        const vk::DeviceSize at = vk::DeviceSize(bounds_slot) * bounds_bytes;
+    for (const Readback& item : slot_casters[slot]) {
+        const vk::DeviceSize at = vk::DeviceSize(item.slot) * bounds_bytes;
         bounds_copies.push_back(
             {at, vk::DeviceSize(slot) * BoundsSlots * bounds_bytes + at, bounds_bytes});
     }
@@ -419,7 +450,7 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
     scheduler.EndRendering();
     // Recorded in five steps (setup, caster bounds, binning, page draws, sampling).
     auto body =
-        [in, push, clear, reset, draws_offset, changed_count, changed_triangles,
+        [in, push, clear, reset, draws_offset, changed_count, changed_triangles, verify_count,
          bounds_copies = std::move(bounds_copies),
          state = state.buffer, items = items.buffer, draws = draws.buffer,
          bounds = bounds.buffer,
@@ -520,8 +551,8 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                 run_linear(ModeAllocate, TableEntries);
             }
             {
+                const Push main = push;
                 if (changed_count) {
-                    const Push main = push;
                     push.draw_count = changed_count;
                     push.triangle_count = changed_triangles;
                     push.max_items = ChangedFirst;
@@ -529,17 +560,25 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
                     run_linear(ModeBounds, changed_triangles);
                     run_linear(ModeDirty, changed_count);
                     push = main;
-                    // The changed casters' kept bounds go back to the host, which drops kept
-                    // casters the game would have drawn.
-                    if (!bounds_copies.empty()) {
-                        EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
-                               vk::PipelineStageFlagBits2::eCopy,
-                               vk::AccessFlagBits2::eTransferRead);
-                        cmdbuf.copyBuffer(bounds, bounds_readback, bounds_copies);
-                        EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eCopy,
-                               vk::AccessFlagBits2::eTransferRead, Compute,
-                               vk::AccessFlagBits2::eShaderWrite);
-                    }
+                }
+                if (verify_count) {
+                    push.draw_count = verify_count;
+                    push.max_items = VerifyFirst;
+                    run_linear(ModeVerifyReset, verify_count);
+                    run_linear(ModeVerify, verify_count * VerifySamples);
+                    push = main;
+                }
+                // The kept bounds of the changed casters and the counters of the verified ones go
+                // back to the host, which drops kept casters the game would have drawn or that
+                // are no longer in the scene.
+                if (!bounds_copies.empty()) {
+                    EffectPass::MemoryBarrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
+                           vk::PipelineStageFlagBits2::eCopy,
+                           vk::AccessFlagBits2::eTransferRead);
+                    cmdbuf.copyBuffer(bounds, bounds_readback, bounds_copies);
+                    EffectPass::MemoryBarrier(cmdbuf, vk::PipelineStageFlagBits2::eCopy,
+                           vk::AccessFlagBits2::eTransferRead, Compute,
+                           vk::AccessFlagBits2::eShaderWrite);
                 }
             }
             {
@@ -607,6 +646,17 @@ bool SunVsm::Record(std::span<const Caster> casters, const Inputs& in) {
 const std::array<float, 6>* SunVsm::Box(u64 vertices) const {
     const auto it = boxes.find(vertices);
     return it == boxes.end() ? nullptr : &it->second;
+}
+
+bool SunVsm::Verdict(u64 vertices, u32& tested, u32& floating) {
+    const auto it = verdicts.find(vertices);
+    if (it == verdicts.end() || !it->second.fresh) {
+        return false;
+    }
+    it->second.fresh = false;
+    tested = it->second.tested;
+    floating = it->second.floating;
+    return true;
 }
 
 void SunVsm::OnFrameEnd() {

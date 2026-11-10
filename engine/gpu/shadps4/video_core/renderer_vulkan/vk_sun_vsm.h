@@ -41,6 +41,9 @@ public:
         bool dynamic = false;
         /// World copy written since the last call: its bounds are checked for movement.
         bool changed = false;
+        /// A kept caster (not drawn by the game this frame): its surface samples are tested
+        /// against the scene depth every few frames, see Verdict().
+        bool verify = false;
     };
     struct Inputs {
         vk::Buffer constants;
@@ -64,6 +67,12 @@ public:
     /// World bounds (min xyz, max xyz) of a caster's world copy as last measured on the GPU (a
     /// few frames late), or null when not measured yet.
     [[nodiscard]] const std::array<float, 6>* Box(u64 vertices) const;
+
+    /// The newest depth verification of a caster's world copy that has not been taken yet (a few
+    /// frames late): of `tested` sampled surface points inside the screen and short of the far
+    /// plane, `floating` lay in front of the scene depth by more than a distance scaled
+    /// tolerance, i.e. nothing is rendered where the surface should be. False when none is new.
+    [[nodiscard]] bool Verdict(u64 vertices, u32& tested, u32& floating);
 
 private:
     struct Buffer {
@@ -104,8 +113,20 @@ private:
     std::vector<u32> free_slots;
     std::vector<u64> previous, current;
     // Each frame slot's casters (world copy address, bounds slot), for the bounds readback.
-    std::array<std::vector<std::pair<u64, u32>>, 4> slot_casters;
+    // `verify`: its depth verification counters come back too.
+    struct Readback {
+        u64 address;
+        u32 slot;
+        bool verify;
+    };
+    std::array<std::vector<Readback>, 4> slot_casters;
     std::unordered_map<u64, std::array<float, 6>> boxes;
+    struct Verified {
+        u32 tested = 0;
+        u32 floating = 0;
+        bool fresh = false;
+    };
+    std::unordered_map<u64, Verified> verdicts;
 };
 
 }

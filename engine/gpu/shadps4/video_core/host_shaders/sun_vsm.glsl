@@ -26,6 +26,8 @@
 #define VSM_CASTER_DYNAMIC 1u
 #define VSM_CASTER_FRESH 2u
 #define VSM_CASTER_REMOVED 4u
+// Its sampled surface points are tested against the scene depth this frame.
+#define VSM_CASTER_VERIFY 8u
 
 struct VsmCascade {
     vec2 origin;

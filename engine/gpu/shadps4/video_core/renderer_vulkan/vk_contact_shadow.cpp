@@ -85,7 +85,7 @@ void ContactShadow::OnShadowDraw(VideoCore::ImageId target, const Inputs& inputs
     use_contact = settings.effects[BbSettings::EffectContactShadows].load(std::memory_order_relaxed);
     use_pcss = inputs.uniforms && inputs.shadow_map &&
                settings.effects[BbSettings::EffectPcss].load(std::memory_order_relaxed);
-    use_rt = inputs.uniforms && rt_shadow.Complete();
+    use_rt = inputs.uniforms && rt_shadow.Complete() && rt_shadow.SunWanted();
     if (use_rt) {
         use_contact = false;
         use_pcss = false;
@@ -290,6 +290,8 @@ void ContactShadow::Flush(bool native_blur) {
                           .frame_index = in.frame_index,
                           .width = width,
                           .height = height});
+    } else {
+        rt_shadow.RecordBuilds();
     }
 }
 

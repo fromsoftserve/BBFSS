@@ -40,6 +40,11 @@ constexpr u64 UnusedFrames = 600;
 // further, so static casters keep drawing from their world copies long after the game stops
 // submitting them (about an hour at 60 fps); the entry memory cap evicts the oldest first.
 constexpr u64 VsmKeepFrames = 60ull * 60 * 60;
+// A prop seen unchanged (same mesh, same bone palette) on this many distinct frames gets an
+// entry of its own; candidates not seen for CandidateFrames are dropped.
+constexpr u32 PromoteFrames = 3;
+constexpr u64 CandidateFrames = 120;
+constexpr std::size_t MaxCandidates = 32768;
 // Captured geometry shares video memory with the texture cache, which evicts (and stalls) long
 // before the driver budget runs out, so the geometry gets its own cap.
 constexpr u64 MaxEntryBytes = 1536ull << 20;
@@ -360,9 +365,34 @@ bool RtShadow::Setup(const ObjectMotion& object_motion) {
     return true;
 }
 
-bool RtShadow::Wanted() const {
+bool RtShadow::RayTracing() const {
     return capturing && !failed &&
            BbSettings::Get().effects[BbSettings::EffectRayTracing].load(std::memory_order_relaxed);
+}
+
+bool RtShadow::VsmWanted() const {
+    // A VSM that could not be made leaves nothing to capture for.
+    return RayTracing() && BbSettings::Get().graphics_sun_vsm.load(std::memory_order_relaxed) &&
+           !(vsm_tried && (!vsm || !vsm->Ready()));
+}
+
+bool RtShadow::SunRayTraced() const {
+    if (!RayTracing()) {
+        return false;
+    }
+    const auto& s = BbSettings::Get();
+    return s.graphics_rt_sun.load(std::memory_order_relaxed) ||
+           (s.graphics_sun_vsm.load(std::memory_order_relaxed) && vsm_tried &&
+            (!vsm || !vsm->Ready()));
+}
+
+bool RtShadow::SunWanted() const {
+    return VsmWanted() || SunRayTraced();
+}
+
+bool RtShadow::Wanted() const {
+    // Ray tracing on with nothing using the scene or the VSM captures nothing.
+    return RayTracing() && (VsmWanted() || SceneWanted());
 }
 
 bool RtShadow::Complete() const {
@@ -537,6 +567,21 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     if (!Wanted() || (!draw.shadow_pass && !draw.camera_pass)) {
         return 0;
     }
+    // The mesh without its shader: the camera pass and the shadow pass draw it with different
+    // ones, and only the camera pass shows whether its pixel shader cuts the surface out.
+    const std::array<u64, 4> mesh_parts{draw.geometry, draw.indices, draw.index_count,
+                                        draw.first_vertex};
+    const u64 mesh = XXH3_64bits(mesh_parts.data(), sizeof(mesh_parts));
+    if (draw.camera_pass && draw.alpha) {
+        if (cutout_meshes.size() >= 65536) {
+            cutout_meshes.clear();
+        }
+        cutout_meshes.insert(mesh);
+    }
+    // Camera pass casters only serve the ray traced scene (lamp shadows, bounced light).
+    if (draw.camera_pass && !need_scene) {
+        return 0;
+    }
     draw.camera_pass ? ++stats.camera_draws : ++stats.draws;
     if (!draw.solid) {
         return 0;
@@ -576,31 +621,65 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     }
     if (camera_index == frame_cameras.size()) {
         frame_cameras.push_back(draw.constants);
-        // The sun's cascades this frame, world to clip: kept casters inside them are gone.
-        if (draw.shadow_pass && !draw.camera_pass) {
-            std::array<float, 16> m{};
-            std::copy(to_world.begin(), to_world.end(), m.begin());
-            m[15] = 1.0f;
-            bool ok = false;
-            const auto inverse = Invert(m.data(), ok);
-            if (ok && std::ranges::all_of(inverse, [](float v) { return std::isfinite(v); })) {
-                std::array<float, 12> volume;
-                std::copy_n(inverse.begin(), 12, volume.begin());
-                frame_volumes.push_back(volume);
+    }
+    // A small bone palette holds world space bones, so with the mesh key it identifies one
+    // object in one pose whatever the camera or the draw order: a prop seen unchanged on three
+    // frames gets an entry of its own, so the game drawing other instances first, or not drawing
+    // this one, neither re-captures it nor makes it look moving.
+    const bool palette_draw = draw.palette != 0 && !draw.skinned;
+    u64 instance_key = 0;
+    bool instance_entry = false;
+    bool promote = false;
+    if (palette_draw) {
+        instance_key = XXH3_64bits_withSeed(&draw.palette, sizeof(draw.palette), key ^ 0xa24baed4963ee407ull);
+        instance_entry = entries.contains(instance_key);
+        if (!instance_entry) {
+            if (candidates.size() >= MaxCandidates) {
+                candidates.clear();
             }
+            auto& candidate = candidates[instance_key];
+            if (candidate.last != frame + 1) {
+                candidate.last = frame + 1;
+                ++candidate.frames;
+            }
+            promote = candidate.frames >= PromoteFrames && new_triangles < NewTrianglesPerFrame;
         }
     }
-    const std::array<u64, 2> occurrence_key{key, camera_index};
-    const u64 occurrence_hash = XXH3_64bits(occurrence_key.data(), sizeof(occurrence_key));
-    const u32 occurrence = occurrences[occurrence_hash]++;
-    if (occurrence > 0) {
-        shared_keys.insert(key);
-    }
-    const bool shared = shared_keys.contains(key);
     u64 entry_key = key;
-    if (shared) {
-        const std::array<u64, 3> copy{key, camera_index, occurrence};
-        entry_key = XXH3_64bits(copy.data(), sizeof(copy));
+    bool shared = false;
+    if (!instance_entry) {
+        const std::array<u64, 2> occurrence_key{key, camera_index};
+        const u64 occurrence_hash = XXH3_64bits(occurrence_key.data(), sizeof(occurrence_key));
+        const u32 occurrence = occurrences[occurrence_hash]++;
+        if (occurrence > 0) {
+            shared_keys.insert(key);
+        }
+        shared = shared_keys.contains(key);
+        if (shared) {
+            const std::array<u64, 3> copy{key, camera_index, occurrence};
+            entry_key = XXH3_64bits(copy.data(), sizeof(copy));
+        }
+        if (promote) {
+            // The draw order entry of this very instance, when unchanged, becomes the instance's.
+            if (auto old = entries.find(entry_key);
+                old != entries.end() && old->second && !old->second->dynamic &&
+                old->second->palette == draw.palette &&
+                old->second->mask == (draw.camera_pass ? CameraMask : ShadowMask)) {
+                auto adopted = std::move(old->second);
+                entries.erase(old);
+                adopted->rebuilt = false;
+                adopted->instance = true;
+                entries[instance_key] = std::move(adopted);
+                ++stats.promoted;
+            }
+            instance_entry = true;
+            entry_key = instance_key;
+            shared = false;
+            const std::array<u64, 3> retired{key, draw.palette, draw.camera_pass ? 1u : 0u};
+            promoted_now.insert(XXH3_64bits(retired.data(), sizeof(retired)));
+        }
+    } else {
+        entry_key = instance_key;
     }
 
     auto& slot = entries[entry_key];
@@ -617,11 +696,18 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
             return 0;
         }
         slot->rebuilt = shared;
+        slot->mesh = mesh;
+        slot->base = key;
+        slot->instance = instance_entry;
+        stats.promoted += promote ? 1 : 0;
     }
     Entry& entry = *slot;
     if (entry.seen_frame == frame) {
         return 0;
     }
+    // Drawn by the game again: the object is back.
+    entry.gone = false;
+    entry.gone_streak = 0;
     entry.rebuilt = entry.rebuilt || shared;
     if (entry.palette != draw.palette) {
         entry.palette = draw.palette;
@@ -793,16 +879,14 @@ void RtShadow::RecordBuilds() {
 }
 
 bool RtShadow::SceneWanted() const {
-    const auto& s = BbSettings::Get();
-    if (!s.graphics_sun_vsm.load(std::memory_order_relaxed) ||
-        s.graphics_rt_point_shadows.load(std::memory_order_relaxed) ||
-        (s.graphics_rt_bounce.load(std::memory_order_relaxed) &&
-         !(s.graphics_gi_probes.load(std::memory_order_relaxed) &&
-           s.effects[BbSettings::EffectGi].load(std::memory_order_relaxed)))) {
-        return true;
+    if (!RayTracing()) {
+        return false;
     }
-    // A VSM that could not be made falls back to the ray traced sun.
-    return vsm_tried && (!vsm || !vsm->Ready());
+    const auto& s = BbSettings::Get();
+    return SunRayTraced() || s.graphics_rt_point_shadows.load(std::memory_order_relaxed) ||
+           (s.graphics_rt_bounce.load(std::memory_order_relaxed) &&
+            !(s.graphics_gi_probes.load(std::memory_order_relaxed) &&
+              s.effects[BbSettings::EffectGi].load(std::memory_order_relaxed)));
 }
 
 bool RtShadow::PrepareCapture() {
@@ -968,71 +1052,6 @@ bool RtShadow::Record(const Inputs& in) {
                                        entry->copied_at > vsm_copies});
                 }
             }
-            // A kept caster inside a cascade the game drew this frame is one it no longer has
-            // (an interior's or a swapped level of detail's mesh): it would have been drawn.
-            const auto in_cascade = [&](const std::array<float, 6>& box) {
-                for (const auto& m : frame_volumes) {
-                    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
-                    for (u32 c = 0; c < 8; ++c) {
-                        const float p[3] = {box[(c & 1) ? 3 : 0], box[(c & 2) ? 4 : 1],
-                                            box[(c & 4) ? 5 : 2]};
-                        for (int r = 0; r < 3; ++r) {
-                            const float v = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] +
-                                            m[r * 4 + 2] * p[2] + m[r * 4 + 3];
-                            lo[r] = std::min(lo[r], v);
-                            hi[r] = std::max(hi[r], v);
-                        }
-                    }
-                    if (lo[0] < 0.9f && hi[0] > -0.9f && lo[1] < 0.9f && hi[1] > -0.9f &&
-                        lo[2] < 1.0f && hi[2] > 0.0f) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            const auto far_off = [&](const std::array<float, 6>& box) {
-                constexpr float FarMeters = 50.0f;
-                float distance2 = 0.0f;
-                for (int k = 0; k < 3; ++k) {
-                    const float eye = camera.inv_view[k * 4 + 3];
-                    const float d = std::max({box[k] - eye, eye - box[k + 3], 0.0f});
-                    distance2 += d * d;
-                }
-                return distance2 > FarMeters * FarMeters;
-            };
-            // A kept caster the game would surely draw is one it no longer has (a swapped level of
-            // detail, a removed object): wholly in view, or in view and far off. Near casters
-            // partly in view are left: the game culls their shadows by its own visibility.
-            const auto in_view = [&](const std::array<float, 6>& box) {
-                const float sx = std::abs(camera.proj[0]), sy = std::abs(camera.proj[1]);
-                std::array<bool, 5> outside{true, true, true, true, true};
-                bool inside = true;
-                for (u32 c = 0; c < 8; ++c) {
-                    const float p[3] = {box[(c & 1) ? 3 : 0], box[(c & 2) ? 4 : 1],
-                                        box[(c & 4) ? 5 : 2]};
-                    float v[3];
-                    for (int r = 0; r < 3; ++r) {
-                        v[r] = camera.view[r * 4 + 3];
-                        for (int k = 0; k < 3; ++k) {
-                            v[r] += camera.view[r * 4 + k] * p[k];
-                        }
-                    }
-                    outside[0] = outside[0] && sx * v[0] > v[2];
-                    outside[1] = outside[1] && -sx * v[0] > v[2];
-                    outside[2] = outside[2] && sy * v[1] > v[2];
-                    outside[3] = outside[3] && -sy * v[1] > v[2];
-                    outside[4] = outside[4] && v[2] < 0.05f;
-                    inside = inside && v[2] >= 0.05f && sx * std::abs(v[0]) <= v[2] &&
-                             sy * std::abs(v[1]) <= v[2];
-                }
-                if (std::ranges::any_of(outside, [](bool o) { return o; })) {
-                    return false;
-                }
-                if (inside) {
-                    return true;
-                }
-                return far_off(box);
-            };
             // A caster the game draws now in nearly the same place as a kept one has replaced it
             // (a swapped level of detail): their boxes overlap by half of their union or more.
             const auto replaced = [&](const std::array<float, 6>& box) {
@@ -1047,22 +1066,24 @@ bool RtShadow::Record(const Inputs& in) {
                     }
                     float overlap = 1.0f, other = 1.0f;
                     for (int k = 0; k < 3; ++k) {
-                        overlap *= std::max(std::min(box[k + 3], drawn->box[k + 3]) -
-                                                std::max(box[k], drawn->box[k]) + 2.0f * Pad,
-                                            0.0f);
+                        const float span = std::min(box[k + 3], drawn->box[k + 3]) -
+                                           std::max(box[k], drawn->box[k]) + 2.0f * Pad;
+                        if (span <= 0.0f) {
+                            overlap = 0.0f;
+                            break;
+                        }
+                        overlap *= span;
                         other *= drawn->box[k + 3] - drawn->box[k] + 2.0f * Pad;
                     }
-                    if (overlap * 3.0f >= volume + other) {
+                    if (overlap > 0.0f && overlap * 3.0f >= volume + other) {
                         return true;
                     }
                 }
                 return false;
             };
             const std::array<float, 2> camera_proj{camera.proj[0], camera.proj[1]};
-            if (!cull_serial || cull_volumes != frame_volumes || cull_view != camera.view ||
-                cull_inv_view != camera.inv_view || cull_proj != camera_proj ||
-                cull_drawn != frame_entries.size()) {
-                cull_volumes = frame_volumes;
+            if (!cull_serial || cull_view != camera.view || cull_inv_view != camera.inv_view ||
+                cull_proj != camera_proj || cull_drawn != frame_entries.size()) {
                 cull_view = camera.view;
                 cull_inv_view = camera.inv_view;
                 cull_proj = camera_proj;
@@ -1072,22 +1093,37 @@ bool RtShadow::Record(const Inputs& in) {
             for (const auto& item : entries) {
                 Entry* entry = item.second.get();
                 if (entry && entry->mask == ShadowMask && entry->seen_frame != frame &&
-                    frame - entry->seen_frame <= VsmKeepFrames && !entry->dynamic &&
-                    entry->built && entry->copied && entry->world.buffer) {
+                    !entry->gone && frame - entry->seen_frame <= VsmKeepFrames &&
+                    !entry->dynamic && entry->built && entry->copied && entry->world.buffer) {
                     if (const auto* box = vsm->Box(entry->world.address)) {
                         entry->box = *box;
                         entry->has_box = true;
                     }
+                    // Alpha cut-outs float over the scene depth where the texture discards.
+                    const bool cutout = cutout_meshes.contains(entry->mesh);
+                    u32 tested = 0, floating = 0;
+                    if (!cutout && vsm->Verdict(entry->world.address, tested, floating)) {
+                        ++stats.vsm_verified;
+                        if (tested >= 12 && floating * 10 >= tested * 6) {
+                            if (++entry->gone_streak >= 3) {
+                                entry->gone = true;
+                                ++stats.vsm_gone;
+                                continue;
+                            }
+                        } else {
+                            entry->gone_streak = 0;
+                        }
+                    }
                     if (entry->has_box) {
+                        // Re-tested when the drawn set may have changed, a quarter of the
+                        // casters each frame.
                         if (entry->cull_serial != cull_serial || entry->cull_box != entry->box) {
-                            // Inside a cascade the game still culls nearby casters by its own
-                            // visibility, so one there is only gone when far off or replaced.
-                            const bool by_view = in_view(entry->box);
-                            entry->culled = by_view ||
-                                            (in_cascade(entry->box) &&
-                                             (far_off(entry->box) || replaced(entry->box)));
-                            entry->cull_box = entry->box;
-                            entry->cull_serial = cull_serial;
+                            if (!entry->cull_serial || entry->cull_box != entry->box ||
+                                (frame + (item.first & 3)) % 4 == 0) {
+                                entry->culled = replaced(entry->box);
+                                entry->cull_box = entry->box;
+                                entry->cull_serial = cull_serial;
+                            }
                         }
                         if (entry->culled) {
                             ++stats.vsm_culled;
@@ -1096,7 +1132,8 @@ bool RtShadow::Record(const Inputs& in) {
                     }
                     ++stats.vsm_kept;
                     casters.push_back({entry->world.address, entry->indices.address,
-                                       entry->triangles, false, entry->copied_at > vsm_copies});
+                                       entry->triangles, false, entry->copied_at > vsm_copies,
+                                       !cutout});
                 }
             }
             const SunVsm::Inputs vsm_in{
@@ -1119,7 +1156,7 @@ bool RtShadow::Record(const Inputs& in) {
             }
         }
     }
-    if (!use_vsm && !need_scene) {
+    if (!use_vsm && !(need_scene && SunRayTraced())) {
         return false;
     }
     const TracePush trace{
@@ -1227,7 +1264,9 @@ void RtShadow::OnFrameEnd() {
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
                     "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
                     "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
-                    "%.1f, missed %.1f, kept casters %.1f drawn %.1f culled a frame; %llu frames fell "
+                    "%.1f, missed %.1f, kept casters %.1f drawn %.1f culled %.1f verified a frame, "
+                    "%llu declared gone since the last line; %llu prop instances promoted since the "
+                    "last line, %zu candidates; %llu frames fell "
                     "back to the game's shadows\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
@@ -1236,9 +1275,31 @@ void RtShadow::OnFrameEnd() {
                     double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
                     double(stats.shared_builds) / f, double(stats.strips) / f,
                     double(stats.missed) / f, double(stats.vsm_kept) / f,
-                    double(stats.vsm_culled) / f,
+                    double(stats.vsm_culled) / f, double(stats.vsm_verified) / f,
+                    static_cast<unsigned long long>(stats.vsm_gone),
+                    static_cast<unsigned long long>(stats.promoted), candidates.size(),
                     static_cast<unsigned long long>(stats.incomplete));
         stats = {};
+    }
+    // The draw order entries of instances promoted this frame (their other cascades' copies, an
+    // old pose's) would otherwise stay behind as duplicate kept casters.
+    if (!promoted_now.empty()) {
+        for (auto& item : entries) {
+            Entry& e = *item.second;
+            if (e.instance || e.dynamic || !e.palette || e.gone || e.seen_frame == frame) {
+                continue;
+            }
+            const std::array<u64, 3> id{e.base, e.palette, e.mask == CameraMask ? 1u : 0u};
+            if (promoted_now.contains(XXH3_64bits(id.data(), sizeof(id)))) {
+                e.gone = true;
+            }
+        }
+        promoted_now.clear();
+    }
+    if (frame % 60 == 0) {
+        std::erase_if(candidates, [&](const auto& item) {
+            return item.second.last + CandidateFrames < frame + 1;
+        });
     }
     ++frame;
     if (frame % 64 == 0) {
@@ -1249,7 +1310,7 @@ void RtShadow::OnFrameEnd() {
             const u64 unused = frame - entry.seen_frame;
             if (unused <= UnusedFrames ||
                 (keep_casters && unused <= VsmKeepFrames && entry.mask == ShadowMask &&
-                 !entry.dynamic && entry.built && entry.copied)) {
+                 !entry.dynamic && !entry.gone && entry.built && entry.copied)) {
                 return false;
             }
             Destroy(*item.second);
@@ -1288,7 +1349,6 @@ void RtShadow::OnFrameEnd() {
     tlas_count = 0;
     frame_entries.clear();
     frame_cameras.clear();
-    frame_volumes.clear();
     occurrences.clear();
 }
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Sun virtual shadow map bookkeeping and sampling (vk_sun_vsm.cpp). One shader, run in modes:
 // setup -> mark -> invalidate -> free list -> allocate -> (bounds reset -> bounds -> dirty, for
-// changed casters) -> resolve -> bin -> finalize, then the depth-only page draw, then sample.
+// changed casters) -> (verify reset -> verify, for kept casters checked against the scene depth)
+// -> resolve -> bin -> finalize, then the depth-only page draw, then sample.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
@@ -26,9 +27,11 @@ layout(scalar, set = 0, binding = 3) writeonly buffer Items { uvec2 items[]; };
 layout(scalar, set = 0, binding = 4) readonly buffer Draws { VsmDraw draws[]; };
 layout(set = 0, binding = 5) uniform sampler2D physical;
 layout(set = 0, binding = 6, r8) uniform writeonly image2D raw_img;
-// Per caster slot, 12 words: this frame's world bounds being gathered (6, order-preserving uints)
-// and the bounds last drawn into the pages (6 floats; lo.x > hi.x when none).
+// Per caster slot, 14 words: this frame's world bounds being gathered (6, order-preserving uints),
+// the bounds last drawn into the pages (6 floats; lo.x > hi.x when none), and this frame's depth
+// verification counters: sampled points tested, of which floating.
 layout(scalar, set = 0, binding = 7) coherent buffer Bounds { uint b[]; } bnd;
+const uint BoundsStride = 14u;
 
 layout(push_constant) uniform Constants {
     uint mode; // low byte: mode; bit 8: drop every cached page this frame
@@ -44,7 +47,10 @@ layout(push_constant) uniform Constants {
 
 const uint ModeSetup = 0u, ModeMark = 1u, ModeInvalidate = 2u, ModeFreeList = 3u,
            ModeAllocate = 4u, ModeBoundsReset = 5u, ModeBounds = 6u, ModeDirty = 7u,
-           ModeResolve = 8u, ModeBin = 9u, ModeFinalize = 10u, ModeSample = 11u;
+           ModeResolve = 8u, ModeBin = 9u, ModeFinalize = 10u, ModeSample = 11u,
+           ModeVerifyReset = 12u, ModeVerify = 13u;
+// Triangles sampled per verified caster (one thread each; see Verify).
+const uint VerifySamples = 128u;
 // Frames between redraws of an unchanged page, staggered across pages.
 const uint RefreshFrames = 240u;
 // World bounds change (m) treated as a caster having moved.
@@ -319,7 +325,7 @@ void BoundsReset() {
     if (id >= draw_count) {
         return;
     }
-    const uint at = draws[max_items + id].slot * 12u;
+    const uint at = draws[max_items + id].slot * BoundsStride;
     for (uint k = 0u; k < 3u; ++k) {
         bnd.b[at + k] = 0xffffffffu;
         bnd.b[at + 3u + k] = 0u;
@@ -349,7 +355,7 @@ void GatherBounds() {
     }
     uvec3 olo = uvec3(Ordered(lo.x), Ordered(lo.y), Ordered(lo.z));
     uvec3 ohi = uvec3(Ordered(hi.x), Ordered(hi.y), Ordered(hi.z));
-    const uint at = draw.slot * 12u;
+    const uint at = draw.slot * BoundsStride;
     if (subgroupAllEqual(draw.slot)) {
         olo = subgroupMin(olo);
         ohi = subgroupMax(ohi);
@@ -385,7 +391,7 @@ void Dirty() {
         return;
     }
     const VsmDraw draw = draws[max_items + id];
-    const uint at = draw.slot * 12u;
+    const uint at = draw.slot * BoundsStride;
     vec3 olo, ohi;
     for (uint k = 0u; k < 3u; ++k) {
         olo[k] = uintBitsToFloat(bnd.b[at + 6u + k]);
@@ -417,6 +423,105 @@ void Dirty() {
     for (uint k = 0u; k < 3u; ++k) {
         bnd.b[at + 6u + k] = floatBitsToUint(nlo[k]);
         bnd.b[at + 9u + k] = floatBitsToUint(nhi[k]);
+    }
+}
+
+void VerifyReset() {
+    const uint id = LinearId();
+    if (id >= draw_count) {
+        return;
+    }
+    const uint at = draws[max_items + id].slot * BoundsStride;
+    bnd.b[at + 12u] = 0u;
+    bnd.b[at + 13u] = 0u;
+}
+
+// Tests a world point against the scene depth: `tested` when it projects inside the screen, in
+// front of the camera and short of the far plane, over a pixel holding scene geometry, and
+// `floating` when it is nearer than every scene surface around that pixel by more than a
+// tolerance (nothing is rendered where the point should be; a nearer occluder or a matching
+// surface is not floating). The neighbouring pixels spare points on a silhouette, where the
+// centre pixel may show what lies behind the edge.
+void Probe(vec3 world, vec3 cam, mat3 to_view, mat4 proj, inout uint tested, inout uint floating) {
+    const vec3 v = to_view * (world - cam);
+    const vec4 clip = proj * vec4(v, 1.0);
+    if (!(clip.w > 1e-4)) {
+        return;
+    }
+    const vec3 ndc = clip.xyz / clip.w;
+    if (!(ndc.z > 0.0 && ndc.z < 1.0) || !all(lessThan(abs(ndc.xy), vec2(1.0)))) {
+        return;
+    }
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    const float centre_depth = textureLod(depth_tex, uv, 0.0).x;
+    if (!(centre_depth > 0.0 && centre_depth < 1.0)) {
+        return;
+    }
+    const vec2 px = 2.0 / size;
+    const vec2 taps[5] = vec2[5](vec2(0.0), vec2(px.x, 0.0), vec2(-px.x, 0.0), vec2(0.0, px.y),
+                                 vec2(0.0, -px.y));
+    float nearest = 1e30;
+    for (int k = 0; k < 5; ++k) {
+        const vec2 tap_uv = uv + taps[k];
+        const float d = textureLod(depth_tex, tap_uv, 0.0).x;
+        if (d > 0.0 && d < 1.0 && all(greaterThanEqual(tap_uv, vec2(0.0))) &&
+            all(lessThanEqual(tap_uv, vec2(1.0)))) {
+            nearest = min(nearest, length(viewPosAt(tap_uv, d)));
+        }
+    }
+    const float distance_to_point = length(v);
+    const float tolerance = max(0.15, 0.02 * distance_to_point);
+    tested += 1u;
+    floating += distance_to_point < nearest - tolerance ? 1u : 0u;
+}
+
+// One thread per sampled triangle of a verified caster (VerifySamples of them; a caster with
+// fewer triangles gets one thread each): its centroid and first vertex are probed against the
+// scene depth. The sampled triangles move with the frame so that the whole mesh is covered over
+// time.
+void Verify() {
+    const uint id = LinearId();
+    const uint index = id / VerifySamples;
+    if (index >= draw_count) {
+        return;
+    }
+    const VsmDraw draw = draws[max_items + index];
+    const uint sample_id = id % VerifySamples;
+    uint tested = 0u, floating = 0u;
+    if (sample_id < draw.count) {
+        uint local = sample_id;
+        if (draw.count > VerifySamples) {
+            const uint spacing = draw.count / VerifySamples;
+            local = min(sample_id * draw.count / VerifySamples + frame_index % spacing,
+                        draw.count - 1u);
+        }
+        Indices indices = Indices(draw.indices);
+        Vertices vertices = Vertices(draw.vertices);
+        const vec3 p0 = vertices.p[indices.i[local * 3u]].xyz;
+        const vec3 p1 = vertices.p[indices.i[local * 3u + 1u]].xyz;
+        const vec3 p2 = vertices.p[indices.i[local * 3u + 2u]].xyz;
+        const vec3 middle = (p0 + p1 + p2) * (1.0 / 3.0);
+        if (!any(isnan(middle)) && !any(isinf(middle))) {
+            base = (buf_off & 0xffu) >> 2;
+            invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
+            const mat4 proj = inverse(invMat);
+            const mat3 to_view = inverse(ViewToWorld());
+            const vec3 cam = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
+            Probe(middle, cam, to_view, proj, tested, floating);
+            Probe(p0, cam, to_view, proj, tested, floating);
+        }
+    }
+    const uint at = draw.slot * BoundsStride;
+    if (subgroupAllEqual(draw.slot)) {
+        tested = subgroupAdd(tested);
+        floating = subgroupAdd(floating);
+        if (!subgroupElect()) {
+            return;
+        }
+    }
+    if (tested != 0u) {
+        atomicAdd(bnd.b[at + 12u], tested);
+        atomicAdd(bnd.b[at + 13u], floating);
     }
 }
 
@@ -462,7 +567,7 @@ void Bin() {
     }
     const VsmDraw draw = draws[lo];
     // Skip a caster whose kept bounds miss every page drawn this frame before reading vertices.
-    const uint at = draw.slot * 12u;
+    const uint at = draw.slot * BoundsStride;
     vec3 blo, bhi;
     for (uint k = 0u; k < 3u; ++k) {
         blo[k] = uintBitsToFloat(bnd.b[at + 6u + k]);
@@ -632,6 +737,12 @@ void main() {
         break;
     case ModeSample:
         Sample();
+        break;
+    case ModeVerifyReset:
+        VerifyReset();
+        break;
+    case ModeVerify:
+        Verify();
         break;
     }
 }
