@@ -204,7 +204,7 @@ private:
     struct Stats {
         u64 draws = 0, camera_draws = 0, not_ortho = 0, no_camera = 0, alpha = 0, unsupported = 0,
             over_budget = 0, instanced = 0, dynamic_draws = 0, strips = 0, frames = 0, instances = 0,
-            triangles = 0, shared_builds = 0;
+            triangles = 0, shared_builds = 0, missed = 0, incomplete = 0;
     } stats;
 };
 

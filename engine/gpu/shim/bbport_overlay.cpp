@@ -265,6 +265,19 @@ void Cheat(const char* label, std::atomic<int>& value, BbEngine::Cheats::Which w
 
 ImVec2 last_hint{-1.0f, -1.0f};
 
+// Shown under settings that only work with ray traced lighting captured since the game started.
+void RayTracingNotice() {
+    const auto& s = BbSettings::Get();
+    if (s.effects[BbSettings::EffectRayTracing] && s.startup_effects[BbSettings::EffectRayTracing]) {
+        return;
+    }
+    ImGui::TextDisabled("%s", s.effects[BbSettings::EffectRayTracing]
+        ? BbSettings::MenuText("Ray traced lighting starts when the game restarts",
+                               "Трассированное освещение включится после перезапуска игры")
+        : BbSettings::MenuText("Needs Ray traced lighting on",
+                               "Нужно включённое трассированное освещение"));
+}
+
 void Hint(const char* text) {
     const ImVec2 setting_at = ImGui::GetItemRectMin();
     const bool setting = (setting_at.x != last_hint.x || setting_at.y != last_hint.y) &&
@@ -674,6 +687,7 @@ void PictureSection() {
             "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Заменяет "
             "трассировку солнца виртуальной картой теней из 16 каскадов по тем же объектам; "
             "рисуются только видимые страницы. Сравните с трассированными тенями."));
+        RayTracingNotice();
     }
     if (const char* label = Item("Ray traced lamp shadows", "Трассированные тени ламп")) {
         Checkbox(label, s.graphics_rt_point_shadows);
@@ -684,6 +698,7 @@ void PictureSection() {
             "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Тени ламп и "
             "факелов трассируются по сцене; затратно. Выкл.: используются экранные тени точечных "
             "источников (если включены)."));
+        RayTracingNotice();
     }
     if (const char* label = Item("Ray traced bounce light", "Трассированный отражённый свет")) {
         Checkbox(label, s.graphics_rt_bounce);
@@ -695,6 +710,7 @@ void PictureSection() {
             "свет трассируется по сцене. Если включены виртуальные карты теней солнца, а "
             "трассированные тени ламп выкл., выключение пропускает построение сцены (намного "
             "дешевле)."));
+        RayTracingNotice();
     }
     if (const char* label = Item("Screen probe indirect light (experimental)",
                                  "Непрямой свет экранных зондов (экспериментальный)")) {

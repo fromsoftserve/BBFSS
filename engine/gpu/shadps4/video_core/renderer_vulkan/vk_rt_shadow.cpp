@@ -646,10 +646,15 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         const bool update = need_scene && entry.blas && entry.built && !entry.rebuilt &&
                             frame - entry.built_frame < RebuildEveryFrames;
         const bool refresh = entry.rebuilt && entry.built;
+        // With no ray tracing scene nothing is built: a caster captured before is only captured
+        // again, which must not use up the budget that lets new casters in.
+        const bool recapture = !need_scene && entry.built && !refresh;
         const u64 stored = u64(entry.vertices) * entry.instances;
-        const u64 needed = (update ? entry.update_scratch : entry.scratch) + 256;
+        const u64 needed =
+            need_scene ? (update ? entry.update_scratch : entry.scratch) + 256 : 0;
         const bool over = refresh ? rebuilt_triangles >= RebuiltTrianglesPerFrame
-                                  : !update && new_triangles >= NewTrianglesPerFrame;
+                                  : !update && !recapture &&
+                                        new_triangles >= NewTrianglesPerFrame;
         if (positions_used + stored > MaxPositions || scratch_used + needed > ScratchBytes || over) {
             return skip();
         }
@@ -663,7 +668,7 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         if (refresh) {
             rebuilt_triangles += entry.triangles;
             ++stats.shared_builds;
-        } else if (!update) {
+        } else if (!update && !recapture) {
             new_triangles += entry.triangles;
         }
         if (!update) {
@@ -1173,6 +1178,9 @@ void RtShadow::OnFrameEnd() {
         vsm->OnFrameEnd();
     }
     need_scene = SceneWanted();
+    // Frames whose casters were too incomplete for Complete(): the game's own shadows showed.
+    stats.missed += missed;
+    stats.incomplete += !frame_entries.empty() && missed * 4 > u32(frame_entries.size()) ? 1 : 0;
     for (const Build& build : builds) {
         build.entry->built = build.entry->built && build.update;
     }
@@ -1182,13 +1190,14 @@ void RtShadow::OnFrameEnd() {
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
                     "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
                     "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
-                    "%.1f a frame\n",
+                    "%.1f, missed %.1f a frame; %llu frames fell back to the game's shadows\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
                     double(stats.alpha) / f, double(stats.not_ortho) / f, double(stats.no_camera) / f,
                     double(stats.unsupported) / f, double(stats.instanced) / f,
                     double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
-                    double(stats.shared_builds) / f, double(stats.strips) / f);
+                    double(stats.shared_builds) / f, double(stats.strips) / f,
+                    double(stats.missed) / f, static_cast<unsigned long long>(stats.incomplete));
         stats = {};
     }
     ++frame;

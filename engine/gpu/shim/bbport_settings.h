@@ -78,7 +78,10 @@ inline constexpr int EffectVolumetricLight = 16;
 inline constexpr int EffectPointFog = 17;
 inline constexpr int EffectPointShadows = 18;
 inline constexpr int EffectRayTracing = 19;
-inline constexpr bool EffectIsLive(int effect) { return effect >= EffectContactShadows; }
+// Ray traced lighting needs its device extensions and position capture from the start.
+inline constexpr bool EffectIsLive(int effect) {
+    return effect >= EffectContactShadows && effect != EffectRayTracing;
+}
 inline constexpr int OutputWidths[] = {1280,1600,1920,2560,3840,2560,3440,3840,3840,5120,5120,7680,0,0};
 inline constexpr int OutputHeights[] = {720,900,1080,1440,2160,1080,1440,1600,1080,1440,2160,2160,0,0};
 inline constexpr int OutputCount = 14;
