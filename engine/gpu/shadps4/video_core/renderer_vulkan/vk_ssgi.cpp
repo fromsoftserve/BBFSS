@@ -191,11 +191,7 @@ bool ScreenSpaceGI::CreatePass(Pass& pass, std::initializer_list<vk::DescriptorT
                               sizeof(Params), code, name);
 }
 
-bool ScreenSpaceGI::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format format,
-                                const char* name) {
-    if (own.image && own.width == width && own.height == height) {
-        return false;
-    }
+void ScreenSpaceGI::ReleaseImage(OwnImage& own) {
     if (own.image) {
         scheduler.DeferOperation(
             [image = std::move(own.image), view = std::move(own.view)]() mutable {
@@ -203,6 +199,16 @@ bool ScreenSpaceGI::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format
                 image.Destroy();
             });
     }
+    own.width = 0;
+    own.height = 0;
+}
+
+bool ScreenSpaceGI::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format format,
+                                const char* name) {
+    if (own.image && own.width == width && own.height == height) {
+        return false;
+    }
+    ReleaseImage(own);
     const auto device = instance.GetDevice();
     own.image = VideoCore::UniqueImage(device, instance.GetAllocator());
     own.image.Create(vk::ImageCreateInfo{
@@ -278,6 +284,41 @@ void ScreenSpaceGI::OnAoDraw(VideoCore::ImageId ao) {
 
 void ScreenSpaceGI::OnFrameEnd() {
     done_this_frame = false;
+    const auto& settings = BbSettings::Get();
+    const bool probes_wanted =
+        settings.effects[BbSettings::EffectGi].load(std::memory_order_relaxed) &&
+        settings.graphics_gi_probes.load(std::memory_order_relaxed) &&
+        settings.graphics_gi_strength.load(std::memory_order_relaxed) > 0.0f;
+    constexpr u32 ReleaseAfterFrames = 120;
+    probe_idle_frames = probes_ran || probes_wanted ? 0 : probe_idle_frames + 1;
+    ray_idle_frames =
+        rays_ran || (probes_wanted && settings.graphics_gi_reflections.load(
+                                          std::memory_order_relaxed))
+            ? 0
+            : ray_idle_frames + 1;
+    probes_ran = false;
+    rays_ran = false;
+    if (ray_idle_frames == ReleaseAfterFrames) {
+        ReleaseImage(probe_ray);
+        ReleaseImage(probe_ray_dist);
+        for (auto& image : probe_reflection) {
+            ReleaseImage(image);
+        }
+        reflection_history_valid = false;
+    }
+    if (probe_idle_frames == ReleaseAfterFrames) {
+        for (u32 i = 0; i < 2; ++i) {
+            ReleaseImage(probe_geo[i]);
+            ReleaseImage(probe_light[i]);
+            for (auto& image : probe_sh[i]) {
+                ReleaseImage(image);
+            }
+            ReleaseImage(probe_diffuse[i]);
+            ReleaseImage(probe_specular[i]);
+        }
+        probe_history_valid = false;
+        reflection_history_valid = false;
+    }
     ao_image = {};
     gbuffer_depth = {};
     gbuffer_albedo = {};
@@ -296,6 +337,17 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
           BbSettings::Get().graphics_rt_bounce.load(std::memory_order_relaxed))) {
         probe_history_valid = false;
         reflection_history_valid = false;
+        return;
+    }
+    // Every term the probe composite adds is scaled by the GI strength (diffuse by 1.5x, probe and
+    // ray specular by 1/6x), so at 0 the whole pass writes nothing.
+    if (BbSettings::Get().effects[BbSettings::EffectGi].load(std::memory_order_relaxed) &&
+        BbSettings::Get().graphics_gi_probes.load(std::memory_order_relaxed) &&
+        BbSettings::Get().graphics_gi_strength.load(std::memory_order_relaxed) <= 0.0f) {
+        probe_history_valid = false;
+        reflection_history_valid = false;
+        history_valid = false;
+        prev_camera_valid = false;
         return;
     }
     const auto proj = camera_motion.PassProjection();
@@ -613,7 +665,7 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
              ray_dist_image = rays ? vk::Image(probe_ray_dist.image) : vk::Image{},
              ray_dist_view = rays ? *probe_ray_dist.view : *geo.view,
              reflection_image = rays ? vk::Image(probe_reflection[current].image) : vk::Image{},
-             reflection_view = rays ? *probe_reflection[current].view : *geo.view,
+             reflection_view = run_rays ? *probe_reflection[current].view : *geo.view,
              old_reflection_image =
                  rays ? vk::Image(probe_reflection[current ^ 1].image) : vk::Image{},
              old_reflection_view = rays ? *probe_reflection[current ^ 1].view : *geo.view,
@@ -738,6 +790,8 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
                 AfterCompute(cmdbuf);
             });
         probe_history_valid = true;
+        probes_ran = true;
+        rays_ran = rays;
         reflection_history_valid = run_rays;
         history_valid = false;
         prev_view = camera.view;
@@ -749,6 +803,13 @@ void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color_id, VideoCore::ImageI
     }
     probe_history_valid = false;
     reflection_history_valid = false;
+    // With no strength and no ray-traced bounce the composite adds nothing.
+    if (BbSettings::Get().graphics_gi_strength.load(std::memory_order_relaxed) <= 0.0f &&
+        !(gather_ray.pipeline &&
+          BbSettings::Get().graphics_rt_bounce.load(std::memory_order_relaxed))) {
+        history_valid = false;
+        return;
+    }
     for (auto& image : light) {
         created |= EnsureImage(image, half_width, half_height, vk::Format::eR16G16B16A16Sfloat,
                                "light");

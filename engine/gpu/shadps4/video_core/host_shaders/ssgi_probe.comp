@@ -92,6 +92,16 @@ vec3 octDecode(vec2 uv) {
     return vec3(d.x, d.y, -d.z);
 }
 
+// Solid angle of an octahedral map cell, up to a constant: 1 / |d|^3 for the unnormalised
+// direction d, which has |d.x| + |d.y| + |d.z| = 1.
+float octSolidAngle(vec2 uv) {
+    const vec2 p = uv * 2.0 - 1.0;
+    vec3 d = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+    d.xy -= max(-d.z, 0.0) * signNotZero(d.xy);
+    const float len = length(d);
+    return 1.0 / (len * len * len);
+}
+
 vec4 shBasis(vec3 d) {
     return vec4(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x);
 }
@@ -216,6 +226,7 @@ const float MAX_HISTORY = 24.0;
 shared uint chosen;
 shared ivec2 history_tile;
 shared vec3 sh_acc[4][64];
+shared float sh_weight[64];
 
 // Probes sit on the valid candidate nearest the tile centre, so they stay on the same surface
 // from frame to frame instead of jumping around (which breaks history and flickers).
@@ -414,21 +425,29 @@ void main() {
     }
     imageStore(light_img, out_texel, vec4(radiance, count));
 
-    const vec4 basis = shBasis(centre_dir) * (4.0 * PI / float(OCT * OCT));
+    // Octahedral cells subtend unequal solid angles; the weights are normalised to sum to 4 pi.
+    const float solid_angle = octSolidAngle((vec2(texel) + 0.5) / float(OCT));
+    const vec4 basis = shBasis(centre_dir) * solid_angle;
     sh_acc[0][lid] = radiance * basis.x;
     sh_acc[1][lid] = radiance * basis.y;
     sh_acc[2][lid] = radiance * basis.z;
     sh_acc[3][lid] = radiance * basis.w;
+    sh_weight[lid] = solid_angle;
     barrier();
     for (uint stride = 32u; stride > 0u; stride >>= 1) {
         if (lid < stride) {
             for (int k = 0; k < 4; ++k) {
                 sh_acc[k][lid] += sh_acc[k][lid + stride];
             }
+            sh_weight[lid] += sh_weight[lid + stride];
         }
         barrier();
     }
     if (lid == 0u) {
+        const float norm = 4.0 * PI / sh_weight[0];
+        for (int k = 0; k < 4; ++k) {
+            sh_acc[k][0] *= norm;
+        }
         imageStore(probe_img, tile, vec4(float(offset.x + offset.y * TILE), geo.w,
                                          octEncode(normal)));
         imageStore(sh_r_img, tile, vec4(sh_acc[0][0].r, sh_acc[1][0].r, sh_acc[2][0].r,
@@ -1048,11 +1067,12 @@ void main() {
             const float t = 1.0 - smoothstep(0.55, RAY_MAX_ROUGHNESS, roughness);
             const float strength =
                 float((history >> 8u) & 255u) * (REFLECTION_STRENGTH_SCALE / 255.0);
-            vec3 reflected = vec3(0.0);
+            vec4 reflected = vec4(0.0);
             if (strength > 0.0) {
-                reflected = sampleReflection(pixel, z, n).rgb * strength;
+                reflected = sampleReflection(pixel, z, n);
             }
-            spec = mix(spec, reflected, t);
+            // Resolved rgb is premultiplied by hit confidence; misses keep the probe specular.
+            spec = spec * (1.0 - t * reflected.a) + reflected.rgb * (strength * t);
         }
         add += spec * brdf * specular_scale;
     }

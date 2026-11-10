@@ -63,6 +63,7 @@ private:
                     std::span<const u32> code, const char* name);
 
     bool EnsureImage(OwnImage& image, u32 width, u32 height, vk::Format format, const char* name);
+    void ReleaseImage(OwnImage& image);
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
 
@@ -95,6 +96,10 @@ private:
     bool prev_camera_valid = false;
     u32 frame = 0;
     bool done_this_frame = false;
+    bool probes_ran = false;
+    bool rays_ran = false;
+    u32 probe_idle_frames = 0;
+    u32 ray_idle_frames = 0;
     bool history_valid = false;
     bool failed = false;
     bool tried = false;
