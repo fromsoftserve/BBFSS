@@ -265,17 +265,21 @@ void Cheat(const char* label, std::atomic<int>& value, BbEngine::Cheats::Which w
 
 ImVec2 last_hint{-1.0f, -1.0f};
 
-// Shown under settings that only work with ray traced lighting captured since the game started.
+// Shown under a setting that needs ray tracing when it was not started with the game.
 void RayTracingNotice() {
     const auto& s = BbSettings::Get();
-    if (s.effects[BbSettings::EffectRayTracing] && s.startup_effects[BbSettings::EffectRayTracing]) {
+    if (!s.effects[BbSettings::EffectRayTracing] || s.startup_effects[BbSettings::EffectRayTracing]) {
         return;
     }
-    ImGui::TextDisabled("%s", s.effects[BbSettings::EffectRayTracing]
-        ? BbSettings::MenuText("Ray traced lighting starts when the game restarts",
-                               "Трассированное освещение включится после перезапуска игры")
-        : BbSettings::MenuText("Needs Ray traced lighting on",
-                               "Нужно включённое трассированное освещение"));
+    ImGui::TextDisabled("%s", BbSettings::MenuText("Ray traced lighting starts when the game restarts",
+                                                   "Трассированное освещение включится после перезапуска игры"));
+}
+
+// Ray tracing follows what uses it; the ini keeps the derived value.
+void SyncRayTracing() {
+    auto& s = BbSettings::Get();
+    const bool needed = BbSettings::RayTracingNeeded();
+    Store(s.effects[BbSettings::EffectRayTracing], needed, s.effects[BbSettings::EffectRayTracing] != needed);
 }
 
 void Hint(const char* text) {
@@ -588,30 +592,39 @@ void AoQualityItem() {
     if (!label) {
         return;
     }
-    const char* levels[] = {
-        BbSettings::MenuText("Regular GTAO", "Обычный GTAO"),
-        BbSettings::MenuText("High (full-res bitmask GTAO, denoised, experimental)",
-                             "Высокое (битмаск GTAO в полном разрешении, с шумоподавлением, "
-                             "экспериментальное)")};
-    int quality = std::clamp(s.graphics_ao_quality.load(), 0, 1);
-    if (ImGui::Combo(label, &quality, levels, 2)) {
-        Store(s.graphics_ao_quality, quality, true);
+    const char* levels[] = {BbSettings::MenuText("Off", "Выкл."),
+                            BbSettings::MenuText("Default SSAO", "SSAO по умолчанию"),
+                            BbSettings::MenuText("GTAO", "GTAO"),
+                            BbSettings::MenuText("HQ GTAO", "GTAO высокого качества")};
+    int quality = !s.effects[BbSettings::EffectSsao]   ? 0
+                  : !s.effects[BbSettings::EffectGtao] ? 1
+                  : s.graphics_ao_quality == 1         ? 3
+                                                       : 2;
+    if (ImGui::Combo(label, &quality, levels, 4)) {
+        Store(s.effects[BbSettings::EffectSsao], quality != 0, true);
+        if (quality >= 1) {
+            Store(s.effects[BbSettings::EffectGtao], quality >= 2, true);
+        }
+        if (quality >= 2) {
+            Store(s.graphics_ao_quality, quality == 3 ? 1 : 0, true);
+        }
     }
     Hint(BbSettings::MenuText(
-        "Regular GTAO is unchanged and selected by default. High traces three visibility-bitmask "
+        "Off disables ambient occlusion. Default SSAO is the game's own ambient occlusion. GTAO "
+        "replaces it with ground-truth ambient occlusion. HQ GTAO traces three visibility-bitmask "
         "GTAO directions at the full internal render resolution (it follows DLSS/FSR scaling) and "
-        "applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU "
-        "cost; GTAO must also be on. Both modes are computed fresh each frame from a fixed sampling "
-        "pattern, so they stay stable in motion with no ghosting or trailing. Applied when the game "
-        "restarts.",
-        "Обычный GTAO не меняется и выбран по умолчанию. Высокое трассирует три направления "
-        "битмаск GTAO в полном внутреннем разрешении рендера (следует масштабированию DLSS/FSR) "
-        "и применяет фильтр шумоподавления с учётом глубины и нормалей для более чётких и "
-        "стабильных контактных теней. Повышает нагрузку на GPU; GTAO должен быть включён. "
-        "Оба режима рассчитываются заново каждый кадр по фиксированному шаблону выборки, "
-        "поэтому остаются стабильными в движении без шлейфов и ореолов. "
-        "Применяется после перезапуска игры."));
-    if (s.graphics_ao_quality != s.startup_ao_quality) {
+        "applies a depth/normal-aware denoiser for sharper, more stable contact shadows; it costs "
+        "more GPU time. Both GTAO modes are computed fresh each frame from a fixed sampling "
+        "pattern, so they stay stable in motion with no ghosting or trailing. Changing this "
+        "applies when the game restarts.",
+        "Выкл. отключает затенение (AO). SSAO по умолчанию — собственное затенение игры. GTAO "
+        "заменяет его ground-truth затенением. GTAO высокого качества трассирует три направления "
+        "битмаск GTAO в полном внутреннем разрешении рендера (следует масштабированию DLSS/FSR) и "
+        "применяет фильтр шумоподавления с учётом глубины и нормалей для более чётких и "
+        "стабильных контактных теней; нагрузка на GPU выше. Оба режима GTAO рассчитываются заново "
+        "каждый кадр по фиксированному шаблону выборки, поэтому остаются стабильными в движении "
+        "без шлейфов и ореолов. Изменение применяется после перезапуска игры."));
+    if (BbSettings::AoNeedsRestart()) {
         ImGui::SameLine();
         ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
                                                        "Применяется после перезапуска игры."));
@@ -678,50 +691,90 @@ void PictureSection() {
         }
         ImGui::TextDisabled("%s (%+.2f EV)", text, BbEngine::Exposure::CurrentStops());
     }
-    if (const char* label = Item("Sun virtual shadow maps (prototype)", "Виртуальные карты теней солнца (прототип)")) {
-        Checkbox(label, s.graphics_sun_vsm);
+    if (const char* label = Item("Shadow rendering method", "Метод отрисовки теней")) {
+        const char* names[] = {BbSettings::MenuText("Normal", "Обычный"),
+                               BbSettings::MenuText("High (Virtual Shadow Maps, requires hardware ray tracing)",
+                                                    "Высокий (виртуальные карты теней, нужна аппаратная трассировка лучей)"),
+                               BbSettings::MenuText("Ultra (Ray Traced Shadows)",
+                                                    "Ультра (трассированные тени)")};
+        int mode = s.graphics_sun_vsm ? 1 : s.graphics_rt_sun ? 2 : 0;
+        if (ImGui::Combo(label, &mode, names, 3)) {
+            Store(s.graphics_sun_vsm, mode == 1, true);
+            Store(s.graphics_rt_sun, mode == 2, mode != 1);
+            SyncRayTracing();
+        }
         Hint(BbSettings::MenuText(
-            "Live, off by default. Needs Ray traced lighting (experimental). Replaces the ray traced "
-            "sun with a 16-cascade virtual shadow map drawn from the same captured casters; only the "
-            "pages on screen are rendered. Compare against ray traced sun shadows.",
-            "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Заменяет "
-            "трассировку солнца виртуальной картой теней из 16 каскадов по тем же объектам; "
-            "рисуются только видимые страницы. Сравните с трассированными тенями."));
-        RayTracingNotice();
+            "Normal is the game's own dynamic sun shadows. High draws the sun's shadow as a "
+            "16-cascade virtual shadow map from the ray tracing system's cached scene geometry; "
+            "only the pages on screen are rendered. It REQUIRES a GPU with hardware ray tracing: "
+            "selecting it turns the ray tracing system on, which takes effect after restarting "
+            "the game. Ultra traces the sun's shadows against the scene; it also requires "
+            "hardware ray tracing (and a restart the first time) and is the most expensive.",
+            "Обычный — собственные динамические тени солнца игры. Высокий рисует тень солнца "
+            "виртуальной картой теней из 16 каскадов по геометрии сцены, кэшированной системой "
+            "трассировки лучей; рисуются только видимые страницы. ТРЕБУЕТ видеокарту с "
+            "аппаратной трассировкой лучей: при выборе система трассировки включается, "
+            "изменение вступает в силу после перезапуска игры. Ультра трассирует тени солнца "
+            "по сцене; тоже требует аппаратную трассировку лучей (и перезапуск в первый раз); "
+            "самый затратный вариант."));
+        if (mode != 0) {
+            RayTracingNotice();
+        }
     }
     if (const char* label = Item("Ray traced lamp shadows", "Трассированные тени ламп")) {
         Checkbox(label, s.graphics_rt_point_shadows);
+        SyncRayTracing();
         Hint(BbSettings::MenuText(
-            "Live, off by default. Needs Ray traced lighting (experimental). Traces lamp and torch "
-            "shadows against the captured scene; costly. Off, lamps use the screen space point "
-            "shadows effect (if enabled) instead.",
-            "Работает сразу, по умолчанию выкл. Нужно освещение с трассировкой лучей. Тени ламп и "
-            "факелов трассируются по сцене; затратно. Выкл.: используются экранные тени точечных "
-            "источников (если включены)."));
-        RayTracingNotice();
+            "Live, off by default. Needs a GPU with ray tracing (and a restart the first time). "
+            "Traces lamp and torch shadows against the captured scene; costly. Off, lamps use the "
+            "screen space point shadows effect (if enabled) instead.",
+            "Работает сразу, по умолчанию выкл. Нужна видеокарта с трассировкой лучей (и "
+            "перезапуск в первый раз). Тени ламп и факелов трассируются по сцене; затратно. "
+            "Выкл.: используются экранные тени точечных источников (если включены)."));
+        if (s.graphics_rt_point_shadows) {
+            RayTracingNotice();
+        }
     }
-    if (const char* label = Item("Ray traced bounce light", "Трассированный отражённый свет")) {
-        Checkbox(label, s.graphics_rt_bounce);
+    if (const char* label = Item("Global Illumination Quality (Indirect Lighting)",
+                                 "Качество глобального освещения (непрямой свет)")) {
+        const char* names[] = {BbSettings::MenuText("Off", "Выкл."),
+                               BbSettings::MenuText("Medium (single bounce)",
+                                                    "Средне (один отскок)"),
+                               BbSettings::MenuText("High (probe-based GI)",
+                                                    "Высоко (GI на зондах)"),
+                               BbSettings::MenuText("Ultra (RTGI)", "Ультра (RTGI)")};
+        const bool gi = s.effects[BbSettings::EffectGi];
+        int mode = gi && s.graphics_gi_probes ? 2 : s.graphics_rt_bounce ? 3 : gi ? 1 : 0;
+        if (ImGui::Combo(label, &mode, names, 4)) {
+            Store(s.effects[BbSettings::EffectGi], mode != 0, true);
+            Store(s.graphics_rt_bounce, mode == 3, mode != 2);
+            if (mode == 1 || mode == 3) {
+                Store(s.graphics_gi_probes, false, true);
+            } else if (mode == 2) {
+                Store(s.graphics_gi_probes, true, true);
+            }
+            SyncRayTracing();
+        }
         Hint(BbSettings::MenuText(
-            "Live, on by default. Needs Ray traced lighting (experimental). Traces indirect light "
-            "against the captured scene. With sun virtual shadow maps on and ray traced lamp shadows "
-            "off, turning this off skips building the ray tracing scene entirely (much cheaper).",
-            "Работает сразу, по умолчанию вкл. Нужно освещение с трассировкой лучей. Отражённый "
-            "свет трассируется по сцене. Если включены виртуальные карты теней солнца, а "
-            "трассированные тени ламп выкл., выключение пропускает построение сцены (намного "
-            "дешевле)."));
-        RayTracingNotice();
-    }
-    if (const char* label = Item("Screen probe indirect light (experimental)",
-                                 "Непрямой свет экранных зондов (экспериментальный)")) {
-        Checkbox(label, s.graphics_gi_probes);
-        Hint(BbSettings::MenuText(
-            "Live, off by default. Needs Indirect lighting. Replaces the screen-space indirect light "
-            "with radiance probes (one per 16x16 pixels) that add diffuse bounce and rough "
-            "specular reflections. Overrides Ray traced bounce light while on.",
-            "Работает сразу, по умолчанию выкл. Нужно непрямое освещение. Заменяет экранный "
-            "непрямой свет зондами (один на 16x16 пикселей): рассеянный отражённый свет и "
-            "размытые отражения. Пока включено, заменяет трассированный отражённый свет."));
+            "Off adds no indirect lighting. Medium is screen-space indirect light with a single "
+            "bounce. High uses screen-space radiance probes (one per 16x16 pixels) for diffuse "
+            "bounce and rough specular reflections, and costs more. Ultra (RTGI) traces indirect "
+            "light against the captured scene: it needs a GPU with ray tracing (and a restart the "
+            "first time) and is the most expensive. Not using Ultra skips building the "
+            "ray tracing scene when the High shadow rendering method is used and ray traced lamp "
+            "shadows are off (much cheaper). Live, except that ray tracing starts when the game "
+            "restarts.",
+            "Выкл. — без добавленного непрямого света. Средне — экранный непрямой свет с одним "
+            "отскоком. Высоко использует экранные зонды яркости (один на 16x16 пикселей) для "
+            "рассеянного отражённого света и размытых бликов; затратнее. Ультра (RTGI) трассирует "
+            "непрямой свет по захваченной сцене: нужна видеокарта с трассировкой лучей (и "
+            "перезапуск в первый раз); самый затратный вариант. Если не выбран Ультра, при "
+            "высоком методе теней и выключенных трассированных тенях ламп сцена трассировки не "
+            "строится (намного дешевле). Работает сразу, кроме запуска трассировки лучей: он "
+            "происходит после перезапуска игры."));
+        if (mode == 3) {
+            RayTracingNotice();
+        }
     }
     if (const char* label = Item("Screen probe glossy reflections (experimental)",
                                  "Глянцевые отражения экранных зондов (экспериментальный)")) {
@@ -729,10 +782,10 @@ void PictureSection() {
         Checkbox(label, s.graphics_gi_reflections);
         ImGui::EndDisabled();
         Hint(BbSettings::MenuText(
-            "Live, off by default. Needs Screen probe indirect light. Traces one glossy reflection "
+            "Live, off by default. Needs High (probe-based GI) in Global Illumination Quality. Traces one glossy reflection "
             "ray per 2x2 pixels on wet and smooth surfaces, so nearby lit surfaces reflect in "
             "them. Costs about as much as screen-space reflections at half resolution.",
-            "Работает сразу, по умолчанию выкл. Нужен непрямой свет экранных зондов. Трассирует "
+            "Работает сразу, по умолчанию выкл. Нужно «Высоко (GI на зондах)» в качестве глобального освещения. Трассирует "
             "один луч глянцевого отражения на 2x2 пикселя на мокрых и гладких поверхностях, чтобы "
             "в них отражались освещённые поверхности рядом. Стоит примерно как экранные "
             "отражения в половинном разрешении."));
@@ -904,7 +957,12 @@ void PictureSection() {
             "не зависит от настройки изображения. Исходное резервное размытие можно уменьшить, но не усилить."));
     }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
-        if (e == BbSettings::EffectModernSsr || e == BbSettings::EffectPomCavity) continue;
+        if (e == BbSettings::EffectModernSsr || e == BbSettings::EffectPomCavity ||
+            e == BbSettings::EffectGi || e == BbSettings::EffectRayTracing) continue;
+        if (e == BbSettings::EffectGtao) {
+            AoQualityItem();
+            continue;
+        }
         const auto& effect = BbSettings::Effects[e];
         if (const char* label = Item(effect.label, effect.label_ru)) {
             Checkbox(label, s.effects[e]);
@@ -916,9 +974,6 @@ void PictureSection() {
                                                                    "Применяется после перезапуска игры."));
                 }
             }
-        }
-        if (e == BbSettings::EffectGtao) {
-            AoQualityItem();
         }
     }
     if (const char* heading = Item("Looks", "Образы")) {
@@ -948,7 +1003,9 @@ void PictureSection() {
         if (ImGui::Button(label)) {
             Store(s.graphics_auto_exposure, false, true);
             Store(s.graphics_sun_vsm, false, true);
+            Store(s.graphics_rt_sun, false, true);
             Store(s.graphics_rt_point_shadows, false, true);
+            Store(s.graphics_rt_bounce, false, true);
             Store(s.graphics_native_sss, false, true);
             Store(s.graphics_gi_probes, false, true);
             Store(s.graphics_gi_reflections, false, true);
@@ -971,6 +1028,7 @@ void PictureSection() {
             Store(s.graphics_volumetric_intensity, 1.0f, true);
             Store(s.graphics_point_fog_intensity, 1.0f, true);
             Store(s.graphics_point_fog_glow_size, 0.08f, true);
+            SyncRayTracing();
         }
     }
     ImGui::EndDisabled();
@@ -1021,6 +1079,19 @@ void DebugSection() {
             "По умолчанию 1.00x. Сравнивает полную энергию старой и обратноквадратичной кривых в "
             "пределах радиуса каждого источника, затем применяет этот множитель к рассеянному свету "
             "и бликам. Работает при включённом обратноквадратичном спаде. Требуется перезапуск."));
+    }
+    if (const char* label = Item("Local-light source size", "Размер локальных источников")) {
+        Slider(label, s.graphics_local_light_core, BbSettings::LocalLightCoreMin,
+               BbSettings::LocalLightCoreMax, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        Hint(BbSettings::MenuText(
+            "0.15 by default. Under inverse-square falloff a lamp is a glowing sphere this fraction "
+            "of its radius instead of a point, so surfaces right next to it are not blown out. 0 is a "
+            "point light (brightest up close); about 0.32 is no brighter up close than the old "
+            "falloff. The light's total energy stays the same. Requires restart.",
+            "По умолчанию 0.15. При обратноквадратичном спаде лампа считается светящейся сферой "
+            "такого размера (доля радиуса), а не точкой, поэтому поверхности рядом с ней не "
+            "пересвечиваются. 0 — точечный источник (ярче всего вблизи); около 0.32 — вблизи не ярче "
+            "старого спада. Полная энергия света сохраняется. Требуется перезапуск."));
     }
     if (const char* label = Item("Uniform diffuse/specular light color",
                                 "Единый цвет рассеянного света и бликов")) {
@@ -1116,6 +1187,9 @@ void EffectsSection() {
         }
     }
     for (int e = 0; e < BbSettings::EffectFirstLighting; ++e) {
+        if (e == BbSettings::EffectSsao) {
+            continue;
+        }
         const auto& effect = BbSettings::Effects[e];
         const char* label = Item(effect.label, effect.label_ru);
         if (!label) {
@@ -2481,16 +2555,20 @@ void Menu() {
         s.graphics_local_ggx != s.startup_local_ggx ||
         s.graphics_local_inverse_square != s.startup_local_inverse_square ||
         s.graphics_local_light_intensity != s.startup_local_light_intensity ||
+        s.graphics_local_light_core != s.startup_local_light_core ||
         s.graphics_uniform_local_light != s.startup_uniform_local_light ||
         s.graphics_disable_player_light != s.startup_disable_player_light ||
         s.graphics_specular_aa != s.startup_specular_aa ||
         s.graphics_env_ggx_tails != s.startup_env_ggx_tails ||
         s.graphics_light_sharpness != s.startup_light_sharpness ||
-        s.graphics_ao_quality != s.startup_ao_quality ||
+        BbSettings::AoNeedsRestart() ||
         s.graphics_shadow_resolution != s.startup_shadow_resolution ||
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        if (e == BbSettings::EffectSsao || e == BbSettings::EffectGtao) {
+            continue;
+        }
         restart |= !BbSettings::EffectIsLive(e) && s.effects[e] != s.startup_effects[e];
     }
     restart |= Vulkan::OptiScaler::Detect().loaded &&

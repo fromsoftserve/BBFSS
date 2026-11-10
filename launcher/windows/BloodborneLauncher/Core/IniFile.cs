@@ -27,6 +27,15 @@ namespace BloodborneLauncher.Core
             ("frame_gen", "off"),
             ("graphics_auto_exposure", "0"),
             ("graphics_native_sss", "0"),
+            ("graphics_sun_vsm", "0"),
+            ("effect_ssao", "1"),
+            ("effect_gtao", "0"),
+            ("effect_ray_tracing", "0"),
+            ("graphics_rt_point_shadows", "0"),
+            ("effect_gi", "0"),
+            ("graphics_gi_probes", "0"),
+            ("graphics_rt_sun", "0"),
+            ("graphics_rt_bounce", "0"),
             ("graphics_point_fog_glow_size", "0.08"),
             ("frame_gen_cap", "1"),
             ("dlss_preset", "k"),
@@ -72,7 +81,27 @@ namespace BloodborneLauncher.Core
                 var at = line.IndexOf('=');
                 _values[line[..at].Trim()] = line[(at + 1)..].Trim();
             }
+
+            // A file from before graphics_rt_sun existed showed the ray traced sun whenever ray traced
+            // lighting was on and the virtual shadow map was not.
+            if (!_lines.Any(l => !l.TrimStart().StartsWith('#') && l.Contains('=') && l[..l.IndexOf('=')].Trim() == "graphics_rt_sun"))
+                _values["graphics_rt_sun"] = Flag("effect_ray_tracing") && !Flag("graphics_sun_vsm") ? "1" : "0";
+            // The ray traced flags did nothing while the master switch was off; they must not turn it on.
+            if (!Flag("effect_ray_tracing"))
+            {
+                _values["graphics_rt_sun"] = "0";
+                _values["graphics_rt_bounce"] = "0";
+                _values["graphics_rt_point_shadows"] = "0";
+            }
+            _values["effect_ray_tracing"] = RayTracingNeeded() ? "1" : "0";
         }
+
+        /// <summary>Ray tracing is on exactly when High or Ultra sun shadows, the lamp shadows or the bounce light use it.</summary>
+        public bool RayTracingNeeded() =>
+            Flag("graphics_sun_vsm") || Flag("graphics_rt_sun") || Flag("graphics_rt_point_shadows")
+            || (Flag("graphics_rt_bounce") && !(Flag("effect_gi") && Flag("graphics_gi_probes")));
+
+        public void DeriveRayTracing() => Set("effect_ray_tracing", RayTracingNeeded() ? "1" : "0");
 
         public void Save()
         {

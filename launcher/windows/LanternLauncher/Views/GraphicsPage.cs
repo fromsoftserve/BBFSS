@@ -220,18 +220,24 @@ namespace BloodborneLauncher.Views
             IniCombo(SymbolRegular.Camera24, L.T("Follow camera"), L.T("Original keeps the game's camera distance, angle and follow speed at 60 FPS and above"), Choices.CameraTuning, "camera_tuning");
             foreach (var effect in Choices.Effects)
             {
+                if (effect.Key == "effect_game_aa")
+                    ComboRow(SymbolRegular.Color24, L.T("Ambient occlusion quality"),
+                        L.T("Off disables ambient occlusion. Default SSAO is the game's own. GTAO replaces it with ground-truth ambient occlusion. HQ GTAO is the full-resolution variant (follows DLSS/FSR scaling, with a depth/normal-aware denoiser) and costs more GPU time. Applied when the game starts."),
+                        Choices.AoQualities, () => Choices.AoMode(Ini), v => Choices.SetAoMode(Ini, v));
                 var motionBlur = effect.Key == "effect_motion_blur";
                 IniToggle(EffectIcon(effect.Key), effect.Title, effect.Hint, effect.Key, changed: motionBlur ? UpdateUpscaler : null);
                 if (motionBlur) _motionBlurHint = ((SettingRow)Body.Children[^1]).Hint;
-                if (effect.Key == "effect_gtao")
-                    IniCombo(SymbolRegular.Color24, L.T("Ambient occlusion quality"),
-                        L.T("Regular GTAO is unchanged. High traces three visibility-bitmask GTAO directions at the full internal render resolution (follows DLSS/FSR scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU cost; needs Better ambient occlusion (GTAO) on. Requires restarting Bloodborne."),
-                        Choices.AoQualities, "graphics_ao_quality");
             }
 
             Group(L.T("Lighting"));
             IniCombo(SymbolRegular.Lightbulb24, L.T("Sun shadow resolution"), L.T("Applied when the game starts"), Choices.ShadowResolution, "graphics_shadow_resolution");
             IniCombo(SymbolRegular.Lightbulb24, L.T("Lamp shadow resolution"), L.T("Applied when the game starts"), Choices.LocalShadowResolution, "graphics_local_shadow_resolution");
+            ComboRow(SymbolRegular.Lightbulb24, L.T("Shadow rendering method"),
+                L.T("Normal uses the game's own dynamic sun shadows. High draws the sun's shadows with virtual shadow maps from the ray tracing system's cached scene geometry: sharper and stable at distance, costs more, and requires a GPU with hardware ray tracing (selecting it turns the ray tracing system on). Ultra traces the sun's shadows, also requires hardware ray tracing and is the most expensive. Takes effect on the next game start."),
+                Choices.SunShadowMethods, () => Choices.SunShadowMode(Ini), v => Choices.SetSunShadowMode(Ini, v));
+            ComboRow(SymbolRegular.Lightbulb24, L.T("Global Illumination Quality (Indirect Lighting)"),
+                L.T("Off adds no indirect lighting. Medium is screen-space indirect light with a single bounce. High uses screen-space radiance probes for the diffuse bounce and rough specular reflections and costs more. Ultra traces indirect light against the scene, needs a GPU with ray tracing and is the most expensive. Takes effect on the next game start."),
+                Choices.GiQualities, () => Choices.GiMode(Ini), v => Choices.SetGiMode(Ini, v));
             IniCombo(SymbolRegular.Lightbulb24, L.T("Motion blur quality"), L.T("Applied when the game starts"), Choices.MotionBlurQuality, "graphics_motion_blur_quality");
             IniSlider(SymbolRegular.Lightbulb24, L.T("Indirect lighting strength"), 0, 12, "graphics_gi_strength", fallback: 6);
             IniSlider(SymbolRegular.Lightbulb24, L.T("Reflection strength"), 0, 3, "graphics_ssr_intensity");

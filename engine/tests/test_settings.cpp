@@ -106,7 +106,7 @@ int main() {
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
     assert(s.graphics_point_fog_glow_size == 0.15f);
     assert(!s.graphics_auto_exposure && !s.graphics_native_sss && !s.graphics_sun_vsm &&
-           !s.graphics_rt_point_shadows && s.graphics_rt_bounce && !s.graphics_gi_probes &&
+           !s.graphics_rt_point_shadows && !s.graphics_rt_sun && !s.graphics_rt_bounce && !s.graphics_gi_probes &&
            !s.graphics_gi_reflections && !s.graphics_gi_reflections_full_res);
     assert(s.graphics_directional_ggx && s.startup_directional_ggx);
     assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
@@ -123,7 +123,9 @@ int main() {
     s.graphics_auto_exposure = true;
     s.graphics_sun_vsm = true;
     s.graphics_rt_point_shadows = true;
+    s.graphics_rt_sun = false;
     s.graphics_rt_bounce = false;
+    s.effects[BbSettings::EffectRayTracing] = true;
     s.graphics_gi_probes = true;
     s.graphics_gi_reflections = true;
     s.graphics_native_sss = true;
@@ -146,6 +148,7 @@ int main() {
         assert(fork_keys.find("graphics_auto_exposure=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_sun_vsm=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_rt_point_shadows=1\n") != std::string::npos);
+        assert(fork_keys.find("graphics_rt_sun=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_rt_bounce=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_gi_probes=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_gi_reflections=1\n") != std::string::npos);
@@ -174,7 +177,8 @@ int main() {
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = true;
     s.graphics_sun_vsm = false;
     s.graphics_rt_point_shadows = false;
-    s.graphics_rt_bounce = true;
+    s.graphics_rt_sun = true;
+    s.graphics_rt_bounce = false;
     s.graphics_gi_probes = false;
     s.graphics_gi_reflections = false;
     s.graphics_gi_reflection_strength = 1.0f;
@@ -185,7 +189,7 @@ int main() {
     BbSettings::Load();
     assert(s.graphics_gi_wet_ground == 0.75f && s.graphics_smooth_normals);
     s.graphics_smooth_normals = false;
-    assert(s.graphics_sun_vsm && s.graphics_rt_point_shadows && !s.graphics_rt_bounce &&
+    assert(s.graphics_sun_vsm && s.graphics_rt_point_shadows && !s.graphics_rt_sun && !s.graphics_rt_bounce &&
            s.graphics_gi_probes && s.graphics_gi_reflections &&
            s.graphics_gi_reflection_strength == 0.25f && s.graphics_gi_reflections_full_res);
     assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
@@ -214,7 +218,8 @@ int main() {
     s.graphics_local_ggx = s.graphics_specular_aa = s.graphics_env_ggx_tails = true;
     s.graphics_auto_exposure = s.graphics_native_sss = s.graphics_sun_vsm = false;
     s.graphics_rt_point_shadows = false;
-    s.graphics_rt_bounce = true;
+    s.graphics_rt_sun = false;
+    s.graphics_rt_bounce = false;
     s.graphics_gi_probes = false;
     s.graphics_gi_reflections = false;
     s.graphics_gi_reflection_strength = 1.0f;
@@ -248,6 +253,66 @@ int main() {
     { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
     BbSettings::Load();
     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
+    // An ini without graphics_rt_sun keeps the ray traced sun it was showing.
+    s.graphics_sun_vsm = false;
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_sun_vsm=0\ngraphics_rt_bounce=0\ngraphics_rt_point_shadows=0\n"; }
+    BbSettings::Load();
+    assert(s.graphics_rt_sun && s.effects[BbSettings::EffectRayTracing]);
+    // Virtual shadow maps need ray tracing, so they switch it on even with nothing else using it.
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_sun_vsm=1\ngraphics_rt_bounce=0\ngraphics_rt_point_shadows=0\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_rt_sun && s.graphics_sun_vsm && s.effects[BbSettings::EffectRayTracing]);
+    // An ini with the master switch off and High shadows keeps High; ray tracing now starts this launch.
+    { std::ofstream file(path); file << "effect_ray_tracing=0\ngraphics_sun_vsm=1\ngraphics_rt_bounce=1\n"; }
+    BbSettings::Load();
+    assert(s.graphics_sun_vsm && !s.graphics_rt_bounce && s.effects[BbSettings::EffectRayTracing] &&
+           s.startup_effects[BbSettings::EffectRayTracing]);
+    // Master off, no VSM, bounce on: the inert bounce flag is cleared and ray tracing stays off.
+    { std::ofstream file(path); file << "effect_ray_tracing=0\ngraphics_sun_vsm=0\ngraphics_rt_bounce=1\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_sun_vsm && !s.graphics_rt_bounce && !s.effects[BbSettings::EffectRayTracing]);
+    s.graphics_sun_vsm = false;
+    { std::ofstream file(path); file << "graphics_sun_vsm=0\ngraphics_rt_bounce=0\ngraphics_rt_point_shadows=0\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_rt_sun && !s.effects[BbSettings::EffectRayTracing]);
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_rt_sun=0\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_rt_sun && !s.effects[BbSettings::EffectRayTracing]);
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_rt_sun=1\n"; }
+    BbSettings::Load();
+    assert(s.graphics_rt_sun && s.effects[BbSettings::EffectRayTracing]);
+    // With the master switch off in the file, the ray traced flags were inert and stay off.
+    { std::ofstream file(path); file << "effect_ray_tracing=0\ngraphics_rt_sun=1\ngraphics_rt_bounce=1\ngraphics_rt_point_shadows=1\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_rt_sun && !s.graphics_rt_bounce && !s.graphics_rt_point_shadows &&
+           !s.effects[BbSettings::EffectRayTracing] && !s.startup_effects[BbSettings::EffectRayTracing]);
+    { std::ofstream file(path); file << "graphics_rt_bounce=1\n"; }
+    BbSettings::Load();
+    assert(!s.graphics_rt_bounce && !s.effects[BbSettings::EffectRayTracing]);
+    // Lamp shadows or the bounce light switch ray tracing on.
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_rt_sun=0\ngraphics_rt_point_shadows=1\n"; }
+    BbSettings::Load();
+    assert(s.graphics_rt_point_shadows && s.effects[BbSettings::EffectRayTracing] &&
+           s.startup_effects[BbSettings::EffectRayTracing]);
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_rt_sun=0\ngraphics_rt_point_shadows=0\ngraphics_rt_bounce=1\neffect_gi=0\n"; }
+    BbSettings::Load();
+    assert(s.graphics_rt_bounce && s.effects[BbSettings::EffectRayTracing]);
+    // Probe GI overrides the bounce light, so it needs no ray tracing; the flag itself is kept.
+    { std::ofstream file(path); file << "effect_ray_tracing=1\ngraphics_rt_sun=0\ngraphics_rt_bounce=1\neffect_gi=1\ngraphics_gi_probes=1\n"; }
+    BbSettings::Load();
+    assert(s.graphics_rt_bounce && !s.effects[BbSettings::EffectRayTracing]);
+    // The derived switch follows the live flags.
+    s.graphics_rt_point_shadows = true;
+    BbSettings::DeriveRayTracing();
+    assert(s.effects[BbSettings::EffectRayTracing] && BbSettings::RayTracingNeeded());
+    s.graphics_rt_point_shadows = false;
+    s.graphics_rt_bounce = false;
+    BbSettings::DeriveRayTracing();
+    assert(!s.effects[BbSettings::EffectRayTracing]);
+    s.graphics_gi_probes = false;
+    s.effects[BbSettings::EffectGi] = false;
+    s.graphics_rt_sun = false;
+    s.effects[BbSettings::EffectRayTracing] = false;
     { std::ofstream file(path); file << "menu_language=pt_BR\n"; }
     BbSettings::Load();
     assert(s.menu_language == BbSettings::MenuLanguage::PortugueseBrazil);

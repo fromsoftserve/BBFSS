@@ -67,6 +67,7 @@ inline constexpr Effect Effects[] = {
 inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
 inline constexpr int EffectFirstLighting = 10;
 inline constexpr int EffectDof = 1;
+inline constexpr int EffectSsao = 3;
 inline constexpr int EffectSsr = 6;
 inline constexpr int EffectGtao = 10;
 inline constexpr int EffectModernSsr = 11;
@@ -116,6 +117,8 @@ inline constexpr float FroyokSpreadMin = 0.5f, FroyokSpreadDefault = 0.85f, Froy
 inline constexpr float WetGroundMin = 0.0f, WetGroundMax = 1.0f, WetGroundDefault = 0.5f;
 inline constexpr float DofIntensityMin = 0.0f, DofIntensityMax = 3.0f;
 inline constexpr float LocalLightIntensityMin = 0.0f, LocalLightIntensityMax = 4.0f;
+// Source size of local lights under inverse-square falloff, as a fraction of the light radius.
+inline constexpr float LocalLightCoreMin = 0.0f, LocalLightCoreMax = 0.35f, LocalLightCoreDefault = 0.15f;
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
 inline constexpr int DlssPresetAuto = -1, DlssPresetL = 12, DlssPresetM = 13;
@@ -198,8 +201,9 @@ struct Values {
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
     std::atomic<bool> graphics_auto_exposure{false};
     std::atomic<bool> graphics_sun_vsm{false};
+    std::atomic<bool> graphics_rt_sun{false};
     std::atomic<bool> graphics_rt_point_shadows{false};
-    std::atomic<bool> graphics_rt_bounce{true};
+    std::atomic<bool> graphics_rt_bounce{false};
     std::atomic<bool> graphics_gi_probes{false};
     std::atomic<bool> graphics_gi_reflections{false};
     std::atomic<bool> graphics_gi_reflections_full_res{false};
@@ -210,6 +214,7 @@ struct Values {
     std::atomic<bool> graphics_directional_ggx{true};
     std::atomic<bool> graphics_local_inverse_square{true};
     std::atomic<float> graphics_local_light_intensity{1.0f};
+    std::atomic<float> graphics_local_light_core{LocalLightCoreDefault};
     std::atomic<bool> graphics_uniform_local_light{false};
     std::atomic<bool> graphics_disable_player_light{true};
     // Game-shader specular upgrades applied at shader compile time (restart required).
@@ -274,6 +279,7 @@ struct Values {
     bool startup_directional_ggx = true;
     bool startup_local_inverse_square = true;
     float startup_local_light_intensity = 1.0f;
+    float startup_local_light_core = LocalLightCoreDefault;
     bool startup_uniform_local_light = false;
     bool startup_disable_player_light = true;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
@@ -308,6 +314,10 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss = false, bool fs
 bool FixedRenderSession();
 int RenderPreset();
 bool ResolutionNeedsRestart();
+bool AoNeedsRestart();
+// Ray tracing is on exactly when the sun shadow method, the lamp shadows or the bounce light use it.
+bool RayTracingNeeded();
+void DeriveRayTracing();
 void Save();
 
 float PresetScale(int preset);

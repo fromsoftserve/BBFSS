@@ -338,6 +338,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_auto_exposure=i!=0;
     } else if (key == "graphics_sun_vsm") {
         v.graphics_sun_vsm=i!=0;
+    } else if (key == "graphics_rt_sun") {
+        v.graphics_rt_sun=i!=0;
     } else if (key == "graphics_rt_point_shadows") {
         v.graphics_rt_point_shadows=i!=0;
     } else if (key == "graphics_rt_bounce") {
@@ -364,6 +366,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_local_inverse_square=i!=0;
     } else if (key == "graphics_local_light_intensity") {
         v.graphics_local_light_intensity=Clamp(std::isfinite(f)?f:1.0f,LocalLightIntensityMin,LocalLightIntensityMax);
+    } else if (key == "graphics_local_light_core") {
+        v.graphics_local_light_core=Clamp(std::isfinite(f)?f:LocalLightCoreDefault,LocalLightCoreMin,LocalLightCoreMax);
     } else if (key == "graphics_uniform_local_light") {
         v.graphics_uniform_local_light=i!=0;
     } else if (key == "graphics_disable_player_light") {
@@ -580,6 +584,7 @@ void Load() {
         }
         v.menu_language = LanguageOfLocale(lang);
     }
+    bool rt_sun_present = false;
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), file)) {
@@ -589,11 +594,28 @@ void Load() {
             if (text.empty() || text[0] == '#' || eq == std::string::npos) {
                 continue;
             }
+            if (text.compare(0, eq, "graphics_rt_sun") == 0) {
+                rt_sun_present = true;
+            }
             Set(v, text.substr(0, eq), text.substr(eq + 1));
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
     }
+    // An ini from before graphics_rt_sun existed showed the ray traced sun whenever ray traced
+    // lighting was on and the virtual shadow map was not.
+    if (!rt_sun_present) {
+        v.graphics_rt_sun = v.effects[EffectRayTracing] && !v.graphics_sun_vsm;
+    }
+    // The ray traced flags did nothing while the master switch was off; they must not turn it on.
+    // graphics_sun_vsm is kept: the virtual shadow maps need ray tracing, which is derived on below
+    // before the startup snapshot, so it is already active in this launch.
+    if (!v.effects[EffectRayTracing]) {
+        v.graphics_rt_sun = false;
+        v.graphics_rt_bounce = false;
+        v.graphics_rt_point_shadows = false;
+    }
+    DeriveRayTracing();
     if (const char* env = std::getenv("BB_UPSCALER")) {
         v.upscaler = UpscalerOff;
         for (int u = 0; u < UpscalerCount; ++u) {
@@ -631,6 +653,7 @@ void Load() {
     v.startup_local_ggx = v.graphics_local_ggx;
     v.startup_local_inverse_square = v.graphics_local_inverse_square;
     v.startup_local_light_intensity = v.graphics_local_light_intensity;
+    v.startup_local_light_core = v.graphics_local_light_core;
     v.startup_uniform_local_light = v.graphics_uniform_local_light;
     v.startup_disable_player_light = v.graphics_disable_player_light;
     v.startup_specular_aa = v.graphics_specular_aa;
@@ -707,6 +730,27 @@ bool ResolutionNeedsRestart() {
          (v.preset == PresetCustom && v.render_scale != v.startup_render_scale) ||
          (v.upscaler == UpscalerOff) != (v.startup_upscaler == UpscalerOff) ||
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
+}
+
+bool RayTracingNeeded() {
+    const auto& v = Get();
+    return v.graphics_sun_vsm || v.graphics_rt_sun || v.graphics_rt_point_shadows ||
+           (v.graphics_rt_bounce && !(v.effects[EffectGi] && v.graphics_gi_probes));
+}
+
+void DeriveRayTracing() {
+    Get().effects[EffectRayTracing] = RayTracingNeeded();
+}
+
+bool AoNeedsRestart() {
+    const auto& v = Get();
+    if (v.effects[EffectSsao] != v.startup_effects[EffectSsao]) {
+        return true;
+    }
+    // With ambient occlusion off, the GTAO switch and quality are not in use.
+    return v.effects[EffectSsao] &&
+           (v.effects[EffectGtao] != v.startup_effects[EffectGtao] ||
+            (v.effects[EffectGtao] && v.graphics_ao_quality != v.startup_ao_quality));
 }
 
 void Save() {
@@ -813,6 +857,7 @@ void Save() {
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
     put("graphics_auto_exposure",flag(v.graphics_auto_exposure));
     put("graphics_sun_vsm",flag(v.graphics_sun_vsm));
+    put("graphics_rt_sun",flag(v.graphics_rt_sun));
     put("graphics_rt_point_shadows",flag(v.graphics_rt_point_shadows));
     put("graphics_rt_bounce",flag(v.graphics_rt_bounce));
     put("graphics_gi_probes",flag(v.graphics_gi_probes));
@@ -826,6 +871,7 @@ void Save() {
     put("graphics_local_ggx",flag(v.graphics_local_ggx));
     put("graphics_local_inverse_square",flag(v.graphics_local_inverse_square));
     put("graphics_local_light_intensity",fixed(v.graphics_local_light_intensity,2));
+    put("graphics_local_light_core",fixed(v.graphics_local_light_core,2));
     put("graphics_uniform_local_light",flag(v.graphics_uniform_local_light));
     put("graphics_disable_player_light",flag(v.graphics_disable_player_light));
     put("graphics_specular_aa",flag(v.graphics_specular_aa));

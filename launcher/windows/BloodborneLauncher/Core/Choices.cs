@@ -1,4 +1,4 @@
-﻿namespace BloodborneLauncher.Core
+namespace BloodborneLauncher.Core
 {
     /// <summary>A drop-down entry. Note is shown under the row while this entry is selected.</summary>
     public sealed record Choice(string Label, string Value, string? Note = null);
@@ -121,20 +121,16 @@
             new("effect_chromatic_aberration", L.T("Chromatic aberration"), false),
             new("effect_dof", L.T("Depth of field"), false),
             new("effect_motion_blur", L.T("Motion blur"), false),
-            new("effect_ssao", L.T("Ambient occlusion (SSAO)"), true),
             new("effect_game_aa", L.T("Game's own anti-aliasing"), false),
             new("effect_dynamic_shadows", L.T("Shadows from dynamic lights"), true),
             new("effect_ssr", L.T("Screen-space reflections"), false, L.T("Not in the original game")),
-            new("effect_gtao", L.T("Better ambient occlusion (GTAO)") + L.T(" (experimental)"), false, L.T("Replaces the game's SSAO shader; needs Ambient occlusion on")),
             new("effect_modern_ssr", L.T("Improved reflections"), false, L.T("Needs Screen-space reflections on")),
             new("effect_pom_cavity", L.T("Deeper parallax surfaces"), false),
             new("effect_contact_shadows", L.T("Contact shadows"), false),
             new("effect_pcss", L.T("Soft sun shadows (PCSS)"), false),
-            new("effect_gi", L.T("Indirect lighting (GI)"), false, L.T("Heavy")),
             new("effect_volumetric_light", L.T("Volumetric sunlight"), false, L.T("Heavy")),
             new("effect_point_fog", L.T("Fog around lamps"), false, L.T("Heavy")),
             new("effect_point_shadows", L.T("Point light shadows") + L.T(" (experimental)"), false, L.T("Heavy")),
-            new("effect_ray_tracing", L.T("Ray traced lighting") + L.T(" (experimental)"), false, L.T("Sun, lamps and bounced light. Needs a GPU with ray tracing and a restart")),
             new("skip_intro", L.T("Skip intro videos"), false),
             new("debug_camera", L.T("Free camera"), false, L.T("Toggle with Cross + L3 / Space + Z")),
             new("debug_menu", L.T("Debug menu"), false,
@@ -161,12 +157,78 @@
             new(L.T("High"), "1"),
         };
 
-        /// <summary>graphics_ao_quality: the GTAO replacement's quality (effect_gtao).</summary>
+        /// <summary>The ambient occlusion choice: effect_ssao, effect_gtao and graphics_ao_quality together
+        /// (AoMode reads them, SetAoMode writes them).</summary>
         public static readonly Choice[] AoQualities =
         {
-            new(L.T("Regular GTAO"), "0"),
-            new(L.T("High (full-res bitmask GTAO, denoised, experimental)"), "1"),
+            new(L.T("Off"), "off"),
+            new(L.T("Default SSAO"), "ssao"),
+            new(L.T("GTAO"), "gtao"),
+            new(L.T("HQ GTAO"), "hq"),
         };
+
+        public static string AoMode(IniFile ini) =>
+            ini.Get("effect_ssao", "1") != "1" ? "off"
+            : !ini.Flag("effect_gtao") ? "ssao"
+            : ini.Get("graphics_ao_quality", "0") == "1" ? "hq" : "gtao";
+
+        /// <summary>Off leaves effect_gtao and graphics_ao_quality as they are; Default SSAO leaves the quality.</summary>
+        public static void SetAoMode(IniFile ini, string mode)
+        {
+            ini.Set("effect_ssao", mode == "off" ? "0" : "1");
+            if (mode is "ssao" or "gtao" or "hq")
+                ini.Set("effect_gtao", mode == "ssao" ? "0" : "1");
+            if (mode is "gtao" or "hq")
+                ini.Set("graphics_ao_quality", mode == "hq" ? "1" : "0");
+        }
+
+        /// <summary>The sun's shadow method: graphics_sun_vsm and graphics_rt_sun together.</summary>
+        public static readonly Choice[] SunShadowMethods =
+        {
+            new(L.T("Normal"), "normal"),
+            new(L.T("High (Virtual Shadow Maps, requires hardware ray tracing)"), "vsm"),
+            new(L.T("Ultra (Ray Traced Shadows)"), "rt"),
+        };
+
+        public static string SunShadowMode(IniFile ini) =>
+            ini.Flag("graphics_sun_vsm") ? "vsm"
+            : ini.Flag("graphics_rt_sun") ? "rt" : "normal";
+
+        /// <summary>Normal clears graphics_rt_sun; ray tracing itself follows from what needs it.</summary>
+        public static void SetSunShadowMode(IniFile ini, string mode)
+        {
+            ini.Set("graphics_sun_vsm", mode == "vsm" ? "1" : "0");
+            if (mode != "vsm")
+                ini.Set("graphics_rt_sun", mode == "rt" ? "1" : "0");
+            ini.DeriveRayTracing();
+        }
+
+        /// <summary>The indirect lighting choice: effect_gi, graphics_gi_probes and graphics_rt_bounce together.</summary>
+        public static readonly Choice[] GiQualities =
+        {
+            new(L.T("Off"), "off"),
+            new(L.T("Medium (single bounce)"), "medium"),
+            new(L.T("High (probe-based GI)"), "high"),
+            new(L.T("Ultra (RTGI)"), "ultra"),
+        };
+
+        public static string GiMode(IniFile ini) =>
+            ini.Flag("effect_gi") && ini.Flag("graphics_gi_probes") ? "high"
+            : ini.Flag("graphics_rt_bounce") ? "ultra"
+            : ini.Flag("effect_gi") ? "medium" : "off";
+
+        /// <summary>High leaves graphics_rt_bounce (the probes override it); Off leaves the probes and ray tracing.</summary>
+        public static void SetGiMode(IniFile ini, string mode)
+        {
+            ini.Set("effect_gi", mode == "off" ? "0" : "1");
+            if (mode is "medium" or "ultra")
+                ini.Set("graphics_gi_probes", "0");
+            if (mode == "high")
+                ini.Set("graphics_gi_probes", "1");
+            if (mode != "high")
+                ini.Set("graphics_rt_bounce", mode == "ultra" ? "1" : "0");
+            ini.DeriveRayTracing();
+        }
 
         public static readonly Choice[] CameraTuning =
         {

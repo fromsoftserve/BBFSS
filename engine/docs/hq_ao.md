@@ -1,19 +1,19 @@
-# High-quality ambient occlusion (`graphics_ao_quality`)
+# Ambient occlusion quality (`effect_ssao`, `effect_gtao`, `graphics_ao_quality`)
 
-`effect_gtao` replaces the game's SSAO shader (`0xcbbca5dc`) with
-[`gtao.frag`](../gpu/shadps4/video_core/host_shaders/gtao.frag). Its quality is chosen by
-`graphics_ao_quality` in `lantern.ini`, the launchers' Graphics page (Game effects, under
-"Better ambient occlusion (GTAO)") or the in-game overlay's Game effects section:
+The launchers' Graphics page and the in-game overlay offer one "Ambient occlusion quality"
+choice mapped to the ini keys:
 
-| Value | Label | What runs |
-|---|---|---|
-| `0` (default) | Regular GTAO | The existing replacement, unchanged (same SPIR-V, same draws). |
-| `1` | High (full-res bitmask GTAO, denoised, experimental) | See below. |
+| Choice | `effect_ssao` | `effect_gtao` | `graphics_ao_quality` | What runs |
+|---|---|---|---|---|
+| Off | `0` | unchanged | unchanged | The game's ambient occlusion is patched out. |
+| Default SSAO | `1` | `0` | unchanged | The game's own SSAO shader (`0xcbbca5dc`). |
+| GTAO | `1` | `1` | `0` (default) | [`gtao.frag`](../gpu/shadps4/video_core/host_shaders/gtao.frag) replaces the SSAO shader, unchanged (same SPIR-V, same draws). |
+| HQ GTAO | `1` | `1` | `1` | See below. |
 
-The setting is frozen at startup (`startup_ao_quality`, like the shadow resolutions and motion
-blur quality): the shader replacement is chosen when pipelines are created or loaded from the
-pipeline cache, so a change applies after restarting Bloodborne. High needs `effect_gtao` (and
-the game's ambient occlusion) on. The AO strength slider still applies live.
+All three keys are frozen at startup (`startup_effects`, `startup_ao_quality`, like the shadow
+resolutions and motion blur quality): the patch and the shader replacement are chosen when the
+game starts or pipelines are created or loaded from the pipeline cache, so a change applies after
+restarting Bloodborne. The AO strength slider still applies live.
 
 ## High
 

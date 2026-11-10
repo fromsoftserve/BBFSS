@@ -31,10 +31,7 @@ These `graphics_*` keys in `lantern.ini` have no control in the Windows launcher
 | `graphics_bloom_quality` | Bloom: `original` or `froyok` | `original` |
 | `graphics_froyok_bloom_blend` | Froyok bloom blend | `0.1` |
 | `graphics_froyok_bloom_spread` | Froyok bloom spread | `0.85` |
-| `graphics_sun_vsm` | Variance shadow maps for the sun | off |
-| `graphics_rt_point_shadows` | Ray-traced point-light shadows | off |
-| `graphics_rt_bounce` | Ray-traced bounce lighting | on |
-| `graphics_gi_probes` | Global-illumination probes | off |
+| `graphics_rt_point_shadows` | Ray-traced point-light shadows; ray tracing (`effect_ray_tracing`) is switched on automatically when this, High or Ultra shadows or Ultra GI is selected (needs a ray tracing GPU and a restart the first time) | off |
 | `graphics_gi_reflections` | GI reflections | off |
 | `graphics_gi_reflections_full_res` | Full-resolution GI reflections | off |
 | `graphics_gi_reflection_strength` | GI reflection strength | `1.0` |
@@ -44,6 +41,7 @@ These `graphics_*` keys in `lantern.ini` have no control in the Windows launcher
 | `graphics_local_ggx` | GGX specular for local lights | on |
 | `graphics_local_inverse_square` | Inverse-square falloff for local lights | on |
 | `graphics_local_light_intensity` | Local light intensity | `1.0` |
+| `graphics_local_light_core` | Local light source size under inverse-square falloff, as a fraction of the light radius (0 = point light) | `0.15` |
 | `graphics_uniform_local_light` | Uniform local light | off |
 | `graphics_disable_player_light` | Disable the player's light | on |
 | `graphics_specular_aa` | Specular anti-aliasing | on |

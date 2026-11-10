@@ -293,6 +293,7 @@ namespace BloodborneLauncher.Core
             KeepPrevious(ini);
             foreach (var knob in Knobs)
                 ini.Set(knob.Key, Normal(knob, ValueIn(look, knob)) ?? knob.Default);
+            ini.DeriveRayTracing();
         }
 
         public static void GoBack(IniFile ini)
@@ -314,6 +315,7 @@ namespace BloodborneLauncher.Core
                 var kept = values[knob.Key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
                 ini.Set(knob.Key, kept == null ? null : Normal(knob, kept) ?? knob.Default);
             }
+            ini.DeriveRayTracing();
             File.Delete(PreviousFile);
         }
     }

@@ -165,6 +165,7 @@ void Apply(int preset) {
         }
         BbSettings::SetValue(knob.key, value);
     }
+    BbSettings::DeriveRayTracing();
     BbSettings::Save();
     std::printf("Looks: %s in use%s\n", look.name, NeedsRestart() ? "; some of it applies at the next start" : "");
 }
@@ -178,6 +179,7 @@ bool GoBack() {
         const auto it = values.find(knob.key);
         BbSettings::SetValue(knob.key, it != values.end() ? it->second : knob.def);
     }
+    BbSettings::DeriveRayTracing();
     BbSettings::Save();
     std::error_code error;
     std::filesystem::remove(PreviousFile(), error);
@@ -193,13 +195,18 @@ bool HasPrevious() {
 bool NeedsRestart() {
     const auto& s = BbSettings::Get();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        if (e == BbSettings::EffectSsao || e == BbSettings::EffectGtao) {
+            continue;
+        }
         if (!BbSettings::EffectIsLive(e) && s.effects[e] != s.startup_effects[e]) {
             return true;
         }
     }
-    return s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
-           s.graphics_ao_quality != s.startup_ao_quality ||
-           s.graphics_shadow_resolution != s.startup_shadow_resolution ||
+    if (BbSettings::AoNeedsRestart()) {
+        return true;
+    }
+    return     s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+    s.graphics_shadow_resolution != s.startup_shadow_resolution ||
            s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution;
 }
 }
