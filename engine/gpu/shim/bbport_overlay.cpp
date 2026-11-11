@@ -1074,10 +1074,10 @@ void DebugSection() {
                                 "Обратноквадратичный спад локальных источников")) {
         Checkbox(label, s.graphics_local_inverse_square);
         Hint(BbSettings::MenuText(
-            "On by default. Uses the game's inverse-square diffuse curve for point and spot light "
+            "Off by default. Uses the game's inverse-square diffuse curve for point and spot light "
             "attenuation, including specular. Light radius, culling, shadows, and lamp fog are unchanged. "
             "Requires restart.",
-            "По умолчанию включено. Использует игровую обратноквадратичную кривую для затухания "
+            "По умолчанию выключено. Использует игровую обратноквадратичную кривую для затухания "
             "точечных и прожекторных источников, включая блики. Радиус, отсечение, тени и туман ламп "
             "не меняются. Требуется перезапуск."));
     }
@@ -1095,11 +1095,11 @@ void DebugSection() {
         Slider(label, s.graphics_local_light_core, BbSettings::LocalLightCoreMin,
                BbSettings::LocalLightCoreMax, "%.2f", ImGuiSliderFlags_AlwaysClamp);
         Hint(BbSettings::MenuText(
-            "0.15 by default. Under inverse-square falloff a lamp is a glowing sphere this fraction "
+            "0.05 by default. Under inverse-square falloff a lamp is a glowing sphere this fraction "
             "of its radius instead of a point, so surfaces right next to it are not blown out. 0 is a "
             "point light (brightest up close); about 0.32 is no brighter up close than the old "
             "falloff. The light's total energy stays the same. Requires restart.",
-            "По умолчанию 0.15. При обратноквадратичном спаде лампа считается светящейся сферой "
+            "По умолчанию 0.05. При обратноквадратичном спаде лампа считается светящейся сферой "
             "такого размера (доля радиуса), а не точкой, поэтому поверхности рядом с ней не "
             "пересвечиваются. 0 — точечный источник (ярче всего вблизи); около 0.32 — вблизи не ярче "
             "старого спада. Полная энергия света сохраняется. Требуется перезапуск."));

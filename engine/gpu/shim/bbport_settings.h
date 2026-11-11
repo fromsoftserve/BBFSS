@@ -122,7 +122,7 @@ inline constexpr float WetGroundMin = 0.0f, WetGroundMax = 1.0f, WetGroundDefaul
 inline constexpr float DofIntensityMin = 0.0f, DofIntensityMax = 3.0f;
 inline constexpr float LocalLightIntensityMin = 0.0f, LocalLightIntensityMax = 4.0f;
 // Source size of local lights under inverse-square falloff, as a fraction of the light radius.
-inline constexpr float LocalLightCoreMin = 0.0f, LocalLightCoreMax = 0.35f, LocalLightCoreDefault = 0.15f;
+inline constexpr float LocalLightCoreMin = 0.0f, LocalLightCoreMax = 0.35f, LocalLightCoreDefault = 0.05f;
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
 inline constexpr int DlssPresetAuto = -1, DlssPresetL = 12, DlssPresetM = 13;
@@ -216,7 +216,7 @@ struct Values {
     std::atomic<bool> graphics_smooth_normals{true}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
     std::atomic<int> graphics_specular_model{SpecularGgxFull};
-    std::atomic<bool> graphics_local_inverse_square{true};
+    std::atomic<bool> graphics_local_inverse_square{false};
     std::atomic<float> graphics_local_light_intensity{1.0f};
     std::atomic<float> graphics_local_light_core{LocalLightCoreDefault};
     std::atomic<bool> graphics_uniform_local_light{false};
@@ -281,7 +281,7 @@ struct Values {
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 1;
     int startup_specular_model = SpecularGgxFull;
-    bool startup_local_inverse_square = true;
+    bool startup_local_inverse_square = false;
     float startup_local_light_intensity = 1.0f;
     float startup_local_light_core = LocalLightCoreDefault;
     bool startup_uniform_local_light = false;

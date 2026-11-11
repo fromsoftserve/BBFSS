@@ -36,7 +36,7 @@ bool EnginePerformance(const std::string& name) {
            name.ends_with("Light Grid (READ NOTES)");
 }
 
-Writes PerformanceWrites(const Bytes& elf, Size output) {
+Writes PerformanceWrites(const Bytes& elf, Size) {
     struct Operation { std::uint64_t offset; std::uint32_t original_crc; const char* value; };
     static constexpr Operation operations[]{
 #include "performance.inc"
@@ -50,15 +50,13 @@ Writes PerformanceWrites(const Bytes& elf, Size output) {
                 Hex(operation.offset).c_str());
             return {};
         }
-        // The native light-grid tile covers the selected output, never a fixed 1080p/1440p.
         if (operation.offset == 0x2295cb6 || operation.offset == 0x2295cc0) {
-            Store<std::uint32_t>(data.data() + 6,
-                std::uint32_t(operation.offset == 0x2295cb6 ? output.w : output.h));
+            continue;
         }
         writes.emplace_back(operation.offset, std::move(data));
     }
     Log("Engine performance: built-in renderer defaults, profiling bypasses and worker waits; "
-        "light grid %dx%d (no optional patch required)", output.w, output.h);
+        "128x128 light grid with native visibility rejection");
     return writes;
 }
 

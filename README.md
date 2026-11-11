@@ -39,9 +39,9 @@ These `graphics_*` keys in `lantern.ini` have no control in the Windows launcher
 | `graphics_smooth_normals` | Smooth surface normals | on |
 | `graphics_specular_model` | Directional specular: `original`, `ggx-hybrid` (native-anchored), or `ggx-full` (unscaled); requires restart | `ggx-full` |
 | `graphics_local_ggx` | GGX specular for local lights | on |
-| `graphics_local_inverse_square` | Inverse-square falloff for local lights | on |
+| `graphics_local_inverse_square` | Inverse-square falloff for local lights | off |
 | `graphics_local_light_intensity` | Local light intensity | `1.0` |
-| `graphics_local_light_core` | Local light source size under inverse-square falloff, as a fraction of the light radius (0 = point light) | `0.15` |
+| `graphics_local_light_core` | Local light source size under inverse-square falloff, as a fraction of the light radius (0 = point light) | `0.05` |
 | `graphics_uniform_local_light` | Uniform local light | off |
 | `graphics_disable_player_light` | Disable the player's light | on |
 | `graphics_specular_aa` | Specular anti-aliasing | on |

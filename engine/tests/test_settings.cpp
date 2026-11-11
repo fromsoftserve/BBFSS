@@ -114,8 +114,9 @@ int main() {
     assert(s.graphics_gi_strength == 1.5f);
     assert(s.graphics_specular_model == BbSettings::SpecularGgxFull &&
            s.startup_specular_model == BbSettings::SpecularGgxFull);
-    assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
+    assert(!s.graphics_local_inverse_square && !s.startup_local_inverse_square);
     assert(s.graphics_local_light_intensity == 1.0f && s.startup_local_light_intensity == 1.0f);
+    assert(s.graphics_local_light_core == 0.05f && s.startup_local_light_core == 0.05f);
     assert(!s.graphics_uniform_local_light && !s.startup_uniform_local_light);
     assert(s.graphics_disable_player_light && s.startup_disable_player_light);
     assert(s.graphics_local_ggx && s.graphics_specular_aa && s.graphics_env_ggx_tails);
@@ -136,7 +137,7 @@ int main() {
     s.graphics_native_sss = true;
     s.graphics_specular_model = BbSettings::SpecularGgxHybrid;
     assert(s.startup_specular_model == BbSettings::SpecularGgxFull);
-    s.graphics_local_inverse_square = false;
+    s.graphics_local_inverse_square = true;
     s.graphics_local_light_intensity = 2.5f;
     s.graphics_uniform_local_light = true;
     s.graphics_disable_player_light = false;
@@ -146,7 +147,7 @@ int main() {
     s.graphics_gi_reflection_strength = 0.25f;
     s.graphics_gi_wet_ground = 0.75f;
     s.graphics_gi_reflections_full_res = true;
-    assert(s.startup_specular_model == BbSettings::SpecularGgxFull && s.startup_local_inverse_square &&
+    assert(s.startup_specular_model == BbSettings::SpecularGgxFull && !s.startup_local_inverse_square &&
            s.startup_disable_player_light);
     assert(s.startup_local_light_intensity == 1.0f && !s.startup_uniform_local_light);
     BbSettings::Save();
@@ -165,7 +166,7 @@ int main() {
         assert(fork_keys.find("graphics_smooth_normals=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_specular_model=ggx-hybrid\n") != std::string::npos);
-        assert(fork_keys.find("graphics_local_inverse_square=0\n") != std::string::npos);
+        assert(fork_keys.find("graphics_local_inverse_square=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_light_intensity=2.50\n") != std::string::npos);
         assert(fork_keys.find("graphics_uniform_local_light=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_disable_player_light=0\n") != std::string::npos);
@@ -207,10 +208,10 @@ int main() {
     s.graphics_specular_model = BbSettings::SpecularOriginal;
     assert(s.startup_specular_model == BbSettings::SpecularGgxHybrid);
     s.graphics_specular_model = BbSettings::SpecularGgxHybrid;
-    assert(!s.graphics_local_inverse_square && !s.startup_local_inverse_square);
-    s.graphics_local_inverse_square = true;
-    assert(!s.startup_local_inverse_square);
+    assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
     s.graphics_local_inverse_square = false;
+    assert(s.startup_local_inverse_square);
+    s.graphics_local_inverse_square = true;
     assert(s.graphics_local_light_intensity == 2.5f && s.startup_local_light_intensity == 2.5f);
     s.graphics_local_light_intensity = 1.0f;
     assert(s.startup_local_light_intensity == 2.5f);

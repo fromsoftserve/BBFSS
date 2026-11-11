@@ -35,19 +35,20 @@ class BuiltinPerformanceTests(unittest.TestCase):
         self.assertEqual(len(expected), 168)
         self.assertEqual(self.operations, expected)
 
-    def test_grid_size_tracks_output_not_internal_resolution(self):
+    def test_native_grid_preserves_visibility_rejection(self):
         for output in ((1920, 1080), (2560, 1440), (3840, 2160), (3440, 1440)):
             with self.subTest(output=output), \
                  patch.object(patches, 'original_bytes', return_value=b'original'), \
-                 patch.object(patches.zlib, 'crc32', side_effect=[crc for _, crc, _ in self.operations]):
+                 patch.object(patches.zlib, 'crc32',
+                              side_effect=[crc for _, crc, _ in self.operations]):
                 writes = dict(patches.performance_writes(b'', output))
             for offset, _, value in self.operations:
                 if offset in (0x2295cb6, 0x2295cc0):
-                    self.assertEqual(writes[offset][:6], value[:6])
-                    self.assertEqual(struct.unpack('<I', writes[offset][6:])[0],
-                                     output[0 if offset == 0x2295cb6 else 1])
+                    self.assertNotIn(offset, writes)
                 else:
                     self.assertEqual(writes[offset], value)
+            self.assertNotIn(0xea4c24, writes)
+            self.assertNotIn(0xea5528, writes)
 
     def test_incompatible_executable_applies_no_partial_defaults(self):
         with patch.object(patches, 'original_bytes', return_value=b'wrong'):
@@ -98,7 +99,8 @@ class BuiltinPerformanceTests(unittest.TestCase):
                 self.assertEqual(writes, compile(text, legacy=True))
                 for offset, _, value in self.operations:
                     if offset in (0x2295cb6, 0x2295cc0):
-                        value = value[:6] + struct.pack('<I', output[0 if offset == 0x2295cb6 else 1])
+                        self.assertNotIn(offset, writes)
+                        continue
                     if offset == 0x22c4fd7:
                         value = b'\x01'  # The explicit SSR switch wins over the old defaults.
                     self.assertEqual(bytes(writes[offset+i] for i in range(len(value))), value)

@@ -32,7 +32,7 @@ inline bool Target(uint32_t hash) {
     }
 }
 
-inline constexpr float DefaultCore = 0.15f;
+inline constexpr float DefaultCore = 0.05f;
 
 // The light is a sphere of radius core * r rather than a point, so the curve is
 //   1 / (x^2 + core^2) - 1 / (1 + core^2),  x = d / r,

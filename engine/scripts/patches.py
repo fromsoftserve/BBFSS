@@ -42,10 +42,10 @@ def performance_writes(elf, output):
             print(f'Engine performance: not applied: executable differs from 1.09 at image offset {offset:#x}')
             return []
         if offset in (0x2295cb6,0x2295cc0):
-            data=data[:6]+struct.pack('<I',output[0 if offset==0x2295cb6 else 1])
+            continue
         writes.append((offset,data))
-    print(f'Engine performance: built-in renderer defaults, profiling bypasses and worker waits; '
-          f'light grid {output[0]}x{output[1]} (no optional patch required)')
+    print('Engine performance: built-in renderer defaults, profiling bypasses and worker waits; '
+          '128x128 light grid with native visibility rejection')
     return writes
 
 
