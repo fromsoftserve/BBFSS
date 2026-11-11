@@ -651,6 +651,31 @@ void SmoothNormalsItem() {
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
+    if (const char* label = Item("Specular shading model", "Модель зеркального освещения")) {
+        const char* names[] = {BbSettings::MenuText("Original (Blinn-Phong)", "Оригинальная (Блинн-Фонг)"),
+                               BbSettings::MenuText("GGX hybrid", "Гибридный GGX"),
+                               BbSettings::MenuText("Full GGX (recommended)", "Полный GGX (рекомендуется)")};
+        int mode = std::clamp(s.graphics_specular_model.load(), 0, BbSettings::SpecularModelCount - 1);
+        const bool changed = ImGui::Combo(label, &mode, names, BbSettings::SpecularModelCount);
+        Store(s.graphics_specular_model, mode, changed);
+        Hint(BbSettings::MenuText(
+            "Full GGX is the default and recommended. Original keeps the game's Blinn-Phong directional "
+            "highlights. GGX hybrid uses GGX with native-reference intensity calibration. Full GGX removes "
+            "that calibration for unscaled GGX distribution and Smith visibility, which can brighten "
+            "grazing highlights. This one selection controls the complete directional mode; no additional "
+            "GGX toggles are needed. Requires restarting Bloodborne. Local-light GGX and environment tails "
+            "remain independent.",
+            "Полный GGX — рекомендуемый режим по умолчанию. Оригинальная сохраняет направленные блики "
+            "Блинна-Фонга из игры. Гибридный GGX использует калибровку интенсивности по нативному образцу. "
+            "Полный GGX убирает её, оставляя немасштабированное распределение GGX и видимость Смита; блики "
+            "под скользящими углами могут стать ярче. Один выбор полностью управляет направленным режимом, "
+            "дополнительные переключатели GGX не нужны. Требуется перезапуск Bloodborne. GGX локальных "
+            "источников и края отражений окружения настраиваются независимо."));
+        if (s.graphics_specular_model != s.startup_specular_model) {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
+                                                           "Применяется после перезапуска игры."));
+        }
+    }
     if (const char* label = Item("Native skin SSS (experimental)", "Нативное SSS кожи (экспериментальное)")) {
         Checkbox(label, s.graphics_native_sss);
         Hint(BbSettings::MenuText(
@@ -1037,20 +1062,6 @@ void PictureSection() {
 void DebugSection() {
     auto& s = BbSettings::Get();
     Section("Shader and lighting (restart required)", "Шейдеры и освещение (после перезапуска)");
-    if (const char* label = Item("Directional GGX (native-anchored, experimental)",
-                                "Направленный GGX (нативная калибровка, экспериментальный)")) {
-        Checkbox(label, s.graphics_directional_ggx);
-        Hint(BbSettings::MenuText(
-            "On by default. Native-anchored GGX for the four directional specular lobes only. "
-            "Softer highlight tails can brighten rough or grazing surfaces. Diffuse, local lights "
-            "and environment/SSR remain native. Requires restarting Bloodborne; unsupported shader "
-            "variants retain native specular and report a warning. Not a full PBR conversion.",
-            "По умолчанию включено. GGX с нативной калибровкой для четырёх направленных бликов. "
-            "Мягкие края могут осветлять шероховатые поверхности и скользящие углы. Диффузное "
-            "освещение, локальные источники и окружение/SSR не меняются. Требуется перезапуск "
-            "Bloodborne. Неподдерживаемые шейдеры сохраняют нативные блики с предупреждением. "
-            "Не является полной PBR-конверсией."));
-    }
     if (const char* label = Item("Point/spot light GGX", "GGX для точечных источников")) {
         Checkbox(label, s.graphics_local_ggx);
         Hint(BbSettings::MenuText(
@@ -2551,7 +2562,7 @@ void Menu() {
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
         s.graphics_bloom_quality != s.startup_bloom_quality ||
-        s.graphics_directional_ggx != s.startup_directional_ggx ||
+        s.graphics_specular_model != s.startup_specular_model ||
         s.graphics_local_ggx != s.startup_local_ggx ||
         s.graphics_local_inverse_square != s.startup_local_inverse_square ||
         s.graphics_local_light_intensity != s.startup_local_light_intensity ||

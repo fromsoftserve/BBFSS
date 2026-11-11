@@ -51,7 +51,7 @@ struct Index {
     }
 };
 
-// Definitions recorded: ExtInst, Constant, FAdd..FDiv and, with `conversions`, FConvert.
+// Definitions recorded: ExtInst, Constant, Select, FAdd..FDiv and, with `conversions`, FConvert.
 inline Index Build(std::span<const uint32_t> spv, bool conversions = false) {
     Index x;
     x.words = spv.data();
@@ -72,8 +72,8 @@ inline Index Build(std::span<const uint32_t> spv, bool conversions = false) {
         if (op == 23 && size == 4 && spv[i + 3] == 4) x.vectors[spv[i + 1]] = spv[i + 2];
         if (op == 15 && size >= 3 && spv[i + 1] == 4 && !x.entry) x.entry = spv[i + 2];
         if (op == 43 && size == 4) x.constants[spv[i + 2]] = spv[i + 3];
-        if ((op == 12 || op == 43 || (conversions && op == 124) || (op >= 129 && op <= 136)) &&
-            size >= 3)
+        if ((op == 12 || op == 43 || op == 169 || (conversions && op == 124) ||
+             (op >= 129 && op <= 136)) && size >= 3)
             x.defs[spv[i + 2]] = {i, op};
         if (op == 54 && !x.first_function) x.first_function = i;
         i += size;

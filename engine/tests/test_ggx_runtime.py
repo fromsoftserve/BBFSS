@@ -30,8 +30,9 @@ def main():
     subprocess.run([str(args.patch_runner), str(args.legacy), str(args.current),
                     str(args.output / "shaders")], check=True)
     for variant in ("legacy", "current"):
-        run_tool("spirv-val", "--target-env", "vulkan1.3", "--uniform-buffer-standard-layout",
-                 args.output / "shaders" / f"{variant}.spv")
+        for suffix in (".spv", "-strict.spv"):
+            run_tool("spirv-val", "--target-env", "vulkan1.3", "--uniform-buffer-standard-layout",
+                     args.output / "shaders" / f"{variant}{suffix}")
     report = {"status": "in_progress", "checks": {}}
     for index, scene in enumerate(args.scene):
         evidence = json.loads((scene / "report.json").read_text())
@@ -42,7 +43,8 @@ def main():
         for name, shader, floating in (
                 ("native-packed", scene / "native.frag.spv", False),
                 ("native-float", scene / "native.frag.spv", True),
-                ("ggx-width-authored-float", args.output / "shaders" / f"{variant}.spv", True)):
+                ("ggx-width-authored-float", args.output / "shaders" / f"{variant}.spv", True),
+                ("ggx-width-float", args.output / "shaders" / f"{variant}-strict.spv", True)):
             actual = args.output / f"scene-{index}-{name}.raw"
             subprocess.run([str(args.gpu_runner), str(scene), str(scene / "native.vert.spv"),
                             str(shader), str(actual)] + (["--float"] if floating else []), check=True)
@@ -50,7 +52,8 @@ def main():
                 raise ValueError(f"Runtime/native regression in scene {index}: {name}")
             if floating and not np.isfinite(np.fromfile(actual, dtype="<f4")).all():
                 raise ValueError("Nonfinite runtime scene")
-        report["checks"][f"scene-{index}"] = "native packed/float and authored runtime byte-exact"
+        report["checks"][f"scene-{index}"] = (
+            "native packed/float, authored, and strict runtime byte-exact")
     controls_report = json.loads((args.controls / "report.json").read_text())
     if controls_report["status"] != "verified":
         raise ValueError("Verified calibration controls required")
@@ -70,7 +73,7 @@ def main():
     }
     report["status"] = "verified"
     (args.output / "report.json").write_text(json.dumps(report, indent=2))
-    print("Runtime GGX: native unchanged; all authored GPU scenes and controls byte-exact")
+    print("Runtime GGX: native unchanged; authored controls and authored/strict GPU scenes byte-exact")
 
 
 if __name__ == "__main__":

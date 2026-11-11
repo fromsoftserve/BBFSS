@@ -37,7 +37,7 @@ These `graphics_*` keys in `lantern.ini` have no control in the Windows launcher
 | `graphics_gi_reflection_strength` | GI reflection strength | `1.0` |
 | `graphics_gi_wet_ground` | Wet-ground reflections amount | `0.5` |
 | `graphics_smooth_normals` | Smooth surface normals | on |
-| `graphics_directional_ggx` | GGX specular for directional lights | on |
+| `graphics_specular_model` | Directional specular: `original`, `ggx-hybrid` (native-anchored), or `ggx-full` (unscaled); requires restart | `ggx-full` |
 | `graphics_local_ggx` | GGX specular for local lights | on |
 | `graphics_local_inverse_square` | Inverse-square falloff for local lights | on |
 | `graphics_local_light_intensity` | Local light intensity | `1.0` |

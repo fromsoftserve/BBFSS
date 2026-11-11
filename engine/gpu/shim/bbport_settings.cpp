@@ -299,7 +299,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "graphics_ao_strength") {
         v.graphics_ao_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
     } else if (key == "graphics_gi_strength") {
-        v.graphics_gi_strength=Clamp(std::isfinite(f)?f:6.0f,0.0f,12.0f);
+        v.graphics_gi_strength=Clamp(std::isfinite(f)?f:1.5f,0.0f,12.0f);
     } else if (key == "graphics_gt7_exposure") {
         v.graphics_gt7_exposure=Clamp(std::isfinite(f)?f:1.0f,Gt7ExposureMin,Gt7ExposureMax);
     } else if (key == "graphics_tonemapper") {
@@ -358,8 +358,17 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_smooth_normals=i!=0;
     } else if (key == "graphics_native_sss") {
         v.graphics_native_sss=i!=0;
-    } else if (key == "graphics_directional_ggx") {
-        v.graphics_directional_ggx=i!=0;
+    } else if (key == "graphics_specular_model") {
+        int model = -1;
+        for (int m = 0; m < SpecularModelCount; ++m) {
+            if (value == SpecularModelNames[m]) model = m;
+        }
+        if (model < 0) {
+            std::printf("Settings: unknown graphics_specular_model '%s' (expected original, ggx-hybrid "
+                        "or ggx-full); ggx-full\n", value.c_str());
+            model = SpecularGgxFull;
+        }
+        v.graphics_specular_model = model;
     } else if (key == "graphics_local_ggx") {
         v.graphics_local_ggx=i!=0;
     } else if (key == "graphics_local_inverse_square") {
@@ -584,7 +593,9 @@ void Load() {
         }
         v.menu_language = LanguageOfLocale(lang);
     }
-    bool rt_sun_present = false;
+    bool rt_sun_present = false, specular_model_present = false;
+    bool legacy_directional_present = false, legacy_strict_present = false;
+    bool legacy_directional = true, legacy_strict = true;
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), file)) {
@@ -594,13 +605,27 @@ void Load() {
             if (text.empty() || text[0] == '#' || eq == std::string::npos) {
                 continue;
             }
-            if (text.compare(0, eq, "graphics_rt_sun") == 0) {
-                rt_sun_present = true;
+            const auto key = text.substr(0, eq);
+            const auto value = text.substr(eq + 1);
+            if (key == "graphics_rt_sun") rt_sun_present = true;
+            if (key == "graphics_specular_model") specular_model_present = true;
+            if (key == "graphics_directional_ggx") {
+                legacy_directional_present = true;
+                legacy_directional = std::atoi(value.c_str()) != 0;
             }
-            Set(v, text.substr(0, eq), text.substr(eq + 1));
+            if (key == "graphics_directional_strict_ggx") {
+                legacy_strict_present = true;
+                legacy_strict = std::atoi(value.c_str()) != 0;
+            }
+            Set(v, key, value);
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
+    }
+    if (!specular_model_present && (legacy_directional_present || legacy_strict_present)) {
+        v.graphics_specular_model = !legacy_directional ? SpecularOriginal
+                                    : legacy_strict   ? SpecularGgxFull
+                                                      : SpecularGgxHybrid;
     }
     // An ini from before graphics_rt_sun existed showed the ray traced sun whenever ray traced
     // lighting was on and the virtual shadow map was not.
@@ -649,7 +674,7 @@ void Load() {
     v.startup_upscaler = v.upscaler;
     v.startup_motion_blur_quality = v.graphics_motion_blur_quality;
     v.startup_bloom_quality = v.graphics_bloom_quality;
-    v.startup_directional_ggx = v.graphics_directional_ggx;
+    v.startup_specular_model = v.graphics_specular_model;
     v.startup_local_ggx = v.graphics_local_ggx;
     v.startup_local_inverse_square = v.graphics_local_inverse_square;
     v.startup_local_light_intensity = v.graphics_local_light_intensity;
@@ -867,7 +892,8 @@ void Save() {
     put("graphics_gi_wet_ground",fixed(v.graphics_gi_wet_ground,2));
     put("graphics_smooth_normals",flag(v.graphics_smooth_normals));
     put("graphics_native_sss",flag(v.graphics_native_sss));
-    put("graphics_directional_ggx",flag(v.graphics_directional_ggx));
+    put("graphics_specular_model",
+        SpecularModelNames[std::clamp(v.graphics_specular_model.load(), 0, SpecularModelCount - 1)]);
     put("graphics_local_ggx",flag(v.graphics_local_ggx));
     put("graphics_local_inverse_square",flag(v.graphics_local_inverse_square));
     put("graphics_local_light_intensity",fixed(v.graphics_local_light_intensity,2));

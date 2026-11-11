@@ -33,9 +33,9 @@ int main() {
     BbSettings::Load();
     auto& s = BbSettings::Get();
     assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.show_fps && s.menu_x < 0.0f);
-    assert(s.graphics_ao_quality == 0 && s.startup_ao_quality == 0);
-    s.graphics_ao_quality = 1;
-    assert(s.startup_ao_quality == 0);
+    assert(s.graphics_ao_quality == 1 && s.startup_ao_quality == 1);
+    s.graphics_ao_quality = 0;
+    assert(s.startup_ao_quality == 1);
     s.show_fps = true;
     s.upscaler = BbSettings::UpscalerFsr411;
     s.menu_x = 0.625f;
@@ -49,16 +49,16 @@ int main() {
     assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
     assert(saved.find("upscaler=fsr3") == std::string::npos);
     assert(saved.find("fullscreen=1\n") != std::string::npos);
-    assert(saved.find("graphics_ao_quality=1\n") != std::string::npos);
+    assert(saved.find("graphics_ao_quality=0\n") != std::string::npos);
 
     s.menu_x = -1.0f;
     s.menu_y = -1.0f;
     BbSettings::Load();
     assert(s.menu_x == 0.625f && s.menu_y == 0.125f && s.upscaler == BbSettings::UpscalerFsr411);
-    assert(s.graphics_ao_quality == 1 && s.startup_ao_quality == 1);
-    s.graphics_ao_quality = 0;
-    assert(s.startup_ao_quality == 1);
+    assert(s.graphics_ao_quality == 0 && s.startup_ao_quality == 0);
     s.graphics_ao_quality = 1;
+    assert(s.startup_ao_quality == 0);
+    s.graphics_ao_quality = 0;
     s.upscaler = BbSettings::UpscalerDlss;
     BbSettings::Save();
     assert(Read(path).find("upscaler=dlss\n") != std::string::npos);
@@ -106,9 +106,14 @@ int main() {
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
     assert(s.graphics_point_fog_glow_size == 0.15f);
     assert(!s.graphics_auto_exposure && !s.graphics_native_sss && !s.graphics_sun_vsm &&
-           !s.graphics_rt_point_shadows && !s.graphics_rt_sun && !s.graphics_rt_bounce && !s.graphics_gi_probes &&
+           !s.graphics_rt_point_shadows && !s.graphics_rt_sun && !s.graphics_rt_bounce && s.graphics_gi_probes &&
            !s.graphics_gi_reflections && !s.graphics_gi_reflections_full_res);
-    assert(s.graphics_directional_ggx && s.startup_directional_ggx);
+    assert(s.model_lod == -2 && s.startup_model_lod == -2);
+    assert(s.graphics_shadow_resolution == 1 && s.startup_shadow_resolution == 1);
+    assert(s.graphics_motion_blur_quality == 1 && s.startup_motion_blur_quality == 1);
+    assert(s.graphics_gi_strength == 1.5f);
+    assert(s.graphics_specular_model == BbSettings::SpecularGgxFull &&
+           s.startup_specular_model == BbSettings::SpecularGgxFull);
     assert(s.graphics_local_inverse_square && s.startup_local_inverse_square);
     assert(s.graphics_local_light_intensity == 1.0f && s.startup_local_light_intensity == 1.0f);
     assert(!s.graphics_uniform_local_light && !s.startup_uniform_local_light);
@@ -129,7 +134,8 @@ int main() {
     s.graphics_gi_probes = true;
     s.graphics_gi_reflections = true;
     s.graphics_native_sss = true;
-    s.graphics_directional_ggx = false;
+    s.graphics_specular_model = BbSettings::SpecularGgxHybrid;
+    assert(s.startup_specular_model == BbSettings::SpecularGgxFull);
     s.graphics_local_inverse_square = false;
     s.graphics_local_light_intensity = 2.5f;
     s.graphics_uniform_local_light = true;
@@ -140,7 +146,8 @@ int main() {
     s.graphics_gi_reflection_strength = 0.25f;
     s.graphics_gi_wet_ground = 0.75f;
     s.graphics_gi_reflections_full_res = true;
-    assert(s.startup_directional_ggx && s.startup_local_inverse_square && s.startup_disable_player_light);
+    assert(s.startup_specular_model == BbSettings::SpecularGgxFull && s.startup_local_inverse_square &&
+           s.startup_disable_player_light);
     assert(s.startup_local_light_intensity == 1.0f && !s.startup_uniform_local_light);
     BbSettings::Save();
     {
@@ -157,7 +164,7 @@ int main() {
         assert(fork_keys.find("graphics_gi_reflections_full_res=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_smooth_normals=1\n") != std::string::npos);
         assert(fork_keys.find("graphics_native_sss=1\n") != std::string::npos);
-        assert(fork_keys.find("graphics_directional_ggx=0\n") != std::string::npos);
+        assert(fork_keys.find("graphics_specular_model=ggx-hybrid\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_inverse_square=0\n") != std::string::npos);
         assert(fork_keys.find("graphics_local_light_intensity=2.50\n") != std::string::npos);
         assert(fork_keys.find("graphics_uniform_local_light=1\n") != std::string::npos);
@@ -169,7 +176,7 @@ int main() {
         assert(fork_keys.find("graphics_dof_intensity=1.75\n") != std::string::npos);
     }
     s.graphics_auto_exposure = s.graphics_native_sss = false;
-    s.graphics_directional_ggx = true;
+    s.graphics_specular_model = BbSettings::SpecularGgxFull;
     s.graphics_local_inverse_square = true;
     s.graphics_local_light_intensity = 1.0f;
     s.graphics_uniform_local_light = false;
@@ -193,10 +200,13 @@ int main() {
            s.graphics_gi_probes && s.graphics_gi_reflections &&
            s.graphics_gi_reflection_strength == 0.25f && s.graphics_gi_reflections_full_res);
     assert(s.graphics_auto_exposure && s.graphics_native_sss && s.graphics_dof_intensity == 1.75f);
-    assert(!s.graphics_directional_ggx && !s.startup_directional_ggx);
-    s.graphics_directional_ggx = true;
-    assert(!s.startup_directional_ggx);
-    s.graphics_directional_ggx = false;
+    assert(s.graphics_specular_model == BbSettings::SpecularGgxHybrid &&
+           s.startup_specular_model == BbSettings::SpecularGgxHybrid);
+    s.graphics_specular_model = BbSettings::SpecularGgxFull;
+    assert(s.startup_specular_model == BbSettings::SpecularGgxHybrid);
+    s.graphics_specular_model = BbSettings::SpecularOriginal;
+    assert(s.startup_specular_model == BbSettings::SpecularGgxHybrid);
+    s.graphics_specular_model = BbSettings::SpecularGgxHybrid;
     assert(!s.graphics_local_inverse_square && !s.startup_local_inverse_square);
     s.graphics_local_inverse_square = true;
     assert(!s.startup_local_inverse_square);
@@ -236,10 +246,35 @@ int main() {
         assert(Read(path).find("graphics_ao_quality=" + std::to_string(expected) + "\n") !=
                std::string::npos);
     }
+    for (const auto& [input, expected] : {
+             std::pair{"graphics_directional_ggx=0\n", BbSettings::SpecularOriginal},
+             {"graphics_directional_ggx=0\ngraphics_directional_strict_ggx=1\n", BbSettings::SpecularOriginal},
+             {"graphics_directional_ggx=1\n", BbSettings::SpecularGgxFull},
+             {"graphics_directional_ggx=1\ngraphics_directional_strict_ggx=0\n", BbSettings::SpecularGgxHybrid},
+             {"graphics_directional_ggx=1\ngraphics_directional_strict_ggx=1\n", BbSettings::SpecularGgxFull},
+             {"graphics_directional_strict_ggx=0\n", BbSettings::SpecularGgxHybrid},
+             {"graphics_directional_ggx=1\ngraphics_specular_model=original\n", BbSettings::SpecularOriginal},
+             {"graphics_directional_ggx=0\ngraphics_specular_model=ggx-hybrid\n", BbSettings::SpecularGgxHybrid},
+             {"graphics_directional_ggx=0\ngraphics_specular_model=ggx-full\n", BbSettings::SpecularGgxFull},
+             {"graphics_specular_model=invalid\n", BbSettings::SpecularGgxFull},
+         }) {
+        { std::ofstream file(path); file << input; }
+        BbSettings::Load();
+        assert(s.graphics_specular_model == expected && s.startup_specular_model == expected);
+        BbSettings::Save();
+        const std::string saved_model = Read(path);
+        assert(saved_model.find(std::string("graphics_specular_model=") +
+                                BbSettings::SpecularModelNames[expected] + "\n") != std::string::npos);
+    }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(BbSettings::Effects[e].default_on ==
-               (e == BbSettings::EffectModernSsr || e == BbSettings::EffectPomCavity));
+               (e == BbSettings::EffectGtao || e == BbSettings::EffectModernSsr ||
+                e == BbSettings::EffectPomCavity || e == BbSettings::EffectGi ||
+                e == BbSettings::EffectVolumetricLight || e == BbSettings::EffectPointFog));
     }
+    assert(BbSettings::Effects[BbSettings::EffectSsr].default_on &&
+           !BbSettings::Effects[BbSettings::EffectPcss].default_on);
+    assert(BbSettings::Effects[BbSettings::EffectSkipIntro].default_on);
     { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\n    graphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_gi_reflection_strength=9\ngraphics_gi_wet_ground=-3\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();
     assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_ssr_intensity == 0.0f);

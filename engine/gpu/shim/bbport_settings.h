@@ -49,18 +49,18 @@ inline constexpr Effect Effects[] = {
     {"effect_ssao", "Ambient occlusion (SSAO)", "Затенение SSAO", true},
     {"effect_game_aa", "Game's own anti-aliasing", "Собственное сглаживание игры", false},
     {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
-    {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
-    {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
+    {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", true},
+    {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", true},
     {"debug_camera", "Free camera (Cross + L3)", "Свободная камера (Cross + L3)", false},
     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
-    {"effect_gtao", "Ground-truth ambient occlusion (GTAO, experimental)", "Затенение GTAO (эксперимент)", false},
+    {"effect_gtao", "Ground-truth ambient occlusion (GTAO, experimental)", "Затенение GTAO (эксперимент)", true},
     {"effect_modern_ssr", "Improved reflections", "Улучшенные отражения", true},
     {"effect_pom_cavity", "Deeper parallax surfaces", "Глубокие параллакс-поверхности", true},
     {"effect_contact_shadows", "Contact shadows", "Контактные тени", false},
     {"effect_pcss", "Soft sun shadows (PCSS)", "Мягкие тени солнца (PCSS)", false},
-    {"effect_gi", "Indirect lighting (GI)", "Непрямое освещение (GI)", false},
-    {"effect_volumetric_light", "Volumetric sunlight", "Объёмный солнечный свет", false},
-    {"effect_point_fog", "Fog around lamps", "Туман вокруг ламп", false},
+    {"effect_gi", "Indirect lighting (GI)", "Непрямое освещение (GI)", true},
+    {"effect_volumetric_light", "Volumetric sunlight", "Объёмный солнечный свет", true},
+    {"effect_point_fog", "Fog around lamps", "Туман вокруг ламп", true},
     {"effect_point_shadows", "Point light shadows (experimental)", "Тени от точечных источников (эксперимент)", false},
     {"effect_ray_tracing", "Ray traced lighting (experimental)", "Трассированное освещение (эксперимент)", false},
 };
@@ -69,6 +69,7 @@ inline constexpr int EffectFirstLighting = 10;
 inline constexpr int EffectDof = 1;
 inline constexpr int EffectSsao = 3;
 inline constexpr int EffectSsr = 6;
+inline constexpr int EffectSkipIntro = 7;
 inline constexpr int EffectGtao = 10;
 inline constexpr int EffectModernSsr = 11;
 inline constexpr int EffectPomCavity = 12;
@@ -108,6 +109,9 @@ static_assert(sizeof(HdrModeNames) / sizeof(HdrModeNames[0]) == HdrModeCount);
 enum Tonemapper : int { TonemapperOriginal = 0, TonemapperGt7 = 1, TonemapperAces = 2, TonemapperCount };
 inline constexpr const char* TonemapperNames[] = {"original", "gt7", "aces"};
 static_assert(sizeof(TonemapperNames) / sizeof(TonemapperNames[0]) == TonemapperCount);
+enum SpecularModel : int { SpecularOriginal = 0, SpecularGgxHybrid, SpecularGgxFull, SpecularModelCount };
+inline constexpr const char* SpecularModelNames[] = {"original", "ggx-hybrid", "ggx-full"};
+static_assert(sizeof(SpecularModelNames) / sizeof(SpecularModelNames[0]) == SpecularModelCount);
 inline constexpr float Gt7ExposureMin = 0.25f, Gt7ExposureMax = 4.0f;
 enum BloomQuality : int { BloomQualityOriginal = 0, BloomQualityFroyok = 1, BloomQualityCount };
 inline constexpr const char* BloomQualityNames[] = {"original", "froyok"};
@@ -204,14 +208,14 @@ struct Values {
     std::atomic<bool> graphics_rt_sun{false};
     std::atomic<bool> graphics_rt_point_shadows{false};
     std::atomic<bool> graphics_rt_bounce{false};
-    std::atomic<bool> graphics_gi_probes{false};
+    std::atomic<bool> graphics_gi_probes{true};
     std::atomic<bool> graphics_gi_reflections{false};
     std::atomic<bool> graphics_gi_reflections_full_res{false};
     std::atomic<float> graphics_gi_reflection_strength{1.0f};
     std::atomic<float> graphics_gi_wet_ground{WetGroundDefault};
     std::atomic<bool> graphics_smooth_normals{true}; // Smoothed normals for GTAO and indirect light.
     std::atomic<bool> graphics_native_sss{false};
-    std::atomic<bool> graphics_directional_ggx{true};
+    std::atomic<int> graphics_specular_model{SpecularGgxFull};
     std::atomic<bool> graphics_local_inverse_square{true};
     std::atomic<float> graphics_local_light_intensity{1.0f};
     std::atomic<float> graphics_local_light_core{LocalLightCoreDefault};
@@ -223,19 +227,19 @@ struct Values {
     std::atomic<float> graphics_light_sharpness{LightSharpnessMax};
     std::atomic<float> graphics_dof_intensity{1};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
-    std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
+    std::atomic<float> graphics_gi_strength{1.5f},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
     std::atomic<int> graphics_tonemapper{TonemapperOriginal};
     std::atomic<float> graphics_gt7_exposure{1.0f};
     std::atomic<int> graphics_bloom_quality{BloomQualityOriginal};
     std::atomic<float> graphics_froyok_bloom_blend{0.1f};
     std::atomic<float> graphics_froyok_bloom_spread{FroyokSpreadDefault};
     std::atomic<float> graphics_point_fog_glow_size{0.08f}; // Lamp fog inverse-square core / radius, 0.03-0.20.
-    std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};
-    std::atomic<int> graphics_ao_quality{0}; // 0 regular GTAO, 1 high (full-res bitmask GTAO)
+    std::atomic<int> graphics_shadow_resolution{1},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{1};
+    std::atomic<int> graphics_ao_quality{1}; // 0 regular GTAO, 1 high (full-res bitmask GTAO)
     std::atomic<int> look_choice{0};
     std::atomic<float> graphics_fog{1},graphics_brightness{1},graphics_contrast{1},graphics_hue{0};
     std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
-    std::atomic<int> model_lod{0};
+    std::atomic<int> model_lod{-2};
     std::atomic<int> output_res{OutputDefault};
     int custom_output_w = 1920, custom_output_h = 1080;
     std::atomic<int> cheat_vials{CheatOff}, cheat_bullets{CheatOff};
@@ -275,8 +279,8 @@ struct Values {
     int startup_frame_gen = FrameGenOff;
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
-    int startup_motion_blur_quality = 0;
-    bool startup_directional_ggx = true;
+    int startup_motion_blur_quality = 1;
+    int startup_specular_model = SpecularGgxFull;
     bool startup_local_inverse_square = true;
     float startup_local_light_intensity = 1.0f;
     float startup_local_light_core = LocalLightCoreDefault;
@@ -284,11 +288,11 @@ struct Values {
     bool startup_disable_player_light = true;
     bool startup_local_ggx = true, startup_specular_aa = true, startup_env_ggx_tails = true;
     float startup_light_sharpness = LightSharpnessMax;
-    int startup_ao_quality = 0;
-    int startup_shadow_resolution = 0;
+    int startup_ao_quality = 1;
+    int startup_shadow_resolution = 1;
     int startup_local_shadow_resolution = 0;
     bool startup_effects[EffectCount]{};
-    int startup_model_lod = 0;
+    int startup_model_lod = -2;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
     int startup_bloom_quality = BloomQualityOriginal;

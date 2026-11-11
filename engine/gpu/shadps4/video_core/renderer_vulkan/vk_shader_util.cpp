@@ -18,21 +18,20 @@
 namespace Vulkan {
 
 std::vector<u32> DirectionalGgxModule(u64 program_hash, bool fragment, std::span<const u32> code) {
-    if (!fragment || program_hash != Ggx::DirectionalHash ||
-        !BbSettings::Get().startup_directional_ggx) return {};
-    std::vector<u32> selected;
-    if (Ggx::KnownSize(code.size())) {
-        selected.assign(code.begin(), code.end());
-    }
-    const auto result = selected.empty() ? Ggx::Result::Unsupported
-                                         : Ggx::Patch(program_hash, fragment, true, selected);
+    const auto model = BbSettings::Get().startup_specular_model;
+    if (!fragment || program_hash != Ggx::DirectionalHash || model == BbSettings::SpecularOriginal)
+        return {};
+    std::vector<u32> selected(code.begin(), code.end());
+    const auto strict = model == BbSettings::SpecularGgxFull;
+    const auto result = Ggx::Patch(program_hash, fragment, true, selected, strict);
     if (result != Ggx::Result::Applied) {
-        LOG_WARNING(Render_Vulkan,
-                    "Directional GGX {:#x}: unsupported compiled module ({} words); "
-                    "native specular retained", program_hash, code.size());
+        LOG_ERROR(Render_Vulkan,
+                  "Directional GGX {:#x}: unrecognized shader structure ({} words); "
+                  "native specular retained", program_hash, code.size());
         return {};
     }
-    LOG_INFO(Render_Vulkan, "Directional GGX {:#x}: native-anchored specular enabled", program_hash);
+    LOG_INFO(Render_Vulkan, "Directional GGX {:#x}: {} specular enabled", program_hash,
+             strict ? "strict" : "native-anchored");
     return selected;
 }
 
