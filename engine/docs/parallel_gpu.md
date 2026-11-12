@@ -595,12 +595,13 @@ rendering without an upscaler. Found on the way:
   each keeps the native size. What remains native before the upscaler: half-resolution
   (960x540) passes, which `SceneTargets::Eligible` does not handle.
 
-Next GPU item (matters most on the Steam Deck): guest compute `3d5ebf4e` is a dword memcpy that
-copies render target memory (the 1080p depth buffer, 12 MB, sampled afterwards as R32F; a
-G-buffer target; two 960x540 targets): 8 dispatches, and each needs the image downloaded into
-the buffer, the proxy resolved and the destination image uploaded again. Recognizing copies
-whose source is an image and turning them into image copies (or a proxy-sized copy) would remove
-most of that. Skipping the dispatches blacks out the scene, so the copies are needed.
+Guest compute `3d5ebf4e` is a dword memcpy of render-target memory. Its full-target copies now
+become image-to-image copies when both extents and layouts match; a destination not registered
+until its later render pass is pre-created from the source layout, with metadata aliases cleared.
+Partial or incompatible copies keep the compute path. Seven copies per frame in the 1440p test
+scene removed the color download/upload round trips and reduced GPU time from 21.73 to 20.33 ms
+per frame (about 46 to 49 FPS on an RTX 4060 Ti), with no visual differences reported. One
+startup copy still uses the fallback. Skipping these dispatches instead blacks out the scene.
 
 ### Fixed: guest heap corruption with the draw pipeline (2026-10-01)
 

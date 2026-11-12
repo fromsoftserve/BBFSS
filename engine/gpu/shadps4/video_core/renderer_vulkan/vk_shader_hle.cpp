@@ -21,12 +21,14 @@
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_gpu_savings.h"
+#include "video_core/texture_cache/texture_cache.h"
 
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Vulkan {
 
 static constexpr u64 COPY_SHADER_HASH = 0xfefebf9f;
+static constexpr u64 RT_COPY_SHADER_HASH = 0x3d5ebf4e;
 
 /// A range of each buffer a batch reads or writes (barrier checks and access tracking).
 struct AccessRange {
@@ -560,11 +562,72 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
+bool ExecuteRtCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                            Rasterizer& rasterizer) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_RT_IMAGE_COPY");
+        return !env || env[0] != '0';
+    }();
+    if (!enabled || info.buffers.size() != 2 || cs_program.dim_y != 1 || cs_program.dim_z != 1) {
+        return false;
+    }
+    const auto src = info.buffers[0].GetSharp(info);
+    const auto dst = info.buffers[1].GetSharp(info);
+    if (src.GetStride() != sizeof(u32) || dst.GetStride() != sizeof(u32)) {
+        return false;
+    }
+    const u64 bytes = u64(cs_program.dim_x) * 64 * sizeof(u32);
+    if (bytes == 0 || bytes > src.GetSize() || bytes > dst.GetSize()) {
+        return false;
+    }
+    auto& textures = rasterizer.GetTextureCache();
+    const VideoCore::ImageId src_id = textures.FindImageFromRange(src.base_address, bytes);
+    VideoCore::ImageId dst_id = textures.FindImageFromRange(dst.base_address, bytes);
+    if (src_id && !dst_id && textures.GetImage(src_id).info.guest_size == bytes) {
+        VideoCore::TextureCache::ImageDesc desc;
+        desc.info = textures.GetImage(src_id).info;
+        desc.info.guest_address = dst.base_address;
+        desc.info.meta_info = {};
+        desc.info.stencil_addr = 0;
+        desc.info.stencil_size = 0;
+        desc.type = desc.info.props.is_depth ? VideoCore::TextureCache::BindingType::DepthTarget
+                                             : VideoCore::TextureCache::BindingType::RenderTarget;
+        dst_id = textures.FindImage(desc);
+    }
+    if (!src_id || !dst_id) {
+        return false;
+    }
+    const auto& source = textures.GetImage(src_id);
+    const auto& destination = textures.GetImage(dst_id);
+    if (source.info.guest_size != bytes || destination.info.guest_size != bytes ||
+        source.info.size != destination.info.size || source.info.type != destination.info.type ||
+        source.info.resources != destination.info.resources ||
+        source.info.num_samples != destination.info.num_samples) {
+        return false;
+    }
+    if (source.info.pixel_format != destination.info.pixel_format &&
+        source.info.props.is_depth == destination.info.props.is_depth) {
+        return false;
+    }
+    if (src_id == dst_id) {
+        return true;
+    }
+    if (auto* profiler = GpuProfiler::Get()) {
+        profiler->Mark(0xC0B2ull, [] { return std::string{"render-target copy HLE: image copy"}; });
+    }
+    textures.UpdateImage(src_id);
+    rasterizer.GetRuntime().CopyColorAndDepth(&textures.GetImage(src_id),
+                                              &textures.GetImage(dst_id));
+    return true;
+}
+
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    case RT_COPY_SHADER_HASH:
+        return ExecuteRtCopyShaderHLE(info, cs_program, rasterizer);
     default:
         return false;
     }
