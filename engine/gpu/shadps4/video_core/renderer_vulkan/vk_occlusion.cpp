@@ -90,12 +90,19 @@ struct Occlusion::Resolver {
 
     u64 dumps = 0, queries_read = 0, seen = 0, hidden = 0, plainly = 0, unavailable = 0;
     u64 late = 0, foreign = 0, unmapped = 0, held = 0, late_written = 0, unpaired = 0;
+    u64 runs = 0, result_calls = 0, reset_calls = 0, reset_queries = 0;
+    u64 resolve_ns = 0, result_read_ns = 0, store_ns = 0;
+    bool report_enabled = false;
+    bool measure_only = false;
+    bool no_gpu_queries = false;
     std::atomic<u64> pool_full{0}, pred_sets{0}, pred_known{0}, pred_skipped{0}, pred_drawn{0};
+    std::atomic<u64> wait_flushes{0};
     std::chrono::steady_clock::time_point report_time = std::chrono::steady_clock::now();
     u64 report_frames = 0, report_draws = 0;
-    std::array<u64, 15> reported{};
+    std::array<u64, 23> reported{};
 
     void Run(u64 tick);
+    void Read(u64 first, u64 count);
     void Process(const Record& record);
     u64 Sum(u64 first, u64 count, u64& missing);
     void Release(u64 below);
@@ -157,6 +164,9 @@ bool Occlusion::Init() {
     resolver->rasterizer = &rasterizer;
     resolver->precise = precise;
     resolver->max_lag = EnvNumber("BB_OCCLUSION_MAX_LAG", 6);
+    resolver->report_enabled = std::getenv("BB_FRAME_STATS") != nullptr;
+    resolver->measure_only = EnvNumber("BB_OCCLUSION_MEASURE_ONLY", 0) != 0;
+    resolver->no_gpu_queries = EnvNumber("BB_OCCLUSION_NO_GPU_QUERIES", 0) != 0;
     std::printf("Occlusion: conservative visibility (BB_OCCLUSION=0: always visible) - "
                 "each query block the game opens is measured over up to %llu draws and answered "
                 "once the GPU has run them (at most %llu frames late), %s; only a complete, fresh "
@@ -165,6 +175,14 @@ bool Occlusion::Init() {
                 static_cast<unsigned long long>(draw_budget),
                 static_cast<unsigned long long>(resolver->max_lag),
                 precise ? "precise counts" : "not precise (any nonzero count reads plainly visible)");
+    if (resolver->measure_only) {
+        std::printf("Occlusion: measure-only (BB_OCCLUSION_MEASURE_ONLY): real queries, every "
+                    "answer visible\n");
+    }
+    if (resolver->no_gpu_queries) {
+        std::printf("Occlusion: no GPU queries (BB_OCCLUSION_NO_GPU_QUERIES): tracking and visible "
+                    "answers without Vulkan query commands\n");
+    }
     return true;
 }
 
@@ -214,14 +232,25 @@ void Occlusion::Dump(const DumpTask& task) {
         std::scoped_lock lock{resolver->inbox_mutex};
         resolver->inbox.push_back(record);
     }
-    if (record.tick != last_dump_tick) {
-        last_dump_tick = record.tick;
+    if (const u64 previous = last_dump_tick.exchange(record.tick, std::memory_order_release);
+        record.tick != previous) {
         scheduler.DeferPriorityOperation(
             [resolver = resolver, tick = record.tick] { resolver->Run(tick); });
     }
 }
 
+bool Occlusion::HasUnsubmittedDumps(u64 current_tick) const noexcept {
+    const bool pending = last_dump_tick.load(std::memory_order_acquire) == current_tick;
+    if (pending && resolver->report_enabled) {
+        resolver->wait_flushes.fetch_add(1, std::memory_order_relaxed);
+    }
+    return pending;
+}
+
 Occlusion::DrawQuery Occlusion::TakeQuery(u32 scene_size) noexcept {
+    if (resolver->no_gpu_queries) {
+        return {};
+    }
     if (next_query - resolver->released.load(std::memory_order_acquire) >= RingSize) {
         resolver->pool_full.fetch_add(1, std::memory_order_relaxed);
         return {};
@@ -275,10 +304,13 @@ bool Occlusion::SkipUnderPredicate() noexcept {
 }
 
 void Occlusion::Resolver::Run(u64 tick) {
+    const auto started = report_enabled ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
     std::scoped_lock lock{state_mutex};
     if (!alive) {
         return;
     }
+    ++runs;
     batch.clear();
     {
         std::scoped_lock inbox_lock{inbox_mutex};
@@ -287,10 +319,62 @@ void Occlusion::Resolver::Run(u64 tick) {
             inbox.pop_front();
         }
     }
+    u64 read_first = 0, read_end = 0;
+    const auto read = [&] {
+        if (read_first != read_end) {
+            Read(read_first, read_end - read_first);
+        }
+    };
+    for (const Record& record : batch) {
+        if (record.kind != Kind::Closed || !record.complete || record.queries == 0) {
+            continue;
+        }
+        const u64 end = record.first_query + record.queries;
+        if (read_first != read_end && record.first_query <= read_end) {
+            read_first = std::min(read_first, record.first_query);
+            read_end = std::max(read_end, end);
+        } else {
+            read();
+            read_first = record.first_query;
+            read_end = end;
+        }
+    }
+    read();
+    u64 release_below = 0;
     for (const Record& record : batch) {
         Process(record);
+        release_below = std::max(release_below, record.needed_from);
+    }
+    Release(release_below);
+    if (report_enabled) {
+        resolve_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
     }
     Report();
+}
+
+void Occlusion::Resolver::Read(u64 first, u64 count) {
+    while (count != 0) {
+        const u32 start = static_cast<u32>(first % RingSize);
+        const u32 run = static_cast<u32>(std::min<u64>(count, RingSize - start));
+        ++result_calls;
+        const auto started = report_enabled ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
+        const vk::Result result = device.getQueryPoolResults(
+            pool, start, run, 16ull * run, raw.data() + 2 * start, 16,
+            vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
+        if (report_enabled) {
+            result_read_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count();
+        }
+        if (result != vk::Result::eSuccess && result != vk::Result::eNotReady) {
+            std::fill_n(raw.data() + 2 * start, 2 * run, 0);
+        }
+        first += run;
+        count -= run;
+    }
 }
 
 void Occlusion::Resolver::Process(const Record& record) {
@@ -306,7 +390,9 @@ void Occlusion::Resolver::Process(const Record& record) {
         }
         const u64 now = FramesSoFar();
         const bool fresh = Model::QueryFresh(record.frame, now, max_lag);
-        count = Model::VisibilityCount(count, record.queries, record.complete, fresh);
+        count = measure_only
+                    ? Model::PlainlyVisible
+                    : Model::VisibilityCount(count, record.queries, record.complete, fresh);
         plainly += count == Model::PlainlyVisible ? 1 : 0;
         if (!Model::LateAnswerWritable(record.frame, now, max_lag,
                                        answered.contains(record.block))) {
@@ -318,32 +404,30 @@ void Occlusion::Resolver::Process(const Record& record) {
             }
             const u64 report = steady[record.block].Add(count);
             held += count == 0 && report != 0 ? 1 : 0;
-            if (Store(record.block, record.dbs, report)) {
+            const auto started = report_enabled ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
+            const bool stored = Store(record.block, record.dbs, report);
+            if (report_enabled) {
+                store_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count();
+            }
+            if (stored) {
                 ++(report != 0 ? seen : hidden);
             }
         }
     }
-    Release(record.needed_from);
     answered_through.store(record.number, std::memory_order_release);
 }
 
 u64 Occlusion::Resolver::Sum(u64 first, u64 count, u64& missing) {
     queries_read += count;
     u64 samples = 0;
-    while (count != 0) {
-        const u32 start = static_cast<u32>(first % RingSize);
-        const u32 run = static_cast<u32>(std::min<u64>(count, RingSize - start));
-        const vk::Result result = device.getQueryPoolResults(
-            pool, start, run, 16ull * run, raw.data(), 16,
-            vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
-        const bool readable = result == vk::Result::eSuccess || result == vk::Result::eNotReady;
-        for (u32 i = 0; i < run; ++i) {
-            const bool available = readable && raw[2 * i + 1] != 0;
-            missing += available ? 0 : 1;
-            samples += Model::QueryCount(raw[2 * i], available, precise, scale[start + i]);
-        }
-        first += run;
-        count -= run;
+    for (u64 i = 0; i < count; ++i) {
+        const u32 slot = static_cast<u32>((first + i) % RingSize);
+        const bool available = raw[2 * slot + 1] != 0;
+        missing += available ? 0 : 1;
+        samples += Model::QueryCount(raw[2 * slot], available, precise, scale[slot]);
     }
     return samples;
 }
@@ -352,6 +436,8 @@ void Occlusion::Resolver::Release(u64 below) {
     while (reset_below < below) {
         const u32 start = static_cast<u32>(reset_below % RingSize);
         const u32 run = static_cast<u32>(std::min<u64>(below - reset_below, RingSize - start));
+        ++reset_calls;
+        reset_queries += run;
         device.resetQueryPool(pool, start, run);
         reset_below += run;
     }
@@ -396,8 +482,7 @@ bool Occlusion::Resolver::Store(VAddr block, u32 dbs, u64 count) {
 }
 
 void Occlusion::Resolver::Report() {
-    static const bool wanted = std::getenv("BB_FRAME_STATS") != nullptr;
-    if (!wanted) {
+    if (!report_enabled) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -407,7 +492,7 @@ void Occlusion::Resolver::Report() {
     report_time = now;
     const u64 frames_now = FramesSoFar();
     const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
-    const std::array<u64, 15> totals{
+    const std::array<u64, 23> totals{
         dumps,
         queries_read,
         seen,
@@ -423,9 +508,17 @@ void Occlusion::Resolver::Report() {
         held,
         late_written,
         unpaired,
+        runs,
+        result_calls,
+        reset_calls,
+        reset_queries,
+        resolve_ns,
+        result_read_ns,
+        store_ns,
+        wait_flushes.load(std::memory_order_relaxed),
     };
     const double frames = std::max<double>(1.0, double(frames_now - report_frames));
-    std::array<double, 15> per_frame{};
+    std::array<double, 23> per_frame{};
     for (size_t i = 0; i < totals.size(); ++i) {
         per_frame[i] = double(totals[i] - reported[i]) / frames;
     }
@@ -442,6 +535,10 @@ void Occlusion::Resolver::Report() {
                 static_cast<unsigned long long>(foreign),
                 static_cast<unsigned long long>(unmapped), f[7], f[8], f[9], f[10], f[11],
                 double(draws_now - report_draws) / frames, f[12], f[13], f[14]);
+    std::printf("Occlusion work per frame: %.1f batches, %.1f result reads, %.1f pool resets "
+                "(%.1f slots); %.3f ms resolver (%.3f read, %.3f store); %.1f query-wait "
+                "flushes\n",
+                f[15], f[16], f[17], f[18], f[19] / 1e6, f[20] / 1e6, f[21] / 1e6, f[22]);
     std::fflush(stdout);
     reported = totals;
     report_frames = frames_now;

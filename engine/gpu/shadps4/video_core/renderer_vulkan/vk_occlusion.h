@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <unordered_map>
 
@@ -43,9 +44,7 @@ public:
     };
     bool predication_open = false;
 
-    bool HasUnsubmittedDumps(u64 current_tick) const noexcept {
-        return last_dump_tick == current_tick;
-    }
+    bool HasUnsubmittedDumps(u64 current_tick) const noexcept;
 
     void Dump(const DumpTask& task);
     void SetPredication(const PredicationTask& task);
@@ -95,7 +94,7 @@ private:
     OcclusionModel::OpenBlocks open_blocks;
     u64 next_query = 0;
     u64 dumps_recorded = 0;
-    u64 last_dump_tick = ~0ull;
+    std::atomic<u64> last_dump_tick{~0ull};
     struct LastDump {
         u64 number;
         u32 dbs;
