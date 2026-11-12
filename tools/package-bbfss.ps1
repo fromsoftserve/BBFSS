@@ -15,13 +15,13 @@ if (Test-Path -LiteralPath $destination) {
 $bin = Join-Path $destination 'engine\out'
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 Copy-Item -LiteralPath "$root\engine\out\bbfss-launcher\BBFSS.exe" -Destination $destination
-foreach ($name in 'bb-probe.exe', 'bb-start.exe', 'bb-engine-assets.exe', 'bb-gpu-capabilities.exe', 'bb-shader-lab.exe') {
+foreach ($name in 'bb-probe.exe', 'bb-start.exe', 'bb-engine-assets.exe', 'bb-gpu-capabilities.exe', 'bb-shader-lab.exe', 'bb-isa-scan.exe', 'bb-ui-4k.exe') {
     Copy-Item -LiteralPath "$root\engine\out\$name" -Destination $bin
 }
 foreach ($name in 'patches', 'data', 'licenses') {
     Copy-Item -LiteralPath "$root\engine\$name" -Destination "$destination\engine" -Recurse
 }
-foreach ($name in 'gpu-cache.id', 'gpu-cache.legacy.id', 'bloodborne.ico', 'nvngx_dlss.dll', 'LICENSE-DLSS-SDK.txt') {
+foreach ($name in 'gpu-cache.id', 'gpu-cache.legacy.id', 'gpu-cache.accepted.id', 'bloodborne.ico', 'nvngx_dlss.dll', 'LICENSE-DLSS-SDK.txt') {
     if (Test-Path -LiteralPath "$root\engine\out\$name") {
         Copy-Item -LiteralPath "$root\engine\out\$name" -Destination $bin
     } elseif ($name -eq 'nvngx_dlss.dll' -and $RequireDlss) {

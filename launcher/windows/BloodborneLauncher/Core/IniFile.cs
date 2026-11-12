@@ -41,7 +41,7 @@ namespace BloodborneLauncher.Core
             ("graphics_rt_sun", "0"),
             ("graphics_rt_bounce", "0"),
             ("graphics_point_fog_glow_size", "0.08"),
-            ("frame_gen_cap", "1"),
+            ("frame_gen_even_pacing", "0"),
             ("dlss_preset", "k"),
             ("fps_position", "0"),
             ("fps_scale", "1.00"),

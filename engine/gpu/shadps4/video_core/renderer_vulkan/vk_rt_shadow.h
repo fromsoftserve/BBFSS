@@ -48,6 +48,7 @@ public:
     struct Draw {
         u64 shader = 0;
         u64 geometry = 0;
+        u64 positions = 0;
         u64 indices = 0;
         u64 palette = 0;
         const float* constants = nullptr;
@@ -114,9 +115,11 @@ private:
         u32 first_instance = 0;
         u64 scratch = 0;
         u64 update_scratch = 0;
+        u64 bytes = 0;
+        u64 scene_bytes = 0;
         u64 seen_frame = 0;
         u64 built_frame = 0;
-        u64 bytes = 0;
+        u32 rebuild_every = 120;
         u8 mask = 1;
         bool built = false;
         bool dynamic = false;
@@ -124,6 +127,8 @@ private:
         bool copied = false;
         // The BLAS holds this entry's geometry (false while the scene is not being built).
         bool blas = false;
+        // Unlike the current-pass mask, this survives camera-only frames of a shared entry.
+        bool shadow = false;
         // Value of `copies` when the world copy was last written.
         u64 copied_at = 0;
         // World bounds measured by the sun VSM (min xyz, max xyz), when has_box.
@@ -156,6 +161,7 @@ private:
     bool Make(Buffer& out, vk::DeviceSize size, bool host, VkBufferUsageFlags usage);
     void Free(Buffer& buffer);
     void Destroy(Entry& entry);
+    bool EnsureWorld(Entry& entry);
     bool ToWorld(const float* constants, bool perspective, std::array<float, 12>& out) const;
     bool MakeRaw(u32 width, u32 height);
     bool PrepareCapture();
@@ -237,13 +243,17 @@ private:
     u64 entry_bytes = 0;
     u32 missed = 0;
     u32 tlas_count = 0;
-    u32 rays = 2;
+    u32 rays = 1;
+    u64 scratch_align = 256;
+    u64 blas_bytes = 0;
+    u64 blas_limit = 320ull << 20;
 
     struct Stats {
         u64 draws = 0, camera_draws = 0, not_ortho = 0, no_camera = 0, alpha = 0, unsupported = 0,
             over_budget = 0, instanced = 0, dynamic_draws = 0, strips = 0, frames = 0, instances = 0,
             triangles = 0, shared_builds = 0, missed = 0, incomplete = 0, vsm_kept = 0,
-            vsm_culled = 0, vsm_verified = 0, vsm_gone = 0, promoted = 0;
+            vsm_culled = 0, vsm_verified = 0, vsm_gone = 0, promoted = 0, merged = 0,
+            cut_characters = 0, built_triangles = 0, evicted = 0;
     } stats;
 };
 

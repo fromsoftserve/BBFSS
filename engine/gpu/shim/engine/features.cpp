@@ -10,6 +10,7 @@
 #include "change_appearance.h"
 #include "cheats.h"
 #include "effect_timing.h"
+#include "ground_trace.h"
 #include "engine_state.h"
 #include "camera_timing.h"
 #include "frame_rate.h"
@@ -104,7 +105,10 @@ void Install(std::uint8_t* image, std::size_t size) {
         !s.pc_controls && !s.widescreen)
         return;
     if (!identity || std::strcmp(identity, kVerifiedImage) != 0) {
-        host_log("engine features off: the executable was not verified");
+        host_log(identity ? "engine features off (widescreen, Lantern menus, camera controls, native frame rate): the "
+                            "game's executable is not the 1.09 one this engine knows; a patched or other version"
+                          : "engine features off (widescreen, Lantern menus, camera controls, native frame rate): the "
+                            "launcher did not pass the executable's identity (BB_ENGINE_IMAGE_SHA256)");
         return;
     }
     if (mirror && !DreamLayoutIsTheGames()) {
@@ -150,6 +154,7 @@ void Install(std::uint8_t* image, std::size_t size) {
     const bool online = OnlineFixes::Install(image, size);
     const bool guard = RenderGuard::Install(image, size);
     const bool timing = EffectTiming::Install(image, size);
+    const bool ground_trace = GroundTrace::Install(image, size);
     const bool frame_rate = FrameRate::Install(image, size);
     CameraTiming::Install(image, size);
     const bool slots = JobSlots::Install(image, size);
@@ -160,7 +165,7 @@ void Install(std::uint8_t* image, std::size_t size) {
     GxRecords::Install(image, size);
     if (!(editor || input || camera || wide || graphics || exposure || local_shadows || spot_shadows ||
           directional_shadows || directional_resolution || menus || rebirth || cheats || online || guard || timing ||
-          frame_rate || slots || status)) {
+          ground_trace || frame_rate || slots || status)) {
         for (auto& h : hooks) Discard(h);
         host_log("engine features off: none could be prepared");
         return;

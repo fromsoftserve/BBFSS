@@ -28,6 +28,9 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Setup MSYS2 CLANG64
         id: msys2
         uses: msys2/setup-msys2@v2
@@ -64,6 +67,7 @@ jobs:
             mingw-w64-clang-x86_64-ffmpeg
             mingw-w64-clang-x86_64-protobuf
             mingw-w64-clang-x86_64-nlohmann-json
+            mingw-w64-clang-x86_64-openssl
             mingw-w64-clang-x86_64-miniupnpc
             mingw-w64-clang-x86_64-zlib
             mingw-w64-clang-x86_64-expat
@@ -95,6 +99,7 @@ jobs:
             -include climits -include cmath -include limits -include utility -include algorithm
             -include memory -include string -include stdexcept -include functional
         run: |
+          cargo test --manifest-path engine/tools/isa-scan/Cargo.toml
           set +e
           bash engine/build.sh
           rc=$?
@@ -104,6 +109,7 @@ jobs:
             tail -n 200 engine/out/gpu-build.log 2>/dev/null || true
             exit "$rc"
           fi
+          bash engine/build.sh --test
 
       - name: Run Python tests
         shell: msys2 {0}
@@ -113,11 +119,24 @@ jobs:
           test_builtin_performance test_engine_assets test_windows_frame_rate
           test_ggx_directional_replay test_ggx_directional_timing test_ggx_directional_patch
 
-      - name: Run settings test
+      - name: Run native renderer and online tests
         shell: msys2 {0}
         run: |
-          ninja -C engine/out/gpu settings-test
-          engine/out/gpu/settings-test.exe
+          set -e
+          ninja -C engine/out/gpu settings-test occlusion-test frame-rate-test world-copy-test shared-progress-test room-host-test room-service-test room-status-test
+          for test in settings-test occlusion-test frame-rate-test world-copy-test shared-progress-test; do
+            "engine/out/gpu/$test.exe"
+          done
+          engine/out/gpu/bbnet/room-host-test.exe
+          engine/out/gpu/bbnet/room-status-test.exe
+          export BB_ROOM_SERVER=ws://127.0.0.1:47765 BB_ROOM_NAME=room-service-test BB_ROOM_PASSWORD=integration-test
+          BB_ROOM_HOST=1 BB_ROOM_LOCAL_PORT=47765 engine/out/gpu/bbnet/room-service-test.exe host &
+          host=$!
+          trap 'kill "$host" 2>/dev/null || true' EXIT
+          sleep 2
+          engine/out/gpu/bbnet/room-service-test.exe early-guest
+          wait "$host"
+          trap - EXIT
 
       - name: Fetch DLSS
         shell: msys2 {0}

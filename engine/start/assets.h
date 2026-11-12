@@ -27,6 +27,9 @@ std::vector<std::pair<std::string, fs::path>> PrepareEffectFixes(const fs::path&
 std::optional<std::pair<std::string, fs::path>> PreparePlayerLight(const fs::path& game, const fs::path& cache,
                                                                    std::vector<std::string>& notes);
 
+std::optional<std::pair<std::string, fs::path>> PrepareJumpKey(const fs::path& game, const fs::path& cache,
+                                                              std::string& note);
+
 fs::path PrepareLamp2Lamp(const fs::path& game, const std::optional<fs::path>& update, const fs::path& patch,
                           const fs::path& cache);
 

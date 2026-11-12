@@ -333,3 +333,161 @@ Expected after stage 4: B1 keeps decode, buffers, uploads and dispatches (~2.3 u
 targets and recording (~1.5 us); the critical path falls to ~2.3 us, ~+60% FPS where stage B
 limits, until the GPU or the game's main thread does. Stages 1 and 2 alone change little (the
 recording tail is ~0.5 us) but build the hand-off everything else needs.
+
+## 8. Runs committed by workers (2026-11-09)
+
+Measured before starting (`last_session.log` of 2026-11-09, RTX 5060, Ryzen 5 5600, 0.9.40
+candidate): stage B 98.7% busy at 3.83 us per packet (with `BB_SECTIONS=1`, whose timers cost
+about 0.39 us of that, measured offline for 25 scopes). The GPU command thread is not the limit:
+its sampled stacks spend 13-30% in `NtWaitForAlertByThreadId`, most of it waiting on stage B. No
+function of stage B is above ~3% of its samples.
+
+Approach A (section 3) failed per draw: the texture helper handed each draw's results across
+cores. A worker that commits a whole stretch of draws pays the hand-over once per stretch. The
+unit is a **run**: direct draws one after another in one render pass, with no ordered task,
+dispatch, indirect or special packet between them.
+
+### Step 1: the census (`LANTERN_RUN_CENSUS`, on with `BB_SECTIONS=1`)
+
+Before any worker exists, stage B classifies every direct draw after it ran: clean, or the
+first thing it did that changes what other draws share. In order: a render pass began (a real
+barrier ends the pass, so barriers land here), a buffer upload, a texture set lookup that was not
+a plain memo hit, a render state memo miss, a binding the GPU writes, other (occlusion query,
+pipeline still compiling, the display pass, the RT capture, frame capture). Clean draws in a row
+form a run; the line
+
+```
+  runs for workers: C% of D draws/s clean (X us each, the others Y us), L% in runs of 8 or more
+  (R runs/s, N draws each, S% of stage B's time: two workers would take up to T% off it); draws by
+  run length ...; runs ended by ...; clean draws streaming constants Z%
+```
+
+bounds the gain: `T` is two thirds of the time in runs of 8 or more, before fork and join costs.
+If `T` is small, the cuts list says which shared work to make worker-safe first.
+
+### Step 2: what a worker owns
+
+- **Registers.** `AmdGpu::Regs` is 0xD000 words (208 KiB): too much to copy at a fork. Each
+  worker keeps its own copy in step by applying every packet's changed blocks, as stage B does
+  (32-word blocks, a few per packet), whether or not the packet is its own.
+- **Per-draw scratch.** Everything `DrawRecord` fills for one draw moves into a draw context, one
+  per thread: push data, descriptor writes, image and buffer infos, vertex and index bindings, the
+  ring stages, the packet's V#s and keys, bound images and buffers, `needs_barrier`, the census
+  flags. Stage B keeps one too, so the single-thread path runs through the same code.
+- **Commands.** A worker records into chunks of its own. The main thread reserves the place of
+  each part in the command stream at the fork and splices the parts in order at the join; nothing
+  is copied.
+- **Counters and notes** (statistics, image binding flags to clear, buffer accesses for the
+  barrier tracker, object motion jobs) are kept per worker and applied by the main thread at the
+  join, in draw order.
+
+### Step 3: where a worker stops
+
+Before anything the census counts as a cut: a new pass, an upload, a texture lookup that would
+create, refresh or revalidate, a render state miss, a GPU-written binding, a query, a pipeline
+still compiling. The worker stops there, the main thread commits that draw and the rest of the
+part in order, and parts after a stop are thrown away and committed in order too.
+
+### Step 4: the fork
+
+At a clean draw with the render pass open, the main thread looks at the committed packets after
+it (`DrawPipe::PacketAt`), up to the first packet that is not a direct draw or changes a target
+register block. A run of 8 or more is split into contiguous parts: one for the main thread, one
+per worker. Workers spin briefly after a part and then sleep on an address, like the lookahead
+thread. `LANTERN_RUN_COMMIT=fork` forks with no work, to price the fork and join alone; `=on`
+commits; a compare mode commits each run both ways and counts differences per field, the
+second copy thrown away. Off by default, and off on CPUs with fewer than 12 threads until a run
+there shows a gain.
+
+### Step 5: what the code showed (2026-11-10)
+
+Done: the draw context (commit 079b3546). `Rasterizer::Dc()` returns the calling thread's
+context, or the main one when the thread has none; every function that uses per-draw scratch
+takes it once at its start.
+
+Reading the clean path for shared writes changed the plan for the workers' code. The general
+path writes shared state even on a draw the census calls clean: the buffer cache's use notes and
+maintenance epoch, the stream buffer's cursor and its deferred guest copies (57% of clean draws
+stream constants), `camera_motion->OnConstants`, statistics, the scheduler's chunk, dynamic state
+and render pass flags. Making all of that safe for three threads would touch most of the
+renderer. Instead:
+
+- **Workers run a clean-only draw function.** It only reads shared state, through "try"
+  variants of the lookups: a buffer that is resident and needs no upload, a texture set memo hit
+  whose images are still valid, a render state and begin memo hit, a sampler memo hit, a pipeline
+  that is ready. Anything else returns "not clean" before the draw has recorded a command, and
+  the part stops there. The general path stays as it is, on the main thread only.
+- **The main thread follows the same rule while a fork is open.** Before a draw of its own part
+  that is not clean (it would change what the workers read), it tells the workers to stop after
+  their current draw, joins, and goes on alone.
+- **Commands.** `Scheduler::Record`, `RecordData` and `GetDynamicState` go to a per-thread sink
+  when one is set: the worker's own `RecordChunk`s and its own `DynamicState`, invalidated at the
+  start of the part so its first draw sets everything. At the join the main thread retires its
+  chunk and appends the workers' chunks to `full_chunks` in part order, then takes the last
+  part's dynamic state. `MaybeSplit` is held off while a fork is open (it ends the render pass).
+  Breadcrumbs on means no forks.
+- **Streamed constants.** Each worker gets a slice of the stream buffer at the fork and copies
+  guest data into it itself; a full slice is a stop.
+- **Notes for the join**, applied in draw order: buffer use notes, bound image flags to clear,
+  buffer accesses for the barrier tracker, the first camera constants address, object motion
+  jobs, statistics.
+
+Per draw in a heavy scene (`BB_SECTIONS=1`, 180700 draws/s): 3.04 us, of which bind 1.08
+(buffers 0.45, textures 0.50), vertex 0.52, index 0.15, begin 0.20, dynamic 0.16, kick 0.16, emit
+vertex 0.11, render state 0.13, and about 0.5 for the descriptor commit and the draw command.
+
+Order from here: the scheduler sink; the try lookups (buffers first: they are 1.1 us of the
+3.0); the clean-only draw function, run on the main thread alone under a compare mode that
+checks it against the general path draw by draw; then the fork.
+
+### Step 6: the read-only buffer lookup (2026-11-10)
+
+`BufferCache::TryObtainRead` answers a read binding without changing the cache, or says why it
+cannot: configuration (shadows, chunk buffers, buffer statistics, the HLE copy shader), a GPU
+write still pending, no arena, a demoted block, memory not resident, a range partly in place,
+CPU-modified pages, a full stream slice. Streamed constants go into the caller's slice of the
+stream buffer and are copied at once.
+
+With section timings on (or `LANTERN_RUN_COMMIT=compare`) every read binding of the general
+lookup is tried first, and the log line after the census says how many were clean, how many
+differ from the general lookup's answer, and how many the general lookup uploaded or bound
+memory for although the try called them clean. Both must stay at 0.
+
+The scheduler's sink (step 5) is in: `Scheduler::RecordSink`, `OpenSink`, `SpliceSink`,
+`SetForkOpen`.
+
+Still to read and give a read-only form, each a hook the general path runs per draw:
+`EffectsBeforeTargets`, the target memo (`FindTargetMemoized`), `OnGBufferPass`,
+`EffectsAfterTargets`, the upscaler's `OnColorTarget`, `OnSceneColor`, `OnBlendedSceneDraw`,
+`OnSceneComposite` and `OnDraw` (with `UiComposition::ObserveDraw`), `EffectsBeforeResources`,
+`camera_motion->OnConstants`, the texture set hit (`MarkFound`, `Transit`, the bound flags: a
+worker compares target ids with its bound ids instead of setting flags), samplers (the memo's
+LRU touch becomes a note), the begin memo hit (it writes pass state that is already equal),
+vertex and index binds, `EffectsBeforeBind`, object motion, `EffectsAfterDraw`, `HqAoAfterDraw`.
+
+### Step 7: which stage B step comes next, from the 0.9.40 log (2026-11-10)
+
+`notes/native-redo-plan.md` ranks target batching and "vertex and index resolve on stage A"
+before the workers. The 2026-11-09 20:15 run (0.9.40, RTX 5060, Ryzen 5 5600, 2,100-2,200 draws
+a frame, 81-85 FPS) changes that order:
+
+- Stage A costs 3.5-3.9 us a draw and stage B 3.7 us a packet. The GPU command thread's line
+  says 1.2-1.5% idle; its sampled stacks say 13-30% of its time is a wait, most of it on stage
+  B. So the two threads are close to balanced. Moving 0.5-0.7 us from B to A (the plan's B1)
+  would make stage A the limit at about the same frame time: no gain now. Not built.
+- Target batching would skip `PrepareRenderState` for a draw whose target inputs equal the
+  previous draw's. That function is 0.13 us of 3.0 with its timer, and its hooks
+  (`EffectsBeforeTargets`, the point shadow and SSR flushes) depend on the fragment shader, not
+  only on the targets. A few percent of stage B at most. Not built on its own; the clean-only
+  draw function checks the same inputs.
+- Stage B's cost is memory latency spread over many structures (no function above 3%), so a
+  shorter path through the same structures saves little. Workers are the one step where each
+  thread pays its own misses. With stage A's 13-30% of slack, a stage B that is 20% faster or
+  more is worth about +15-20% FPS in these spots, until stage A or the game's main loop limits.
+  Past that, stage A has to get faster too (its pipeline step is 1.1-1.5 us a draw, constants
+  1.1-1.2).
+
+So the workers stay next. `Rasterizer::TryTextureSet` is the read-only texture set hit: the same
+checks as the general path, without the memo revalidation, and "not clean" for a scene proxy or
+an image whose layout or access would change. With the compare on, the log line "clean texture
+sets (compare)" counts them and the differences from the general path.

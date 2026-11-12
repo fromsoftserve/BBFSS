@@ -28,14 +28,17 @@
 namespace Vulkan {
 namespace {
 constexpr u32 MaxParams = 8192;
+static_assert(1 + 4 * MaxParams == Shader::MotionVectors::CaptureParamsCapacity);
 constexpr u32 MaxPositions = 8u << 20;
 constexpr u32 MaxInstances = 8192;
 constexpr u32 MaxInstancesPerDraw = 64;
 constexpr u32 MaxTrianglesPerBlas = 2u << 20;
-constexpr u32 NewTrianglesPerFrame = 500000;
-constexpr u32 RebuiltTrianglesPerFrame = 1000000;
+constexpr u32 NewTrianglesPerFrame = 200000;
+constexpr u32 RebuiltTrianglesPerFrame = 300000;
 constexpr u32 RebuildEveryFrames = 120;
-constexpr u64 UnusedFrames = 600;
+constexpr u32 RebuildSpread = 32;
+constexpr u64 UnusedFrames = 240;
+constexpr u64 KeptFrames = 2;
 // The game culls its sun shadow casters to its own short cascades; the virtual shadow map reaches
 // further, so static casters keep drawing from their world copies long after the game stops
 // submitting them (about an hour at 60 fps); the entry memory cap evicts the oldest first.
@@ -179,6 +182,9 @@ RtShadow::RtShadow(const Instance& instance_, Scheduler& scheduler_, CameraMotio
         std::printf("Ray tracing: off - the camera is not tracked (BB_UPSCALER=none)\n");
         return;
     }
+    if (const char* env = std::getenv("LANTERN_RT_SCENE_MB"); env && env[0]) {
+        blas_limit = u64(std::clamp(std::strtoul(env, nullptr, 10), 64ul, 4096ul)) << 20;
+    }
     if (const char* env = std::getenv("LANTERN_RT_SHADOW_RAYS"); env && env[0]) {
         rays = std::clamp(u32(std::strtoul(env, nullptr, 10)), 1u, 16u);
     }
@@ -253,7 +259,9 @@ void RtShadow::Free(Buffer& buffer) {
 
 void RtShadow::Destroy(Entry& entry) {
     entry_bytes -= std::min(entry_bytes, entry.bytes);
+    blas_bytes -= std::min(blas_bytes, entry.scene_bytes);
     entry.bytes = 0;
+    entry.scene_bytes = 0;
     const auto device = instance.GetDevice();
     const auto allocator = instance.GetAllocator();
     scheduler.DeferOperation([device, allocator, handle = entry.handle, storage = entry.storage,
@@ -265,6 +273,24 @@ void RtShadow::Destroy(Entry& entry) {
             vmaDestroyBuffer(allocator, world.buffer, world.allocation);
         }
     });
+}
+
+bool RtShadow::EnsureWorld(Entry& entry) {
+    if (entry.world.buffer) {
+        return true;
+    }
+    const vk::DeviceSize world_bytes = vk::DeviceSize(entry.vertices) * entry.instances * 16;
+    if (entry_bytes + world_bytes > MaxEntryBytes || !EffectPass::HasRoom(instance, world_bytes)) {
+        return false;
+    }
+    if (!Make(entry.world, world_bytes, false,
+              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+        Free(entry.world);
+        return false;
+    }
+    entry.bytes += world_bytes;
+    entry_bytes += world_bytes;
+    return true;
 }
 
 bool RtShadow::Setup(const ObjectMotion& object_motion) {
@@ -341,7 +367,7 @@ bool RtShadow::Setup(const ObjectMotion& object_motion) {
     };
     const vk::AccelerationStructureBuildGeometryInfoKHR info{
         .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
         .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
         .geometryCount = 1,
         .pGeometries = &geometry,
@@ -362,6 +388,12 @@ bool RtShadow::Setup(const ObjectMotion& object_motion) {
         return false;
     }
     tlas = handle;
+    scratch_align = std::max<u64>(
+        1, instance.GetPhysicalDevice()
+               .getProperties2<vk::PhysicalDeviceProperties2,
+                               vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
+               .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
+               .minAccelerationStructureScratchOffsetAlignment);
     return true;
 }
 
@@ -396,7 +428,7 @@ bool RtShadow::Wanted() const {
 }
 
 bool RtShadow::Complete() const {
-    return Wanted() && !frame_entries.empty() && missed * 4 <= u32(frame_entries.size()) &&
+    return Wanted() && !frame_entries.empty() &&
            camera_motion.PassMatrices().valid;
 }
 
@@ -499,8 +531,12 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
     entry->palette = draw.palette;
     entry->dynamic = draw.skinned;
     entry->mask = mask;
+    entry->shadow = mask == ShadowMask;
     const vk::DeviceSize world_bytes = vk::DeviceSize(entry->vertices) * entry->instances * 16;
-    if (entry_bytes + vk::DeviceSize(entry->triangles) * 96 + world_bytes > MaxEntryBytes ||
+    const vk::DeviceSize world_estimate = entry->shadow ? world_bytes : 0;
+    const bool scene_over = need_scene && blas_bytes + vk::DeviceSize(entry->triangles) * 64 > blas_limit;
+    if (scene_over ||
+        entry_bytes + vk::DeviceSize(entry->triangles) * 96 + world_estimate > MaxEntryBytes ||
         !EffectPass::HasRoom(instance, vk::DeviceSize(entry->triangles) * 96) ||
         !Make(entry->indices, list.size() * sizeof(u32), true, InputUsage)) {
         ++stats.over_budget;
@@ -530,6 +566,8 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
         vk::AccelerationStructureBuildTypeKHR::eDevice, info, entry->triangles);
     entry->scratch = sizes.buildScratchSize;
     entry->update_scratch = sizes.updateScratchSize;
+    entry->scene_bytes = sizes.accelerationStructureSize + list.size() * sizeof(u32);
+    entry->bytes = entry->scene_bytes;
     if (!Make(entry->storage, sizes.accelerationStructureSize, false,
               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR)) {
         Free(entry->indices);
@@ -550,16 +588,12 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
     }
     entry->handle = handle;
     entry->address = device.getAccelerationStructureAddressKHR({.accelerationStructure = handle});
-    // The sun's virtual shadow map draws casters from a lasting world space copy; the shared
-    // positions buffer is reused every frame and static casters are captured only once.
-    if (mask == ShadowMask && EffectPass::HasRoom(instance, world_bytes) &&
-        !Make(entry->world, world_bytes, false,
-              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
-        Free(entry->world);
-    }
-    entry->bytes = list.size() * sizeof(u32) + sizes.accelerationStructureSize +
-                   (entry->world.buffer ? world_bytes : 0);
     entry_bytes += entry->bytes;
+    blas_bytes += entry->scene_bytes;
+    // The shared positions buffer is reused every frame; static VSM casters keep this world copy.
+    if (entry->shadow) {
+        EnsureWorld(*entry);
+    }
     return entry;
 }
 
@@ -586,11 +620,18 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     if (!draw.solid) {
         return 0;
     }
-    // Bloodborne draws every sun shadow caster with a discarding shader; those are kept as
-    // opaque casters (foliage then shadows as solid cards).
-    if (draw.alpha && !draw.shadow_pass) {
-        ++stats.alpha;
-        return 0;
+    // Sun shadow shaders discard even for opaque casters; camera-pass characters also need
+    // their cut-out geometry in the ray traced scene.
+    if (draw.alpha) {
+        const bool character = draw.skinned || draw.palette != 0;
+        if (character) {
+            ++stats.cut_characters;
+        } else {
+            ++stats.alpha;
+        }
+        if (!draw.shadow_pass && !character) {
+            return 0;
+        }
     }
     if (!draw.constants) {
         ++stats.no_camera;
@@ -607,11 +648,20 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         return 0;
     }
     stats.strips += draw.strip ? 1 : 0;
-    u64 key = draw.geometry ^ (draw.shader * 0x9e3779b97f4a7c15ull);
-    key = XXH3_64bits_withSeed(&draw.indices, sizeof(draw.indices), key);
-    const std::array<u32, 4> parts{draw.index_count, draw.first_vertex, draw.instances,
-                                   draw.camera_pass ? 1u : 0u};
-    key = XXH3_64bits_withSeed(parts.data(), sizeof(parts), key);
+    const u8 mask = draw.camera_pass ? CameraMask : ShadowMask;
+    u64 key;
+    if (draw.positions) {
+        const std::array<u64, 4> mesh{draw.positions, draw.indices,
+                                      (u64(draw.index_count) << 32) | draw.first_vertex,
+                                      draw.instances};
+        key = XXH3_64bits(mesh.data(), sizeof(mesh));
+    } else {
+        key = draw.geometry ^ (draw.shader * 0x9e3779b97f4a7c15ull);
+        key = XXH3_64bits_withSeed(&draw.indices, sizeof(draw.indices), key);
+        const std::array<u32, 4> parts{draw.index_count, draw.first_vertex, draw.instances,
+                                       draw.camera_pass ? 1u : 0u};
+        key = XXH3_64bits_withSeed(parts.data(), sizeof(parts), key);
+    }
 
     u32 camera_index = 0;
     for (; camera_index < frame_cameras.size(); ++camera_index) {
@@ -690,7 +740,7 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
             entries.erase(entry_key);
             return 0;
         }
-        slot = MakeEntry(draw, draw.camera_pass ? CameraMask : ShadowMask);
+        slot = MakeEntry(draw, mask);
         if (!slot) {
             entries.erase(entry_key);
             return 0;
@@ -699,22 +749,34 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         slot->mesh = mesh;
         slot->base = key;
         slot->instance = instance_entry;
+        slot->rebuild_every = RebuildEveryFrames + u32(entry_key % RebuildSpread);
         stats.promoted += promote ? 1 : 0;
     }
     Entry& entry = *slot;
     if (entry.seen_frame == frame) {
+        if ((entry.mask & mask) == 0) {
+            entry.mask |= mask;
+            tlas_count = 0;
+            ++stats.merged;
+        }
         return 0;
     }
+    entry.mask = mask;
     // Drawn by the game again: the object is back.
     entry.gone = false;
     entry.gone_streak = 0;
+    if (mask == ShadowMask) {
+        entry.shadow = true;
+        EnsureWorld(entry);
+    }
     entry.rebuilt = entry.rebuilt || shared;
     if (entry.palette != draw.palette) {
         entry.palette = draw.palette;
         entry.dynamic = true;
     }
     const bool needs_data = !entry.built || entry.dynamic || entry.rebuilt ||
-                            (need_scene && !entry.blas);
+                            (need_scene && !entry.blas) ||
+                            (entry.shadow && entry.world.buffer && !entry.copied);
     // Over budget, a caster built before keeps last frame's BLAS and world copy (exact for static
     // props drawn several times, a frame late for moving ones) rather than vanishing.
     const auto skip = [&] {
@@ -730,17 +792,15 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     u32 param = 0;
     if (needs_data) {
         const bool update = need_scene && entry.blas && entry.built && !entry.rebuilt &&
-                            frame - entry.built_frame < RebuildEveryFrames;
+                            frame - entry.built_frame < entry.rebuild_every;
         const bool refresh = entry.rebuilt && entry.built;
         // With no ray tracing scene nothing is built: a caster captured before is only captured
         // again, which must not use up the budget that lets new casters in.
         const bool recapture = !need_scene && entry.built && !refresh;
         const u64 stored = u64(entry.vertices) * entry.instances;
-        const u64 needed =
-            need_scene ? (update ? entry.update_scratch : entry.scratch) + 256 : 0;
+        const u64 needed = need_scene ? (update ? entry.update_scratch : entry.scratch) + 256 : 0;
         const bool over = refresh ? rebuilt_triangles >= RebuiltTrianglesPerFrame
-                                  : !update && !recapture &&
-                                        new_triangles >= NewTrianglesPerFrame;
+                                  : !update && !recapture && new_triangles >= NewTrianglesPerFrame;
         if (positions_used + stored > MaxPositions || scratch_used + needed > ScratchBytes || over) {
             return skip();
         }
@@ -751,11 +811,16 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         builds.push_back({&entry, positions_used, update, to_world});
         positions_used += u32(stored);
         scratch_used += needed;
-        if (refresh) {
-            rebuilt_triangles += entry.triangles;
-            ++stats.shared_builds;
-        } else if (!update && !recapture) {
-            new_triangles += entry.triangles;
+        if (!update) {
+            if (refresh) {
+                rebuilt_triangles += entry.triangles;
+                ++stats.shared_builds;
+            } else if (!recapture) {
+                new_triangles += entry.triangles;
+            }
+            if (need_scene) {
+                stats.built_triangles += entry.triangles;
+            }
         }
         if (!update) {
             entry.built_frame = frame;
@@ -784,12 +849,6 @@ void RtShadow::RecordBuilds() {
     job->ranges.reserve(builds.size());
     job->unproject.reserve(builds.size());
     u64 scratch_at = 0;
-    const u64 scratch_align =
-        instance.GetPhysicalDevice()
-            .getProperties2<vk::PhysicalDeviceProperties2,
-                            vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
-            .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
-            .minAccelerationStructureScratchOffsetAlignment;
     const auto align = [&](u64 v) { return (v + scratch_align - 1) / scratch_align * scratch_align; };
     for (const Build& build : builds) {
         Entry& e = *build.entry;
@@ -946,7 +1005,7 @@ bool RtShadow::PrepareScene() {
             };
             const vk::AccelerationStructureBuildGeometryInfoKHR info{
                 .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
                 .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
                 .dstAccelerationStructure = tlas,
                 .geometryCount = 1,
@@ -1042,7 +1101,7 @@ bool RtShadow::Record(const Inputs& in) {
             casters.clear();
             casters.reserve(frame_entries.size());
             for (Entry* entry : frame_entries) {
-                if (entry->mask == ShadowMask && entry->world.buffer && entry->copied) {
+                if (entry->shadow && entry->world.buffer && entry->copied) {
                     if (const auto* box = vsm->Box(entry->world.address)) {
                         entry->box = *box;
                         entry->has_box = true;
@@ -1061,7 +1120,7 @@ bool RtShadow::Record(const Inputs& in) {
                     volume *= box[k + 3] - box[k] + 2.0f * Pad;
                 }
                 for (const Entry* drawn : frame_entries) {
-                    if (drawn->mask != ShadowMask || !drawn->has_box) {
+                    if (!drawn->shadow || !drawn->has_box) {
                         continue;
                     }
                     float overlap = 1.0f, other = 1.0f;
@@ -1092,7 +1151,7 @@ bool RtShadow::Record(const Inputs& in) {
             }
             for (const auto& item : entries) {
                 Entry* entry = item.second.get();
-                if (entry && entry->mask == ShadowMask && entry->seen_frame != frame &&
+                if (entry && entry->shadow && entry->seen_frame != frame &&
                     !entry->gone && frame - entry->seen_frame <= VsmKeepFrames &&
                     !entry->dynamic && entry->built && entry->copied && entry->world.buffer) {
                     if (const auto* box = vsm->Box(entry->world.address)) {
@@ -1264,16 +1323,20 @@ void RtShadow::OnFrameEnd() {
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
                     "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
                     "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
-                    "%.1f, missed %.1f, kept casters %.1f drawn %.1f culled %.1f verified a frame, "
-                    "%llu declared gone since the last line; %llu prop instances promoted since the "
-                    "last line, %zu candidates; %llu frames fell "
-                    "back to the game's shadows\n",
+                    "%.1f, in both passes %.1f, cut-out characters %.1f, new triangles built %.0f, "
+                    "evicted %.1f a frame; scene %.0f MB of %.0f; missed %.1f, kept casters %.1f "
+                    "drawn %.1f culled %.1f verified a frame, %llu declared gone since the last line; "
+                    "%llu prop instances promoted since the last line, %zu candidates; %llu frames "
+                    "fell back to the game's shadows\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
                     double(stats.alpha) / f, double(stats.not_ortho) / f, double(stats.no_camera) / f,
                     double(stats.unsupported) / f, double(stats.instanced) / f,
                     double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
                     double(stats.shared_builds) / f, double(stats.strips) / f,
+                    double(stats.merged) / f, double(stats.cut_characters) / f,
+                    double(stats.built_triangles) / f, double(stats.evicted) / f,
+                    double(blas_bytes) / 1048576.0, double(blas_limit) / 1048576.0,
                     double(stats.missed) / f, double(stats.vsm_kept) / f,
                     double(stats.vsm_culled) / f, double(stats.vsm_verified) / f,
                     static_cast<unsigned long long>(stats.vsm_gone),
@@ -1289,8 +1352,10 @@ void RtShadow::OnFrameEnd() {
             if (e.instance || e.dynamic || !e.palette || e.gone || e.seen_frame == frame) {
                 continue;
             }
-            const std::array<u64, 3> id{e.base, e.palette, e.mask == CameraMask ? 1u : 0u};
-            if (promoted_now.contains(XXH3_64bits(id.data(), sizeof(id)))) {
+            const std::array<u64, 3> shadow_id{e.base, e.palette, 0u};
+            const std::array<u64, 3> camera_id{e.base, e.palette, 1u};
+            if (promoted_now.contains(XXH3_64bits(shadow_id.data(), sizeof(shadow_id))) ||
+                promoted_now.contains(XXH3_64bits(camera_id.data(), sizeof(camera_id)))) {
                 e.gone = true;
             }
         }
@@ -1302,18 +1367,38 @@ void RtShadow::OnFrameEnd() {
         });
     }
     ++frame;
-    if (frame % 64 == 0) {
+    if (frame % 64 == 0 || blas_bytes > blas_limit - blas_limit / 8) {
         const bool keep_casters = vsm && vsm->Ready() &&
                                   BbSettings::Get().graphics_sun_vsm.load(std::memory_order_relaxed);
+        const auto protected_vsm = [&](const Entry& entry) {
+            return keep_casters && frame - entry.seen_frame <= VsmKeepFrames && entry.shadow &&
+                   !entry.dynamic && !entry.gone && entry.built && entry.copied && entry.world.buffer;
+        };
+        u64 keep_from = frame > UnusedFrames ? frame - UnusedFrames : 0;
+        if (blas_bytes > blas_limit - blas_limit / 8) {
+            u64 bytes = blas_bytes;
+            const u64 target = blas_limit - blas_limit / 4;
+            std::size_t at = 0;
+            std::vector<std::pair<u64, u64>> aged;
+            aged.reserve(entries.size());
+            for (const auto& [key, entry] : entries) {
+                if (!protected_vsm(*entry)) {
+                    aged.emplace_back(entry->seen_frame, entry->scene_bytes);
+                }
+            }
+            std::ranges::sort(aged);
+            for (; at < aged.size() && bytes > target && aged[at].first + KeptFrames < frame; ++at) {
+                bytes -= std::min(bytes, aged[at].second);
+                keep_from = std::max(keep_from, aged[at].first + 1);
+            }
+        }
         std::erase_if(entries, [&](auto& item) {
             const Entry& entry = *item.second;
-            const u64 unused = frame - entry.seen_frame;
-            if (unused <= UnusedFrames ||
-                (keep_casters && unused <= VsmKeepFrames && entry.mask == ShadowMask &&
-                 !entry.dynamic && !entry.gone && entry.built && entry.copied)) {
+            if (entry.seen_frame >= keep_from || protected_vsm(entry)) {
                 return false;
             }
             Destroy(*item.second);
+            ++stats.evicted;
             return true;
         });
     }

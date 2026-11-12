@@ -21,8 +21,8 @@ namespace BloodborneLauncher.Views
                 SmallButton(L.T("Recommend…"), SymbolRegular.Sparkle24, (_, _) => MainWindow.Instance!.OfferBestSettings(firstRun: false)), out _));
 
             Group(L.T("Upscaler"));
-            var fsr411 = Fsr4VkFound() && !Amd();
-            if (Ini.Get("upscaler") is "fsr3" or "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411")) Ini.Set("upscaler", "fsr");
+            var fsr411 = Fsr4VkFound();
+            if (Ini.Get("upscaler") is "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411")) Ini.Set("upscaler", "fsr");
             IniCombo(SymbolRegular.Sparkle24, L.T("Upscaler"), null,
                 fsr411 ? Choices.Upscalers : Choices.Upscalers.Where(c => c.Value != "fsr411").ToArray(), "upscaler", changed: UpdateUpscaler);
             _upscalerHint = (TextBlock)((SettingRow)Body.Children[^1]).Tag;
@@ -79,7 +79,7 @@ namespace BloodborneLauncher.Views
                 L.T("Lower input lag on AMD drivers that offer it; does nothing on other GPUs. Turns itself off until the next start if the driver holds the game too long"),
                 "anti_lag");
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: even pacing (Uncapped)"),
-                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_cap");
+                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_even_pacing");
             _frameGenCapCard = (SettingRow)Body.Children[^1];
 
             // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).
@@ -111,6 +111,9 @@ namespace BloodborneLauncher.Views
                     Ini.Set("ui_4k", v ? "1" : "0");
                     if (v && !UiUpscale.Ready) _ = BuildUi4kAsync();
                 });
+            IniToggle(SymbolRegular.Image24, L.T("2K menu detail"),
+                L.T("Draws upscaled menus at half their built size, using a quarter of the video memory. Turn this on before Build to reduce disk space too"),
+                "ui_2k");
             _ui4kButton = SmallButton(L.T("Build"), SymbolRegular.ArrowDownload24, async (_, _) => await BuildUi4kAsync());
             _ui4kRemove = SmallButton(L.T("Remove"), SymbolRegular.Delete24, (_, _) => RemoveUi4k());
             var ui4kButtons = new StackPanel { Orientation = Orientation.Horizontal };
@@ -202,7 +205,7 @@ namespace BloodborneLauncher.Views
             });
             try
             {
-                await UiUpscale.BuildAsync(GameEnvironment.GameDir(S), progress, _ui4kBuild.Token);
+                await UiUpscale.BuildAsync(GameEnvironment.GameDir(S), progress, _ui4kBuild.Token, Ini.Get("ui_2k", "0") == "1");
                 Ini.Set("ui_4k", "1");
                 Ws.SaveSoon();
                 Ws.Log(L.T("4K menus are ready: they show the next time the game starts"), LogLevel.Good);

@@ -4,6 +4,11 @@ This is an unofficial modified build of:
 Lantern Engine by Awaken (https://github.com/Awakenchan/LanternEngine)
 Fork: https://github.com/fromsoftserve/BBFSS
 
+This build integrates Lantern Engine 0.9.42, including its high-FPS movement,
+controller/keyboard, online, memory and startup fixes. New movement-key mappings
+start unbound. Frame generation even pacing is off by default. Shader caches are
+recompiled when an update changes shader inputs; compatible caches are retained.
+
 GETTING STARTED
 1. Keep this entire folder together in a writable location, such as C:\Games\BBFSS.
 2. Run BBFSS.exe. The launcher includes .NET; no .NET SDK, Python, MSYS2 or

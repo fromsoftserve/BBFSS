@@ -173,7 +173,7 @@ guest flip ─► GPU command thread ──────────────�
 |---|---|---|---|
 | `frame_gen` | `BB_FRAME_GEN` | `off`, `fsr3`, `dlss` | yes once loaded; `dlss` loads at start |
 | `frame_gen_frames` | `BB_FRAME_GEN_FRAMES` | 1-5 generated frames per real one (DLSS) | yes |
-| `frame_gen_cap` | `BB_FRAME_GEN_CAP` | Uncapped only: game at refresh / (generated + 1) | yes |
+| `frame_gen_even_pacing` | `BB_FRAME_GEN_CAP` | Off by default. Uncapped only: on caps the game to refresh / delivered frame-generation multiplier; off lets the game run at its own rate | yes |
 | `reflex` | `BB_REFLEX` | `off`, `on`, `boost` (with Streamline loaded; on while DLSS-G runs) | yes |
 | `render_scale` | `BB_RENDER_SCALE` | 1.0-3.0, the Custom preset's ratio | as presets |
 | `mip_bias` | `BB_MIP_BIAS` | -2.0..1.0 added to the scene's LOD bias | yes |

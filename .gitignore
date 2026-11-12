@@ -1,4 +1,4 @@
-﻿# Build output
+# Build output
 bin/
 obj/
 out/
@@ -8,3 +8,4 @@ dist/
 .vs/
 .idea/
 launcher/windows/install.txt
+engine/tools/isa-scan/target/

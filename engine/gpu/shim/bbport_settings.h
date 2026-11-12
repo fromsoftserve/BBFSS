@@ -80,9 +80,10 @@ inline constexpr int EffectVolumetricLight = 16;
 inline constexpr int EffectPointFog = 17;
 inline constexpr int EffectPointShadows = 18;
 inline constexpr int EffectRayTracing = 19;
-// Ray traced lighting needs its device extensions and position capture from the start.
-inline constexpr bool EffectIsLive(int effect) {
-    return effect >= EffectContactShadows && effect != EffectRayTracing;
+// Ray traced lighting needs its device extensions and position capture from the start when enabled.
+inline constexpr bool EffectIsLive(int effect) { return effect >= EffectContactShadows; }
+inline constexpr bool EffectChangeNeedsRestart(int effect, bool now, bool at_start) {
+    return now != at_start && (!EffectIsLive(effect) || (effect == EffectRayTracing && now));
 }
 inline constexpr int OutputWidths[] = {1280,1600,1920,2560,3840,2560,3440,3840,3840,5120,5120,7680,0,0};
 inline constexpr int OutputHeights[] = {720,900,1080,1440,2160,1080,1440,1600,1080,1440,2160,2160,0,0};
@@ -144,7 +145,7 @@ struct Values {
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     std::atomic<int> frame_gen{FrameGenOff};
-    std::atomic<bool> frame_gen_cap{true};
+    std::atomic<bool> frame_gen_cap{false};
     std::atomic<bool> frame_gen_active{false};
     std::atomic<float> frame_gen_shown_fps{0.0f}, frame_gen_game_fps{0.0f};
     std::atomic<int> frame_gen_multiplier{2};

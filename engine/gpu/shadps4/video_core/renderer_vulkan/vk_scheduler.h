@@ -790,8 +790,43 @@ public:
     }
 
     /// Returns the current pipeline dynamic state tracking.
+    struct RecordSink {
+        std::vector<std::unique_ptr<RecordChunk>> full;
+        std::unique_ptr<RecordChunk> chunk;
+        DynamicState dynamic_state;
+    };
+    static inline thread_local RecordSink* thread_sink = nullptr;
+
+    void OpenSink(RecordSink& sink) {
+        if (!sink.chunk) {
+            sink.chunk = AcquireChunk();
+        }
+        sink.dynamic_state.Invalidate();
+    }
+
+    void SpliceSink(RecordSink& sink) {
+        if (!CurrentChunk().Empty()) {
+            RetireChunk();
+        }
+        for (auto& chunk : sink.full) {
+            segment_bytes += chunk->Size();
+            full_chunks.push_back(std::move(chunk));
+        }
+        sink.full.clear();
+        if (sink.chunk && !sink.chunk->Empty()) {
+            segment_bytes += sink.chunk->Size();
+            full_chunks.push_back(std::move(sink.chunk));
+        }
+        dynamic_state = sink.dynamic_state;
+    }
+
+    void SetForkOpen(bool open) noexcept {
+        fork_open = open;
+    }
+
     DynamicState& GetDynamicState() {
-        return dynamic_state;
+        RecordSink* sink = thread_sink;
+        return sink ? sink->dynamic_state : dynamic_state;
     }
 
     /// Returns the current command buffer for recording on the calling thread. With threaded
@@ -851,6 +886,14 @@ public:
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>
     void Record(Func&& func) {
+        if (RecordSink* sink = thread_sink) [[unlikely]] {
+            if (!sink->chunk->Push(std::forward<Func>(func))) {
+                RetireSinkChunk(*sink);
+                const bool pushed = sink->chunk->Push(std::forward<Func>(func));
+                ASSERT(pushed);
+            }
+            return;
+        }
         ProducerScope producer{*this, "Record"};
         if (workers.empty() || direct_mode) {
             func(current_cmdbuf);
@@ -914,6 +957,14 @@ public:
     /// Makes room for `bytes` of RecordData() plus the command that uses them in the current
     /// chunk: data and command must share a chunk, which is recycled once executed.
     void ReserveRecordData(size_t bytes) {
+        if (RecordSink* sink = thread_sink) [[unlikely]] {
+            if (!sink->chunk->ReserveData(bytes)) {
+                RetireSinkChunk(*sink);
+                const bool reserved = sink->chunk->ReserveData(bytes);
+                ASSERT_MSG(reserved, "Cannot reserve {} bytes in an empty recording chunk", bytes);
+            }
+            return;
+        }
         ProducerScope producer{*this, "ReserveRecordData"};
         if (!IsRecordingDeferred()) {
             return;
@@ -930,6 +981,17 @@ public:
     /// been recorded (the same chunk). With threaded recording off, returns `data` itself.
     template <typename T>
     std::span<const T> RecordData(std::span<const T> data) {
+        if (RecordSink* sink = thread_sink) [[unlikely]] {
+            if (data.empty()) {
+                return data;
+            }
+            const size_t bytes = data.size_bytes();
+            ReserveRecordData(bytes + alignof(T));
+            auto* dst = static_cast<T*>(sink->chunk->Allocate(bytes, alignof(T)));
+            ASSERT_MSG(dst, "Cannot allocate {} recorded bytes, alignment {}", bytes, alignof(T));
+            std::memcpy(dst, data.data(), bytes);
+            return {dst, data.size()};
+        }
         ProducerScope producer{*this, "RecordData"};
         if (!IsRecordingDeferred() || data.empty()) {
             return data;
@@ -1041,6 +1103,10 @@ public:
     [[nodiscard]] static bool FenceOrderScoped();
     [[nodiscard]] static bool FenceOrderPossible();
 
+    [[nodiscard]] u64 PassesBegun() const noexcept {
+        return passes_begun;
+    }
+
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
         return is_rendering && render_state == state;
@@ -1053,6 +1119,9 @@ public:
 
     /// CommandBuffer() calls that waited for a recording thread (BB_FRAME_STATS).
     static inline std::atomic<u64> direct_recordings{0};
+    static inline std::atomic<u64> producer_wakes{0};
+    static inline std::atomic<u64> peer_wakes_done{0};
+    static constexpr u32 NoPeer = ~0u;
     /// Command buffer segments submitted (BB_FRAME_STATS: segments per submission).
     static inline std::atomic<u64> recorded_segments{0};
     static inline std::atomic<u64> recorded_submissions{0};
@@ -1108,6 +1177,8 @@ private:
         std::atomic<size_t> queued{0};                  ///< queue.size() for lock-free polling
         bool busy = false;     ///< running a chunk (guarded by recorder_mutex)
         bool sleeping = false; ///< waiting on cv (guarded by recorder_mutex)
+        u32 wake_next = NoPeer;
+        bool peer_wakes = false;
         std::condition_variable_any cv;
         std::jthread thread;
     };
@@ -1119,6 +1190,13 @@ private:
     void SubmitAsync(SubmitInfo& info);
 
     std::unique_ptr<RecordChunk> AcquireChunk();
+
+    void RetireSinkChunk(RecordSink& sink) {
+        sink.full.push_back(std::move(sink.chunk));
+        sink.chunk = AcquireChunk();
+    }
+
+    bool fork_open = false;
 
     /// Moves the full current chunk aside; a new one takes its place (swapped in: never null).
     void RetireChunk() {
@@ -1239,6 +1317,7 @@ private:
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     bool is_rendering = false;
+    u64 passes_begun = 0;
     // bbport: threaded recording. Commands go into chunks of the current segment; segments are
     // recorded in parallel, each into its own command buffer, and a submission runs their
     // command buffers in order. Guest memory copies and fence signals go into ordered chunks,

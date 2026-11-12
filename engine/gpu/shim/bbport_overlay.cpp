@@ -17,6 +17,7 @@
 
 #include <SDL3/SDL.h>
 #include "../bbnet/room/room_service.h"
+#include "../bbnet/thd/thd.h"
 #include "bbport_menu_i18n.h"
 #include "bbport_settings.h"
 #include "bbport_usage.h"
@@ -991,9 +992,16 @@ void PictureSection() {
         const auto& effect = BbSettings::Effects[e];
         if (const char* label = Item(effect.label, effect.label_ru)) {
             Checkbox(label, s.effects[e]);
-            if (!BbSettings::EffectIsLive(e)) {
-                Hint(BbSettings::MenuText("Applied when the game restarts.", "Применяется после перезапуска игры."));
-                if (s.effects[e] != s.startup_effects[e]) {
+            if (e == BbSettings::EffectRayTracing && !s.startup_effects[e]) {
+                Hint(BbSettings::MenuText("Turning it on applies when the game restarts; turning it off applies at once.",
+                                          "Включение применяется после перезапуска игры, выключение сразу."));
+            }
+            if (!BbSettings::EffectIsLive(e) ||
+                (e == BbSettings::EffectRayTracing && !s.startup_effects[e])) {
+                if (!BbSettings::EffectIsLive(e)) {
+                    Hint(BbSettings::MenuText("Applied when the game restarts.", "Применяется после перезапуска игры."));
+                }
+                if (BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e])) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
                                                                    "Применяется после перезапуска игры."));
@@ -2580,7 +2588,7 @@ void Menu() {
         if (e == BbSettings::EffectSsao || e == BbSettings::EffectGtao) {
             continue;
         }
-        restart |= !BbSettings::EffectIsLive(e) && s.effects[e] != s.startup_effects[e];
+        restart |= BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e]);
     }
     restart |= Vulkan::OptiScaler::Detect().loaded &&
                (s.optiscaler_compat != s.startup_optiscaler.compat ||
@@ -2712,6 +2720,27 @@ void RelayNote() {
                      ImGuiWindowFlags_NoFocusOnAppearing);
     ImGui::TextUnformatted(BbSettings::MenuText("Connected to the Lantern co-op relay (Frankfurt), hosted by 1337 Hosting",
                                                 "Подключено к серверу совместной игры Lantern (Франкфурт), хостинг 1337 Hosting"));
+    ImGui::End();
+}
+
+bool RefusalNoteActive() {
+    std::string text;
+    return BbThd::RefusalNotice(text);
+}
+
+void RefusalNote() {
+    std::string text;
+    if (!BbThd::RefusalNotice(text)) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 24.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, viewport->WorkPos.y + pad),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##refusal_note", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(text.c_str());
     ImGui::End();
 }
 
@@ -2875,11 +2904,12 @@ void FpsCounter() {
     char text[128];
     int n = 0;
     if (s.show_fps_rate) {
-        n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
-                           frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
-        if (s.frame_gen_active) {
-            n += std::snprintf(text + n, sizeof(text) - n, " (game %.0f, frame gen 2x)",
-                               s.frame_gen_game_fps.load());
+        const float game = s.frame_gen_game_fps.load(), shown = s.frame_gen_shown_fps.load();
+        if (s.frame_gen_active && game > 1.0f && shown >= game) {
+            n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS (game %.0f, frame gen %.1fx)", shown, game, shown / game);
+        } else {
+            n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
+                               frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
         }
     }
     if (s.show_fps_frame_time) {
@@ -3593,7 +3623,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || CompileNoteActive() || RelayNoteActive() || SummonNoteActive() || AnnouncementActive() || ReconnectNoteActive() || !ShownPartyLines().empty() || coop_open ||
+    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || CompileNoteActive() || RelayNoteActive() || RefusalNoteActive() || SummonNoteActive() || AnnouncementActive() || ReconnectNoteActive() || !ShownPartyLines().empty() || coop_open ||
                            !BbEngine::OnlineFixes::PartyRows().empty() || BbEngine::OnlineFixes::Spectating() || BbFaceShot::JustTaken());
 }
 
@@ -4002,6 +4032,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (!menu_open && RelayNoteActive()) {
         RelayNote();
+    }
+    if (!menu_open && RefusalNoteActive()) {
+        RefusalNote();
     }
     if (!menu_open) {
         SummonNote();

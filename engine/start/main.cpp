@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "gpu_cache_stamp.h"
 #include "assets.h"
 #include "common.h"
 #include "elf.h"
@@ -9,6 +10,7 @@
 
 #include <windows.h>
 
+#include <cpuid.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -70,6 +72,8 @@ bool RecompileGpuCache(const fs::path& cache, const fs::path& recompiler) {
         std::error_code e;
         if (!entry.is_directory(e) || !fs::is_regular_file(entry.path() / "profile.bin", e)) continue;
         std::string output;
+        Log("%s", GpuCacheStamp::RecompileNotice(Utf8(entry.path().filename())).c_str());
+        std::fflush(stdout);
         const auto start = std::chrono::steady_clock::now();
         const int code = RunProgram(recompiler, {L"--recompile-cache", entry.path().native()}, &output);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -184,14 +188,16 @@ void SeedGpuCache(const fs::path& cache, const fs::path& catalogs, const fs::pat
 }
 
 void ResetStaleGpuCache(const fs::path& cache, const std::string& identity, const std::string& legacy,
-                        const fs::path& recompiler) {
+                        const std::vector<std::string>& accepted, const fs::path& recompiler) {
     const fs::path stamp = cache / "engine.txt";
     std::error_code error;
     try {
         const std::string stamped = Trim(ReadText(stamp));
-        if (identity.empty() || stamped == identity) return;
-        if (!legacy.empty() && stamped == legacy) {
+        const auto action = GpuCacheStamp::Decide(stamped, identity, legacy, accepted);
+        if (action == GpuCacheStamp::Action::Keep) return;
+        if (action == GpuCacheStamp::Action::Restamp) {
             WriteText(stamp, identity + "\n");
+            Log("GPU cache: kept (%s: the same shaders as %s)", identity.c_str(), stamped.c_str());
             return;
         }
     } catch (const Error&) {
@@ -279,7 +285,46 @@ int RunProbe(const fs::path& probe, const std::vector<std::wstring>& arguments, 
     return int(code);
 }
 
+bool CpuNeedsIsaRewrite() {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid(1, &a, &b, &c, &d)) return true;
+    const bool movbe = (c & bit_MOVBE) != 0;
+    if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return true;
+    const bool bmi1 = (b & bit_BMI) != 0;
+    if (!__get_cpuid(0x80000001u, &a, &b, &c, &d)) return true;
+    const bool lzcnt = (c & bit_LZCNT) != 0;
+    return !(movbe && bmi1 && lzcnt);
+}
+
+void WaitForPreviousStart() {
+    const auto previous = Env("BB_START_PID");
+    SetEnv("BB_START_PID", std::to_string(GetCurrentProcessId()));
+    if (!previous) return;
+    const DWORD pid = DWORD(std::strtoul(previous->c_str(), nullptr, 10));
+    if (!pid || pid == GetCurrentProcessId()) return;
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return;
+    wchar_t name[32768];
+    DWORD size = DWORD(std::size(name));
+    FILETIME theirs{}, ours{}, unused{};
+    const bool older = GetProcessTimes(process, &theirs, &unused, &unused, &unused) &&
+                       GetProcessTimes(GetCurrentProcess(), &ours, &unused, &unused, &unused) &&
+                       CompareFileTime(&theirs, &ours) < 0;
+    const bool same = older && QueryFullProcessImageNameW(process, 0, name, &size) &&
+                      _wcsicmp(fs::path(std::wstring(name, size)).filename().c_str(), SelfPath().filename().c_str()) == 0;
+    if (same) {
+        const auto start = std::chrono::steady_clock::now();
+        const DWORD result = WaitForSingleObject(process, 60000);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        Log(result == WAIT_OBJECT_0 ? "Restart: the previous start ended (waited %.1f s)"
+                                    : "Restart: the previous start is still running after %.1f s; starting anyway",
+            seconds);
+    }
+    CloseHandle(process);
+}
+
 int Main(std::vector<std::wstring> arguments) {
+    WaitForPreviousStart();
     const Folders folders = Locate();
     std::optional<std::string> game = Env("BB_GAME_DIR");
     if (arguments.size() > 1 && arguments[0] == L"--game-dir") {
@@ -297,6 +342,11 @@ int Main(std::vector<std::wstring> arguments) {
         const auto package = nlohmann::json::parse(ReadText(folders.package / "package.json"));
         const std::string engine = package.value("engine", "");
         std::string identity = engine, legacy;
+        std::vector<std::string> accepted;
+        try {
+            accepted = GpuCacheStamp::Accepted(ReadText(out / "gpu-cache.accepted.id"));
+        } catch (const Error&) {
+        }
         try {
             const std::string id = Trim(ReadText(out / "gpu-cache.id"));
             if (!id.empty()) identity = "gpu " + id;
@@ -304,7 +354,7 @@ int Main(std::vector<std::wstring> arguments) {
             if (!old.empty()) legacy = "gpu " + old;
         } catch (const Error&) {
         }
-        ResetStaleGpuCache(Path(Env("BB_GPU_USER_DIR", "")) / "cache", identity, legacy, out / "bb-shader-lab.exe");
+        ResetStaleGpuCache(Path(Env("BB_GPU_USER_DIR", "")) / "cache", identity, legacy, accepted, out / "bb-shader-lab.exe");
     } catch (const std::exception&) {
     }
     fs::create_directories(out);
@@ -424,10 +474,36 @@ int Main(std::vector<std::wstring> arguments) {
             Utf8(original).c_str(), missing.c_str());
         return 1;
     }
+    {
+        int lost = 0;
+        for (fs::recursive_directory_iterator it(merged / "dvdroot_ps4" / "map", fs::directory_options::skip_permission_denied, error), end;
+             !error && it != end; it.increment(error)) {
+            if (!it->is_regular_file(error)) continue;
+            const std::string name = Utf8(it->path());
+            if (name.size() < 4 || name.compare(name.size() - 3, 3, "bhd")) continue;
+            const fs::path data = fs::path(name.substr(0, name.size() - 3) + "bdt");
+            std::error_code none;
+            if (fs::is_regular_file(data, none) && fs::file_size(data, none) > 0) continue;
+            if (++lost <= 8)
+                Log("Game check: %s is missing or empty: the game copy is incomplete. Its area loads without textures or "
+                    "never finishes loading. Copy the game again from your dump (base game plus the 1.09 update).",
+                    Utf8(data).c_str());
+        }
+        if (lost > 8) Log("Game check: %d of the game's map archives are missing in all", lost);
+    }
     SetEnv("BB_GAME_MERGED", Utf8(merged));
 
     try {
         PrepareImage(merged, out, folders.engine);
+        if (CpuNeedsIsaRewrite()) {
+            std::string isa_scan_output;
+            const int isa_scan_status = RunProgram(out / "bb-isa-scan.exe",
+                                                   {(out / "boot-linked.bin").native(), out.native()},
+                                                   &isa_scan_output);
+            if (isa_scan_status != 0)
+                throw Error("ISA scan failed (exit " + std::to_string(isa_scan_status) + "): " + Trim(isa_scan_output));
+            if (!Trim(isa_scan_output).empty()) Log("%s", Trim(isa_scan_output).c_str());
+        }
     } catch (const GameCheckError& e) {
         Log("\nUnsupported game files: %s\nSet BB_SKIP_GAME_CHECK=1 to start anyway.", e.what());
         return 2;
@@ -473,6 +549,10 @@ int Main(std::vector<std::wstring> arguments) {
             if (fs::is_regular_file(ui / "complete", ui_error)) {
                 SetEnv("BB_UI_4K", Utf8(ui));
                 Log("Engine: 4K menu textures from %s", Utf8(ui).c_str());
+                if (Setting(settings, "ui_2k") == "1") {
+                    SetEnv("BB_UI_2K", "1");
+                    Log("Engine: menu textures drawn at 2K detail (half the built size, a quarter of the video memory)");
+                }
             }
         }
         if (is_on("change_appearance") || is_on("camera_controls") || is_on("rebirth") || is_on("graphics_controls") ||
@@ -519,6 +599,28 @@ int Main(std::vector<std::wstring> arguments) {
             }
         } catch (const std::exception& e) {
             Log("Engine: player lamp toggle skipped: %s", e.what());
+        }
+    }
+    if (is_on("jump_key")) {
+        try {
+            std::string note;
+            if (const auto fixed = PrepareJumpKey(merged, data / "engine-assets", note)) {
+                file_fixes.push_back(*fixed);
+                Log("Engine: jump on its own key: L3 jumps, sprinting or not, and the dodge button always dodges");
+            } else {
+                Log("Engine: jump on its own key: %s", note.c_str());
+            }
+        } catch (const std::exception& e) {
+            Log("Engine: jump on its own key skipped: %s", e.what());
+        }
+    }
+    {
+        std::string toggles = Setting(settings, "toggle_keys").value_or("");
+        if (is_on("sprint_toggle")) toggles += ",sprint";
+        if (Trim(toggles).empty()) UnsetEnv("BB_TOGGLE_KEYS");
+        else {
+            SetEnv("BB_TOGGLE_KEYS", toggles);
+            Log("Engine: keys that toggle: %s", toggles.c_str());
         }
     }
     if (!file_fixes.empty()) {

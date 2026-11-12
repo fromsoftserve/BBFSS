@@ -54,7 +54,7 @@ namespace BloodborneLauncher.Core
         public const string Diagnostics = "Diagnostics and logs";
         public const string DirectVulkan = "Direct rendering";
 
-        public static readonly string[] Groups = { Graphics, Performance, Input, Sound, Fixes };
+        public static readonly string[] Groups = { Graphics, Performance, Input, Online, Sound, Fixes };
 
         // ---------------------------------------------------------------- building the list
 
@@ -68,6 +68,9 @@ namespace BloodborneLauncher.Core
         /// <summary>A switch that is on unless it is 0.</summary>
         private static EngineSwitch OnUnless0(string env, string group, string title, string hint) =>
             Toggle(env, group, title, hint, on: true);
+
+        private static EngineSwitch OffUnless1(string env, string group, string title, string hint) =>
+            Toggle(env, group, title, hint, on: false);
 
         private static EngineSwitch Number(string env, string group, string title, string hint, double value, double min, double max,
             double step, string unit = "") =>
@@ -90,11 +93,11 @@ namespace BloodborneLauncher.Core
 
         public static readonly IReadOnlyList<EngineSwitch> All = new[]
         {
-            OnUnless0("LANTERN_GX_DRAWS", Performance, L.T("Native renderer: draws"), L.T("Lantern's own resource binds. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. New in beta 31; turn off if something draws wrong or crashes")),
+            OffUnless1("LANTERN_GX_DRAWS", Performance, L.T("Native renderer: binds"), L.T("Lantern's own resource binds. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. Needs Native renderer: pipelines. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
             OnUnless0("LANTERN_READ_FILTER", Performance, L.T("Native renderer: read tracking"), L.T("Watches fewer memory reads. Turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_LIFTER", Performance, L.T("Native shader compiler"), L.T("Lantern's own shader compiler. Switching recompiles every shader once. Turn off if something draws wrong or crashes")),
             Pick("BB_GPU_ID", Graphics, L.T("Graphics card"),
@@ -141,6 +144,13 @@ namespace BloodborneLauncher.Core
 
 
 
+            OffUnless1("BB_SEAMLESS_DEATHS", Online, L.T("Seamless co-op: spectate and party wipe"),
+                L.T("Experimental, never run with two hunters. In a boss fight a hunter who dies watches the others through a spectator ") +
+                L.T("camera, and a party wipe brings everyone back at the lamp without a loading screen. Off: a fallen hunter stays down ") +
+                L.T("until the boss dies, and a party wipe sends everyone back to the lamp through a loading screen")),
+            OffUnless1("LANTERN_CAMERA_TIMING", Input, L.T("Camera follows the frame time"),
+                L.T("Above 30 FPS the game's camera turns, follows and eases once per frame, so with a controller it moves faster ") +
+                L.T("and less evenly the higher the frame rate. On: those steps follow the frame time. Off: the game's own camera")),
             Text("BB_GAMEPAD", Input, L.T("Preferred gamepad"),
                 L.T("Part of a controller's name (DualSense, Xbox, 8BitDo...) or its SDL GUID: that one is used when several are ") +
                 L.T("connected. Empty: the pad you use takes over"), L.T("DualSense")),
