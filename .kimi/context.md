@@ -93,5 +93,9 @@
 
 ## Development-only cleanup and test build (2026-11-12)
 - User chose development-only cleanup, preserving optional support logs, FPS, crash reporting and GPU profiling. Removed occlusion measure-only/no-GPU ablations, run/constant/ring census and compare-only renderer paths, GxTrace/GroundTrace, their tests and stale parallel-stageb instrumentation docs. Batch switches remain functional on/off only; owned-buffer/vertex memo code remains.
-- Cleanup is uncommitted on main beta (merge `92b4e3b`); user's Paths/Workspace edits remain uncommitted. Full build and native tests passed after cleanup; settings, occlusion, frame-rate, effect pipelines, GTAO and RT pipeline tests passed on RTX 4060 Ti.
-- Test package: `release/beta-2026-11-12-lantern-0.9.42` (version `0.9.10-test`). Required engine tools, cache allowlist, source archive and DLSS verified; optional FSR4 asset packs were absent. Launched with real game/save and no diagnostic env switches; `logs/bbfss-clean-test-2026-11-12.log` reached Vulkan presenter and entered game. Left running for user testing.
+- Cleanup committed as `78c7449`; launcher settings import committed separately as `31320d7`. Full build and native tests passed after cleanup; settings, occlusion, frame-rate, effect pipelines, GTAO and RT pipeline tests passed on RTX 4060 Ti.
+- Test package launched with real game/save and no diagnostic env switches; `logs/bbfss-clean-test-2026-11-12.log` reached gameplay and the process later exited 0.
+
+## Beta release published (2026-11-12)
+- Release: https://github.com/fromsoftserve/BBFSS/releases/tag/beta-2026-11-12 (prerelease, public page and asset verified). Asset: `BBFSS-beta-2026-11-12-win64.zip`, 195501239 bytes, SHA-256 `d2fe2add0a574028a92c10f83f6d4ab1762c33af5c4e6aa372824a8d846e344b`.
+- Release source commit `78c74499e7235d7aaacccaf688c1714f025bd9ba`; package metadata `source_modified=false`. Final package folder `release/beta-2026-11-12/BBFSS`, ZIP in ignored root `out/`. Beta and annotated tag were pushed before release creation.
