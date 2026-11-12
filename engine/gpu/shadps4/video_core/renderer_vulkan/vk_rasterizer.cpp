@@ -5,10 +5,7 @@
 #include <dlfcn.h>
 #endif
 #include "bbport_platform.h"
-#include "engine/gx_trace.h"
 #include "engine/gx_records.h"
-#include "engine/const_census.h"
-#include "engine/ring_constants.h"
 #include "engine/gx_objects.h"
 #include <bit>
 #include <map>
@@ -77,21 +74,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
-    const_census = BbEngine::ConstCensus::Start();
-    ring_constants = BbEngine::RingConstants::Start();
     own_buffers_mode = BbEngine::Batch::Switch("LANTERN_GX_OWN_BUFFERS");
-    if (own_buffers_mode != BbEngine::Batch::Off) {
-        own_buffers_step = BbEngine::Batch::Register("vertex buffers from sealed GX buffers", own_buffers_mode);
-        own_buffers_share = BbEngine::Batch::Register(
-            "draws whose vertex buffers are all sealed GX buffers (differ = not covered)", own_buffers_mode);
-    }
     vertex_memo_mode = BbEngine::Batch::Switch("LANTERN_VERTEX_MEMO");
-    if (vertex_memo_mode != BbEngine::Batch::Off) {
-        vertex_memo_step = BbEngine::Batch::Register("buffer bind memo (S4)", vertex_memo_mode);
-        vertex_memo_races = BbEngine::Batch::Register(
-            "buffer bind memo (S4), uploads after a guest write landed between the memo's check and the general lookup",
-            vertex_memo_mode);
-    }
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
@@ -896,24 +880,11 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
     return tid == liverpool->GetGpuCommandProcessorThreadId();
 }
 
-void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size, u8 writer) {
+void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     if (!draw_pipe || !size) {
         return;
     }
     BbEngine::GxObjects::NoteGpuWrite(address, size);
-    if (ring_constants == BbEngine::RingConstants::Compare && !gx_ring.Known()) {
-        u64 bytes = 0;
-        BbEngine::GxObjects::UploadArena(&gx_ring.base, &bytes);
-        gx_ring.end = gx_ring.base + bytes;
-    }
-    if (ring_constants == BbEngine::RingConstants::Compare && gx_ring.Known() &&
-        BbEngine::RingConstants::Overlaps(address, size, gx_ring.base, gx_ring.end - gx_ring.base)) {
-        if (ring_writes.size() >= 65536) {
-            ring_writes.pop_front();
-        }
-        ring_writes.push_back({address, size, draw_pipe->NextPacket(),
-                               static_cast<BbEngine::RingConstants::Writer>(writer)});
-    }
     // Numbered by packet (a position, the packet's start, counted as reached once the packet
     // before it had run, while this one was not recorded yet), in hashed granules: a lookup per
     // constant binding instead of a scan of the writes (a list scan was ~5% of this thread).
@@ -1137,12 +1108,6 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
-        if (const_census && !source) {
-            BbEngine::ConstCensus::Range ring;
-            BbEngine::GxObjects::UploadArena(&ring.base, &ring.bytes);
-            BbEngine::ConstCensus::Count(
-                BbEngine::ConstCensus::Classify(address, ring, BbEngine::GxObjects::BufferAt), size);
-        }
         u32 version;
         if (!source && num_versions && version_of(address, version)) {
             const bool hashed = (BbEngine::GxRecords::Compared() || (++constant_checks & 63) == 0) &&
@@ -1171,58 +1136,6 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         const VAddr address = vsharp.base_address;
         if (address == 0 || vsharp.GetSize() == 0) {
             continue;
-        }
-        if (ring_constants != BbEngine::RingConstants::Off && !desc.is_written && !hle_candidate) {
-            const u64 raw = vsharp.GetSize();
-            if (!gx_ring.Known()) {
-                u64 bytes = 0;
-                BbEngine::GxObjects::UploadArena(&gx_ring.base, &bytes);
-                gx_ring.end = gx_ring.base + bytes;
-            }
-            if (raw <= VideoCore::BufferCache::STREAM_THRESHOLD && gx_ring.Holds(address, raw)) {
-                if (ring_constants == BbEngine::RingConstants::On) {
-                    if (const auto offset = constant_ring->Allocate(raw, alignment)) {
-                        BbEngine::RingConstants::Copy(constant_ring->Data(*offset), address, raw);
-                        constant_ring->Flush(*offset, raw);
-                        out.push_back({index, static_cast<u32>(raw), *offset, address});
-                        continue;
-                    }
-                } else {
-                    namespace Ring = BbEngine::RingConstants;
-                    Ring::Note(Ring::Compared);
-                    const u64 clamped = memory->ClampRangeSize(address, raw);
-                    if (clamped != raw) {
-                        Ring::Note(Ring::Clamped);
-                    }
-                    if (buffer_cache.IsRegionGpuModified(address, clamped)) {
-                        Ring::Note(Ring::GpuModified);
-                    }
-                    if (PendingWriteOverlaps(address, clamped)) {
-                        Ring::Note(Ring::PendingWrite);
-                        while (!ring_writes.empty() && draw_pipe->ReachedPacket(ring_writes.front().packet)) {
-                            ring_writes.pop_front();
-                        }
-                        u32 exact = 0;
-                        for (const auto& write : ring_writes) {
-                            if (!draw_pipe->ReachedPacket(write.packet) &&
-                                Ring::Overlaps(write.address, write.size, address, raw)) {
-                                exact |= 1u << write.writer;
-                            }
-                        }
-                        for (u32 w = 0; w < Ring::kWriters; ++w) {
-                            if (exact >> w & 1) {
-                                Ring::Note(static_cast<Ring::Counter>(Ring::ExactFence + w));
-                            }
-                        }
-                    }
-                    thread_local std::array<u8, VideoCore::BufferCache::STREAM_THRESHOLD> fast, general;
-                    Ring::Copy(fast.data(), address, raw);
-                    memory->CopySparseMemory(address, general.data(), clamped);
-                    if (clamped != raw || std::memcmp(fast.data(), general.data(), raw) != 0) {
-                        Ring::Note(Ring::BytesDiffer);
-                    }
-                }
-            }
         }
         const u64 size = memory->ClampRangeSize(address, vsharp.GetSize());
         if (desc.is_written) {
@@ -1581,12 +1494,8 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     BB_SECTION(Packet);
     auto& self = *static_cast<Rasterizer*>(context);
     auto& dc = self.Dc();
-    const bool census_on = CensusWanted();
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         BB_SECTION(Task);
-        if (census_on) {
-            self.CensusEndRun(RunCensus::CutTask);
-        }
         self.buffer_cache.NewPacket();
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
         if (BbSections::Enabled()) {
@@ -1729,9 +1638,6 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     stage_regs = &regs;
     dc.pipe_cb_extent = packet.cb_extent;
     dc.pipe_db_extent = packet.db_extent;
-    if (census_on && (packet.kind == PacketKind::Special || cs || indirect)) {
-        self.CensusEndRun(cs ? RunCensus::CutDispatch : RunCensus::CutPacket);
-    }
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
         FrameCapture::Poll();
@@ -1751,15 +1657,8 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                                 packet.is_indexed, *indirect);
     } else {
         SwapGxRegisters(regs, gx_swapped.data(), gx_count);
-        if (census_on) {
-            const auto mark = self.CensusBegin();
-            self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
-                            packet.is_indexed, packet.index_offset);
-            self.CensusDraw(mark);
-        } else {
-            self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
-                            packet.is_indexed, packet.index_offset);
-        }
+        self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
+                        packet.is_indexed, packet.index_offset);
         SwapGxRegisters(regs, gx_swapped.data(), gx_count);
     }
     Shader::Info::num_ud_snapshots = 0;
@@ -2007,85 +1906,6 @@ u32 Rasterizer::PrefetchDraw(const u8* data, u32 size) {
     return lines;
 }
 
-namespace {
-void CensusAdd(std::atomic<u64>& counter, u64 value) {
-    counter.store(counter.load(std::memory_order_relaxed) + value, std::memory_order_relaxed);
-}
-}
-
-bool Rasterizer::CensusWanted() {
-    static const bool wanted = [] {
-        const char* env = std::getenv("LANTERN_RUN_CENSUS");
-        return env && env[0] ? env[0] != '0' : BbSections::Enabled();
-    }();
-    return wanted;
-}
-
-Rasterizer::CensusMark Rasterizer::CensusBegin() {
-    auto& dc = Dc();
-    const auto& paths = VideoCore::BufferCache::obtain_paths;
-    dc.census_other = false;
-    VideoCore::BufferCache::try_dirty = false;
-    return {scheduler.PassesBegun(),
-            paths[5],
-            paths[1] + paths[4],
-            paths[2],
-            texture_set_misses + texture_set_revalidated,
-            begin_memo_misses,
-            __rdtsc()};
-}
-
-void Rasterizer::CensusEndRun(u32 cut) {
-    auto& c = census;
-    if (!c.run) {
-        return;
-    }
-    CensusAdd(c.cuts[cut], 1);
-    CensusAdd(c.runs, 1);
-    CensusAdd(c.lengths[c.run < 8 ? 0 : c.run < 16 ? 1 : c.run < 64 ? 2 : 3], c.run);
-    if (c.run >= 8) {
-        CensusAdd(c.long_runs, 1);
-        CensusAdd(c.long_draws, c.run);
-        CensusAdd(c.long_cycles, c.run_cycles);
-    }
-    c.run = 0;
-    c.run_cycles = 0;
-}
-
-void Rasterizer::CensusDraw(const CensusMark& mark) {
-    auto& dc = Dc();
-    const u64 spent = __rdtsc() - mark.start;
-    const auto& paths = VideoCore::BufferCache::obtain_paths;
-    auto& c = census;
-    CensusAdd(c.draws, 1);
-    u32 cut = RunCensus::CutCount;
-    if (scheduler.PassesBegun() != mark.passes) {
-        cut = RunCensus::CutPass;
-    } else if (paths[5] != mark.uploads) {
-        cut = RunCensus::CutUpload;
-    } else if (texture_set_misses + texture_set_revalidated != mark.textures) {
-        cut = RunCensus::CutTexture;
-    } else if (begin_memo_misses != mark.targets) {
-        cut = RunCensus::CutTarget;
-    } else if (paths[1] + paths[4] != mark.written) {
-        cut = RunCensus::CutWrite;
-    } else if (dc.census_other) {
-        cut = RunCensus::CutOther;
-    } else if (VideoCore::BufferCache::try_dirty) {
-        cut = RunCensus::CutLookup;
-    }
-    if (cut != RunCensus::CutCount) {
-        CensusAdd(c.dirty_cycles, spent);
-        CensusEndRun(cut);
-        return;
-    }
-    CensusAdd(c.clean, 1);
-    CensusAdd(c.clean_cycles, spent);
-    CensusAdd(c.streamed, paths[2] != mark.streamed ? 1 : 0);
-    ++c.run;
-    c.run_cycles += spent;
-}
-
 void Rasterizer::PrintPipeStats() {
     static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
     if (!stats || (draw_pipe->packets & 1023) != 0) {
@@ -2234,110 +2054,6 @@ void Rasterizer::PrintPipeStats() {
                     take(BbStats::lookahead_waits) / seconds, 100.0 * busy / cycles,
                     take(BbStats::lookahead_recovered));
     }
-    if (CensusWanted()) {
-        auto& c = census;
-        static std::array<u64, 32> last_census{};
-        u32 slot = 0;
-        const auto delta = [&](const std::atomic<u64>& counter) {
-            const u64 value = counter.load(std::memory_order_relaxed);
-            const u64 grown = value - last_census[slot];
-            last_census[slot++] = value;
-            return double(grown);
-        };
-        const double draws = delta(c.draws);
-        const double clean = delta(c.clean);
-        const double streamed = delta(c.streamed);
-        const double clean_cycles = delta(c.clean_cycles);
-        const double dirty_cycles = delta(c.dirty_cycles);
-        const double long_runs = delta(c.long_runs);
-        const double long_draws = delta(c.long_draws);
-        const double long_cycles = delta(c.long_cycles);
-        std::array<double, 4> lengths{};
-        for (u32 i = 0; i < lengths.size(); ++i) {
-            lengths[i] = delta(c.lengths[i]);
-        }
-        std::array<double, RunCensus::CutCount> cuts{};
-        for (u32 i = 0; i < cuts.size(); ++i) {
-            cuts[i] = delta(c.cuts[i]);
-        }
-        const double us = 1e6 * seconds / cycles;
-        const double dirty = draws - clean;
-        const double stage_b = double(busy - last_busy);
-        const auto share = [&](double part) { return draws > 0 ? 100.0 * part / draws : 0.0; };
-        std::printf("  runs for workers: %.0f%% of %.0f draws/s clean (%.2f us each, the others "
-                    "%.2f us), %.0f%% in runs of 8 or more (%.0f runs/s, %.1f draws each, %.1f%% "
-                    "of stage B's time: two workers would take up to %.1f%% off it); draws by run "
-                    "length 1-7 %.0f%%, 8-15 %.0f%%, 16-63 %.0f%%, 64+ %.0f%%; runs ended by",
-                    share(clean), draws / seconds, clean > 0 ? clean_cycles * us / clean : 0.0,
-                    dirty > 0 ? dirty_cycles * us / dirty : 0.0, share(long_draws),
-                    long_runs / seconds, long_runs > 0 ? long_draws / long_runs : 0.0,
-                    stage_b > 0 ? 100.0 * long_cycles / stage_b : 0.0,
-                    stage_b > 0 ? 100.0 * long_cycles * 2.0 / 3.0 / stage_b : 0.0,
-                    share(lengths[0]), share(lengths[1]), share(lengths[2]), share(lengths[3]));
-        static constexpr const char* cut_names[RunCensus::CutCount] = {
-            "task", "dispatch", "other packet", "new pass", "upload",
-            "texture lookup", "targets", "GPU-written buffer", "other",
-            "a lookup the read-only path refuses"};
-        for (u32 i = 0; i < cuts.size(); ++i) {
-            std::printf(" %s %.0f/s", cut_names[i], cuts[i] / seconds);
-        }
-        std::printf("; clean draws streaming constants %.0f%%\n",
-                    clean > 0 ? 100.0 * streamed / clean : 0.0);
-        if (VideoCore::BufferCache::TryCompare()) {
-            using Cache = VideoCore::BufferCache;
-            static std::array<u64, static_cast<u32>(Cache::TryRead::Count)> last_counts{};
-            static u64 last_differ = 0, last_uploaded = 0, last_rebound = 0, last_raced = 0, last_elsewhere = 0, last_neighbour = 0;
-            static constexpr const char* names[] = {
-                "clean", "configuration", "GPU write pending", "no arena", "demoted block",
-                "not resident", "partly in place", "CPU-modified", "slice full"};
-            u64 total = 0;
-            for (u32 i = 0; i < last_counts.size(); ++i) {
-                total += Cache::try_read_counts[i] - last_counts[i];
-            }
-            std::printf("  clean buffer lookups (compare): %.0f/s read binds, %llu differ from "
-                        "the general lookup, %llu where the general lookup uploaded, %llu where "
-                        "it changed what memory is bound (%llu uploads after a guest write between the two, "
-                        "%llu residency changes elsewhere, %llu uploads of other bytes during the call):",
-                        total / seconds,
-                        static_cast<unsigned long long>(Cache::try_read_differ - last_differ),
-                        static_cast<unsigned long long>(Cache::try_read_uploaded - last_uploaded),
-                        static_cast<unsigned long long>(Cache::try_read_rebound - last_rebound),
-                        static_cast<unsigned long long>(Cache::try_read_raced - last_raced),
-                        static_cast<unsigned long long>(Cache::try_read_elsewhere - last_elsewhere),
-                        static_cast<unsigned long long>(Cache::try_read_neighbour - last_neighbour));
-            for (u32 i = 0; i < last_counts.size(); ++i) {
-                const u64 count = Cache::try_read_counts[i] - last_counts[i];
-                std::printf(" %s %.1f%%", names[i], total ? 100.0 * count / total : 0.0);
-            }
-            std::printf("\n");
-            static std::array<u64, static_cast<u32>(TrySet::Count)> last_sets{};
-            static u64 last_set_differ = 0;
-            static constexpr const char* set_names[] = {"clean",       "not memoized", "memo miss",
-                                                        "image check", "scene proxy",  "layout change"};
-            u64 sets = 0;
-            for (u32 i = 0; i < last_sets.size(); ++i) {
-                sets += try_set_counts[i] - last_sets[i];
-            }
-            std::printf("  clean texture sets (compare): %.0f/s, %llu differ from the general "
-                        "path:",
-                        sets / seconds,
-                        static_cast<unsigned long long>(try_set_differ - last_set_differ));
-            for (u32 i = 0; i < last_sets.size(); ++i) {
-                const u64 count = try_set_counts[i] - last_sets[i];
-                std::printf(" %s %.1f%%", set_names[i], sets ? 100.0 * count / sets : 0.0);
-            }
-            std::printf("\n");
-            last_sets = try_set_counts;
-            last_set_differ = try_set_differ;
-            last_counts = Cache::try_read_counts;
-            last_differ = Cache::try_read_differ;
-            last_uploaded = Cache::try_read_uploaded;
-            last_rebound = Cache::try_read_rebound;
-            last_raced = Cache::try_read_raced;
-            last_elsewhere = Cache::try_read_elsewhere;
-            last_neighbour = Cache::try_read_neighbour;
-        }
-    }
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
     window = now;
@@ -2438,30 +2154,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     if (gx_record && (BbEngine::GxRecords::Compared() || BbEngine::GxRecords::Used())) {
         BbSections::ScopeA record_scope{BbSections::ARecord};
         ApplyGxRecord(pipeline, used_prepared, gx_record, is_indexed);
-    }
-    if (BbEngine::GxTrace::On()) {
-        if (const void* sample = BbEngine::GxTrace::TakeSample()) {
-            for (const auto* stage : pipeline->GetStages()) {
-                if (!stage) {
-                    continue;
-                }
-                for (const auto& resource : stage->images) {
-                    const auto sharp = resource.GetSharp(*stage);
-                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceImage, &sharp, resource.is_r128 == false);
-                }
-                for (const auto& resource : stage->buffers) {
-                    if (resource.IsSpecial()) {
-                        continue;
-                    }
-                    const auto sharp = resource.GetSharp(*stage);
-                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceBuffer, &sharp, false);
-                }
-                for (const auto& resource : stage->samplers) {
-                    const auto sharp = resource.GetSharp(*stage);
-                    BbEngine::GxTrace::NoteResource(sample, BbEngine::GxTrace::ResourceSampler, &sharp, false);
-                }
-            }
-        }
     }
     if (pipelined && FilterDrawPasses()) {
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
@@ -2688,7 +2380,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     if (camera_motion->Enabled() && regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
-        dc.census_other = true;
         scene_started = false;
         // bbport: native HDR output: the gain map of the frame this pass copies, for this
         // display buffer (before OnFrameStart forgets the frame's UI phase).
@@ -2707,7 +2398,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
-    dc.census_other |= FrameCapture::Active();
     dc.bind_prepared = used_prepared;
     dc.motion_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexOutputs) != 0;
     dc.capture_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexCapture) != 0;
@@ -2824,7 +2514,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         });
     }
     if (dc.capture_draw) {
-        dc.census_other = true;
         EffectsCaptureDraw(regs, pipeline, is_indexed, index_offset);
     }
     if (effects_wanted) {
@@ -2863,7 +2552,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // is missing for those frames.
     vk::Pipeline handle = pipeline->HandleIfReady();
     if (!handle) [[unlikely]] {
-        dc.census_other = true;
         if (SkipUncompiledDraw(pipeline)) {
             ResetBindings(false);
             scheduler.KickRecording();
@@ -2887,7 +2575,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto query = occlusion ? occlusion->BeginDraw(dc.push_data.scene_size)
                                  : Occlusion::DrawQuery{};
     if (query.pool) {
-        dc.census_other = true;
     }
     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
         if (handle) { // null: bound by the command before (BindWhenCompiled)
@@ -3940,9 +3627,6 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         all_sealed = SealedLookup(buffer.base_address, buffer.GetSize(), found, offset);
         sealed.emplace_back(found, offset);
     }
-    if (own_buffers_share) {
-        BbEngine::Batch::Note(own_buffers_share, all_sealed);
-    }
     if (all_sealed && own_buffers_mode == BbEngine::Batch::On) {
         for (std::size_t i = 0; i < guest_buffers.size(); ++i) {
             const auto& buffer = guest_buffers[i];
@@ -4050,14 +3734,6 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     }
 
     v.num_buffers = static_cast<u32>(guest_buffers.size());
-    if (all_sealed && own_buffers_step) {
-        bool same = sealed.size() == guest_buffers.size();
-        for (std::size_t i = 0; same && i < sealed.size(); ++i) {
-            same = (sealed[i].first ? sealed[i].first->Handle() : vk::Buffer{}) == host_buffers[i] &&
-                   (!sealed[i].first || sealed[i].second == host_offsets[i]);
-        }
-        BbEngine::Batch::Note(own_buffers_step, same);
-    }
 }
 
 bool Rasterizer::SealedLookup(VAddr base, u64 size, const VideoCore::Buffer*& buffer, u64& offset) {
@@ -4115,14 +3791,7 @@ std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindVertexMemo(VAddr base, 
         buffer_cache.NoteBound(base, size);
         return {memo.buffer, memo.offset};
     }
-    VideoCore::BufferCache::synced_upload = false;
     const auto found = buffer_cache.ObtainBuffer(base, u32(size), false);
-    if (hit && vertex_memo_step) {
-        BbEngine::Batch::Note(vertex_memo_step, found.first == memo.buffer && found.second == memo.offset);
-        if (vertex_memo_races) {
-            BbEngine::Batch::Note(vertex_memo_races, !VideoCore::BufferCache::synced_upload);
-        }
-    }
     if (buffer_cache.Persistent(found.first) && size > VideoCore::BufferCache::STREAM_THRESHOLD) {
         memo = {base, size, buffer_cache.StructureGeneration(), found.first, found.second,
                 buffer_cache.InPlaceRange(base, size)};
@@ -5448,131 +5117,8 @@ bool Rasterizer::RevalidateTextureSet(TextureSet& set, u64 generation) {
     return true;
 }
 
-Rasterizer::TrySet Rasterizer::TryTextureSet(const Shader::Info& stage,
-                                             const PreparedStage* prepared, TrySetInfos& infos) {
-    const u32 count = static_cast<u32>(stage.images.size());
-    if (!prepared || count == 0 || count > TextureSet::MaxImages ||
-        BbToggle::Disabled(BbToggle::TextureSetMemo) || FrameCapture::Active()) {
-        return TrySet::Skip;
-    }
-    for (const auto& image : stage.images) {
-        if (image.is_written || image.mip_fallback_mode != Shader::MipStorageFallbackMode::None) {
-            return TrySet::Skip;
-        }
-    }
-    const bool point_native = scene_targets->Reduced() && PointReadsNative(stage, prepared);
-    u64 key = XXH3_64bits_withSeed(prepared->image_hashes, count * sizeof(u64),
-                                   reinterpret_cast<u64>(&stage) ^ (point_native ? 2 : 0));
-    key |= 1;
-    const auto& set = texture_sets[key % texture_sets.size()];
-    if (set.key != key || set.stage != &stage || set.count != count ||
-        set.scene_generation != scene_targets->Generation() ||
-        !std::equal(set.hashes.begin(), set.hashes.begin() + count, prepared->image_hashes)) {
-        return TrySet::Miss;
-    }
-    if (set.generation != texture_cache.RegistryGeneration()) {
-        static const bool revalidate = [] {
-            const char* env = std::getenv("LANTERN_TEXSET_REVALIDATE");
-            return env && env[0] == '1';
-        }();
-        if (!revalidate || !set.exact || set.generation == ~0ull || !MemoRevalidation()) {
-            return TrySet::Miss;
-        }
-        for (u32 i = 0; i < set.count; ++i) {
-            const auto& entry = set.entries[i];
-            if (entry.id && (entry.found != entry.id ||
-                             !texture_cache.IsRegisteredImage(entry.found, set.found_uids[i]) ||
-                             texture_cache.GetAssociatedDepth(texture_cache.GetImage(entry.found)))) {
-                return TrySet::Miss;
-            }
-        }
-    }
-    const bool proxies_on = !BbToggle::Disabled(BbToggle::SampleSceneProxies);
-    for (u32 i = 0; i < count; ++i) {
-        const auto& entry = set.entries[i];
-        if (!entry.id) {
-            infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
-            continue;
-        }
-        const auto& image = texture_cache.GetImage(entry.id);
-        if (image.backing != entry.backing || image.binding.needs_rebind ||
-            image.binding.is_target || !texture_cache.IsUpToDate(entry.id) ||
-            (!entry.proxy && image.scene_proxy && proxies_on && !point_native) ||
-            (upscaler->Enabled() && upscaler->RedirectsSampled(entry.id))) {
-            return TrySet::Check;
-        }
-        if (entry.proxy || image.scene_proxy) {
-            return TrySet::Proxy;
-        }
-        const auto layout = image.info.props.is_depth
-                                ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-                                : vk::ImageLayout::eShaderReadOnlyOptimal;
-        const auto settled = [&](const auto& state) {
-            return state.layout == layout &&
-                   state.access_mask == vk::AccessFlags2{vk::AccessFlagBits2::eShaderRead};
-        };
-        const auto& states = image.backing->subresource_states;
-        bool all_settled = true;
-        if (states.empty()) {
-            all_settled = settled(image.backing->state);
-        } else {
-            const bool partial = entry.range.base != VideoCore::SubresourceBase{} ||
-                                 entry.range.extent != image.info.resources;
-            const u32 layers = image.info.resources.layers;
-            const u32 first_mip = partial ? entry.range.base.level : 0;
-            const u32 num_mips = partial ? entry.range.extent.levels : image.info.resources.levels;
-            const u32 first_layer = partial ? entry.range.base.layer : 0;
-            const u32 num_layers = partial ? entry.range.extent.layers : layers;
-            for (u32 mip = first_mip; all_settled && mip < first_mip + num_mips; ++mip) {
-                for (u32 layer = first_layer; layer < first_layer + num_layers; ++layer) {
-                    const std::size_t index = std::size_t(mip) * layers + layer;
-                    if (index >= states.size() || !settled(states[index])) {
-                        all_settled = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if (!all_settled) {
-            return TrySet::Transit;
-        }
-        infos.emplace_back(VK_NULL_HANDLE, entry.view, image.backing->state.layout);
-    }
-    return TrySet::Clean;
-}
-
 bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
-    if (!VideoCore::BufferCache::TryCompare()) {
-        return BindTexturesFromSetGeneral(stage, prepared, first_image_idx, barrier, slot);
-    }
-    auto& dc = Dc();
-    TrySetInfos tried;
-    const TrySet result = TryTextureSet(stage, prepared, tried);
-    const std::size_t before = dc.image_infos.size();
-    bool needed_barrier = false;
-    const bool hit =
-        BindTexturesFromSetGeneral(stage, prepared, first_image_idx, needed_barrier, slot);
-    barrier |= needed_barrier;
-    ++try_set_counts[static_cast<u32>(result)];
-    if (result != TrySet::Clean && !stage.images.empty()) {
-        VideoCore::BufferCache::try_dirty = true;
-    }
-    if (result == TrySet::Clean) {
-        bool same = hit && !needed_barrier && dc.image_infos.size() - before == tried.size();
-        for (std::size_t i = 0; same && i < tried.size(); ++i) {
-            const auto& real = dc.image_infos[before + i];
-            same = real.sampler == tried[i].sampler && real.imageView == tried[i].imageView &&
-                   real.imageLayout == tried[i].imageLayout;
-        }
-        try_set_differ += !same;
-    }
-    return hit;
-}
-
-bool Rasterizer::BindTexturesFromSetGeneral(const Shader::Info& stage,
-                                            const PreparedStage* prepared, u32 first_image_idx,
-                                            bool& barrier, TextureSet*& slot) {
     auto& dc = Dc();
     BB_SECTION(TexSet);
     const u32 count = static_cast<u32>(stage.images.size());

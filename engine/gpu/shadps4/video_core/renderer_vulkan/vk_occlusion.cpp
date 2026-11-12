@@ -93,8 +93,6 @@ struct Occlusion::Resolver {
     u64 runs = 0, result_calls = 0, reset_calls = 0, reset_queries = 0;
     u64 resolve_ns = 0, result_read_ns = 0, store_ns = 0;
     bool report_enabled = false;
-    bool measure_only = false;
-    bool no_gpu_queries = false;
     std::atomic<u64> pool_full{0}, pred_sets{0}, pred_known{0}, pred_skipped{0}, pred_drawn{0};
     std::atomic<u64> wait_flushes{0};
     std::chrono::steady_clock::time_point report_time = std::chrono::steady_clock::now();
@@ -165,8 +163,6 @@ bool Occlusion::Init() {
     resolver->precise = precise;
     resolver->max_lag = EnvNumber("BB_OCCLUSION_MAX_LAG", 6);
     resolver->report_enabled = std::getenv("BB_FRAME_STATS") != nullptr;
-    resolver->measure_only = EnvNumber("BB_OCCLUSION_MEASURE_ONLY", 0) != 0;
-    resolver->no_gpu_queries = EnvNumber("BB_OCCLUSION_NO_GPU_QUERIES", 0) != 0;
     std::printf("Occlusion: conservative visibility (BB_OCCLUSION=0: always visible) - "
                 "each query block the game opens is measured over up to %llu draws and answered "
                 "once the GPU has run them (at most %llu frames late), %s; only a complete, fresh "
@@ -175,14 +171,6 @@ bool Occlusion::Init() {
                 static_cast<unsigned long long>(draw_budget),
                 static_cast<unsigned long long>(resolver->max_lag),
                 precise ? "precise counts" : "not precise (any nonzero count reads plainly visible)");
-    if (resolver->measure_only) {
-        std::printf("Occlusion: measure-only (BB_OCCLUSION_MEASURE_ONLY): real queries, every "
-                    "answer visible\n");
-    }
-    if (resolver->no_gpu_queries) {
-        std::printf("Occlusion: no GPU queries (BB_OCCLUSION_NO_GPU_QUERIES): tracking and visible "
-                    "answers without Vulkan query commands\n");
-    }
     return true;
 }
 
@@ -248,9 +236,6 @@ bool Occlusion::HasUnsubmittedDumps(u64 current_tick) const noexcept {
 }
 
 Occlusion::DrawQuery Occlusion::TakeQuery(u32 scene_size) noexcept {
-    if (resolver->no_gpu_queries) {
-        return {};
-    }
     if (next_query - resolver->released.load(std::memory_order_acquire) >= RingSize) {
         resolver->pool_full.fetch_add(1, std::memory_order_relaxed);
         return {};
@@ -390,9 +375,7 @@ void Occlusion::Resolver::Process(const Record& record) {
         }
         const u64 now = FramesSoFar();
         const bool fresh = Model::QueryFresh(record.frame, now, max_lag);
-        count = measure_only
-                    ? Model::PlainlyVisible
-                    : Model::VisibilityCount(count, record.queries, record.complete, fresh);
+        count = Model::VisibilityCount(count, record.queries, record.complete, fresh);
         plainly += count == Model::PlainlyVisible ? 1 : 0;
         if (!Model::LateAnswerWritable(record.frame, now, max_lag,
                                        answered.contains(record.block))) {

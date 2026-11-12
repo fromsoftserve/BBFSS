@@ -14,7 +14,6 @@
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
 #include "engine/engine_hooks.h"
-#include "engine/batch.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -392,7 +391,6 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             cache_saved.wait(false, std::memory_order_acquire);
             saved = cache_saved.load(std::memory_order_acquire);
         }
-        BbEngine::Batch::Report("exit");
         std::printf("Exit: clean shutdown in %lld ms\n",
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - exit_started)

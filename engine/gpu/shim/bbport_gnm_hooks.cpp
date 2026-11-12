@@ -2,7 +2,6 @@
 #include "bbport_gnm_hooks.h"
 #include "bbport_native_calls.h"
 #include "engine/gx_records.h"
-#include "engine/gx_trace.h"
 
 #include <algorithm>
 #include <initializer_list>
@@ -480,7 +479,6 @@ void NativeDraw(u64 cb, BbNativeCalls::DrawRecord r) {
         }
         BbNativeCalls::EncodeRecordNop(r, out);
         BbNativeCalls::NoteWritten(true);
-        if (BbEngine::GxTrace::On()) BbEngine::GxTrace::Stamp(reinterpret_cast<u64>(out), r.index_count);
         if (BbEngine::GxRecords::On()) BbEngine::GxRecords::Stamp(reinterpret_cast<u64>(out), r.index_count);
     }
     const u64 after = reinterpret_cast<u64>(out + n);

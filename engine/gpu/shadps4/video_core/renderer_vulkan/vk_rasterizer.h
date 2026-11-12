@@ -10,7 +10,6 @@
 #include <mutex>
 #include <thread>
 #include "common/recursive_lock.h"
-#include "engine/ring_constants.h"
 #include "engine/batch.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -224,7 +223,7 @@ public:
     void RetireSubmission();
     /// Stage A: guest memory the recording thread will write for work handed to it (storage
     /// buffers, DMA, WriteData, fences); constants overlapping it are bound there, not copied here.
-    void NotePendingGpuWrite(VAddr address, u64 size, u8 writer = BbEngine::RingConstants::WriterShader);
+    void NotePendingGpuWrite(VAddr address, u64 size);
     /// Stage A: guest memory the recording thread will read for the next packet (buffer bindings).
     void NotePendingRead(VAddr address, u64 size);
     /// Before a guest-visible write: fences deferred earlier are written first.
@@ -476,35 +475,6 @@ private:
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
     void PrintPipeStats();
-    struct RunCensus {
-        enum Cut : u32 {
-            CutTask,
-            CutDispatch,
-            CutPacket,
-            CutPass,
-            CutUpload,
-            CutTexture,
-            CutTarget,
-            CutWrite,
-            CutOther,
-            CutLookup,
-            CutCount,
-        };
-        std::atomic<u64> draws{0}, clean{0}, streamed{0}, clean_cycles{0}, dirty_cycles{0};
-        std::atomic<u64> runs{0}, long_runs{0}, long_draws{0}, long_cycles{0};
-        std::array<std::atomic<u64>, 4> lengths{};
-        std::array<std::atomic<u64>, CutCount> cuts{};
-        u32 run = 0;
-        u64 run_cycles = 0;
-    };
-    struct CensusMark {
-        u64 passes, uploads, written, streamed, textures, targets, start;
-    };
-    static bool CensusWanted();
-    CensusMark CensusBegin();
-    void CensusDraw(const CensusMark& mark);
-    void CensusEndRun(u32 cut);
-    RunCensus census;
     /// The registers of the draw being recorded: stage B's copy there, else Liverpool's.
     const AmdGpu::Regs& Regs() const;
     AmdGpu::CbDbExtent CbExtent(u32 index) const;
@@ -583,23 +553,6 @@ private:
     /// Returns true when the stage's images were bound from the memo.
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
-    bool BindTexturesFromSetGeneral(const Shader::Info& stage, const PreparedStage* prepared,
-                                    u32 first_image_idx, bool& barrier, TextureSet*& slot);
-    enum class TrySet : u32 {
-        Clean,
-        Skip,
-        Miss,
-        Check,
-        Proxy,
-        Transit,
-        Count,
-    };
-    using TrySetInfos =
-        boost::container::static_vector<vk::DescriptorImageInfo, TextureSet::MaxImages>;
-    TrySet TryTextureSet(const Shader::Info& stage, const PreparedStage* prepared,
-                         TrySetInfos& infos);
-    std::array<u64, static_cast<u32>(TrySet::Count)> try_set_counts{};
-    u64 try_set_differ = 0;
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
     const PreparedStage* FindPreparedStage(const Shader::Info& stage) const;
     /// The same for any prepared draw (the lookahead thread).
@@ -919,10 +872,6 @@ private:
     std::array<ConstantCopy, 4096> constant_copies{};
     std::vector<u64> gpu_written_granules = std::vector<u64>(1u << 14);
     u64 constant_checks = 0;
-    bool const_census = false;
-    std::uint8_t ring_constants = 0;
-    BbEngine::RingConstants::Ring gx_ring;
-    std::deque<BbEngine::RingConstants::QueuedWrite> ring_writes;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
@@ -959,8 +908,6 @@ private:
     };
     std::array<VertexMemo, 4096> vertex_memo{};
     BbEngine::Batch::Mode vertex_memo_mode = BbEngine::Batch::Off;
-    BbEngine::Batch::Step* vertex_memo_step = nullptr;
-    BbEngine::Batch::Step* vertex_memo_races = nullptr;
     std::pair<const VideoCore::Buffer*, u64> BindVertexMemo(VAddr base, u64 size);
     struct SealedBind {
         VAddr base = 0;
@@ -972,14 +919,11 @@ private:
     };
     std::array<SealedBind, 4096> sealed_binds{};
     BbEngine::Batch::Mode own_buffers_mode = BbEngine::Batch::Off;
-    BbEngine::Batch::Step* own_buffers_step = nullptr;
-    BbEngine::Batch::Step* own_buffers_share = nullptr;
     u64 sealed_hits = 0, sealed_misses = 0, sealed_draws = 0, unsealed_draws = 0;
     bool SealedLookup(VAddr base, u64 size, const VideoCore::Buffer*& buffer, u64& offset);
     static constexpr u64 RangeBindKey = 0x52414e4745ull;
     u64 range_binds = 0, range_hits = 0, range_checked = 0, range_differ = 0;
     struct DrawContext {
-        bool census_other = false;
         bool motion_draw = false;
         bool capture_draw = false;
         u64 motion_geometry{};

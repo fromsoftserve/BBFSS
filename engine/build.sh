@@ -220,12 +220,6 @@ if [[ ${1:-} == --test ]]; then
     out/isa-emulate-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_draw_tokens.cpp -o out/draw-tokens-test
     out/draw-tokens-test
-    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_const_census.cpp -o out/const-census-test
-    out/const-census-test
-    "${CXX:-clang++}" -std=c++20 -O2 -Wall -Wextra -Werror -I. tests/test_ring_constants.cpp -o out/ring-constants-test
-    out/ring-constants-test --bench
-    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_batch.cpp -o out/batch-test
-    out/batch-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_frame_gen_cap.cpp -o out/frame-gen-cap-test
     out/frame-gen-cap-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror "${threads[@]}" -I. tests/test_gx_sealed.cpp -o out/gx-sealed-test

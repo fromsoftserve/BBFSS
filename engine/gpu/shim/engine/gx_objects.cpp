@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_objects.h"
-#include "const_census.h"
-#include "ring_constants.h"
 #include "gx_sealed.h"
 #include "batch.h"
 #include "engine_hooks.h"
@@ -484,12 +482,6 @@ bool TexturesChecked() {
     return g_textures_checked.load(std::memory_order_relaxed);
 }
 
-bool UploadArena(std::uint64_t* base, std::uint64_t* bytes) {
-    *bytes = g_arena_bytes.load(std::memory_order_relaxed);
-    *base = g_arena_base.load(std::memory_order_relaxed);
-    return *bytes != 0;
-}
-
 bool SealingOn() {
     return g_sealed != nullptr;
 }
@@ -517,12 +509,6 @@ void NoteGpuWrite(std::uint64_t address, std::uint64_t size) {
 
 void RetireSealed(std::uint64_t address, std::uint64_t size) {
     if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByUpdate);
-}
-
-bool BufferAt(std::uint64_t address) {
-    ConstCensus::Range found;
-    std::scoped_lock lock(g_resource_mutex);
-    return ConstCensus::ContainingRange(g_resources, address, [](const Resource& r) { return r.kind == Buffer ? r.bytes : 0; }, &found);
 }
 
 HeldImage HeldAt(std::uint64_t address) {
@@ -721,23 +707,10 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const bool buffers = buffers_env && buffers_env[0] == '1';
     const char* records = std::getenv("LANTERN_GX_RECORDS");
     const bool want_records = records && (records[0] == '1' || records[0] == '2' || records[0] == '3');
-    const char* census = std::getenv("LANTERN_CONST_CENSUS");
-    const bool want_census = census && census[0] == '1';
-    const char* ring = std::getenv("LANTERN_RING_CONSTANTS");
-    const bool want_ring = RingConstants::Parse(ring) != RingConstants::Off;
     const bool own_buffers = Batch::Switch("LANTERN_GX_OWN_BUFFERS") != Batch::Off;
-    const bool objects = textures || buffers || want_records || want_census || (on && on[0] == '1');
+    const bool objects = textures || buffers || want_records || (on && on[0] == '1');
     if (!objects && !own_buffers) {
         host_log("GX objects: off (LANTERN_GX_TEXTURES, LANTERN_GX_BUFFERS or LANTERN_GX_RECORDS=1 turns them on)");
-        if (want_ring) {
-            Hook pool;
-            if (Prepare(pool, image, size, kUploadPool, kUploadPoolEntry, OnUploadPool)) {
-                Commit(std::span<Hook>(&pool, 1));
-                host_log("GX upload pool: watched for ring constants (LANTERN_RING_CONSTANTS=1)");
-            } else {
-                host_log("GX upload pool: its entry differs from 1.09, ring constants off");
-            }
-        }
         return false;
     }
     for (const Vtable& v : kVtables) {
