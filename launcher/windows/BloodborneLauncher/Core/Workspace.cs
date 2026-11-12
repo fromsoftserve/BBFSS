@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 #if AVALONIA
 using Avalonia.Threading;
 #else
@@ -162,6 +162,8 @@ namespace BloodborneLauncher.Core
                 Settings.Set("game_dir", guess);
             }
 
+            if (Paths.ImportExistingSettings(Paths.PortDir, chosen) is { } imported)
+                Log(L.F($"Imported existing graphics and feature settings from {imported}."), LogLevel.Good);
             Ini.Load();
             // The DLSS model moved from the launcher's settings to lantern.ini (dlss_preset), where the
             // in-game menu changes it live: an older launcher's choice is carried over once.

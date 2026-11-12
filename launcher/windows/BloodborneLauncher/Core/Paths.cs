@@ -103,6 +103,113 @@ namespace BloodborneLauncher.Core
             return path;
         }
 
+        /// <summary>A freshly extracted package inherits the remembered BBFSS package's settings, or
+        /// the most recently changed customized one in a common install location. An ini already
+        /// changed in this package always wins; defaults the launcher appended do not count as changes.</summary>
+        public static string? ImportExistingSettings(string package, string? remembered)
+        {
+            if (Environment.GetEnvironmentVariable("BB_CONFIG") is { Length: > 0 } || !IsPortDir(package)) return null;
+            try
+            {
+                var target = Migrated(package);
+                var shipped = Path.Combine(EngineDirOf(package), "lantern.default.ini");
+                if (!File.Exists(target) || !File.Exists(shipped) ||
+                    !FreshSettings(ReadSettings(target), ReadSettings(shipped))) return null;
+
+                var current = Path.GetFullPath(package).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var candidates = new List<string>();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { current };
+                void Add(string? dir)
+                {
+                    if (string.IsNullOrWhiteSpace(dir)) return;
+                    var full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (seen.Add(full) && IsPortDir(full) && File.Exists(Path.Combine(full, "lantern.ini")))
+                        candidates.Add(full);
+                }
+
+                Add(remembered);
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var scannedRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var visited = 0;
+                void Scan(string root, int depth)
+                {
+                    if (depth >= 2 || stopwatch.ElapsedMilliseconds > 4000 || visited >= 4000) return;
+                    try
+                    {
+                        foreach (var dir in Directory.EnumerateDirectories(root))
+                        {
+                            if (++visited > 4000 || stopwatch.ElapsedMilliseconds > 4000) return;
+                            var name = Path.GetFileName(dir);
+                            if (name is "Windows" or "Program Files" or "Program Files (x86)" or "ProgramData" or
+                                "$RECYCLE.BIN" or "System Volume Information" or "AppData" or ".git" or "node_modules" or
+                                "engine" or "out") continue;
+                            if (name.Contains("bbfss", StringComparison.OrdinalIgnoreCase) ||
+                                name.Contains("bloodborne", StringComparison.OrdinalIgnoreCase))
+                            {
+                                Add(dir);
+                                Add(Path.Combine(dir, "BBFSS"));
+                            }
+                            Scan(dir, depth + 1);
+                        }
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+                void ScanRoot(string? root)
+                {
+                    if (string.IsNullOrWhiteSpace(root)) return;
+                    var full = Path.GetFullPath(root);
+                    if (Directory.Exists(full) && scannedRoots.Add(full)) Scan(full, 0);
+                }
+
+                var parent = Directory.GetParent(current);
+                ScanRoot(parent?.FullName);
+                ScanRoot(parent?.Parent?.FullName);
+                foreach (var folder in new[] { Environment.SpecialFolder.Desktop, Environment.SpecialFolder.MyDocuments })
+                    ScanRoot(Environment.GetFolderPath(folder));
+                ScanRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
+                foreach (var drive in DriveInfo.GetDrives())
+                    if (drive.IsReady && drive.DriveType == DriveType.Fixed) ScanRoot(drive.RootDirectory.FullName);
+
+                foreach (var dir in candidates.Take(1).Concat(candidates.Skip(1).OrderByDescending(dir =>
+                             File.GetLastWriteTimeUtc(Path.Combine(dir, "lantern.ini")))))
+                {
+                    var source = Path.Combine(dir, "lantern.ini");
+                    try
+                    {
+                        var sourceShipped = Path.Combine(EngineDirOf(dir), "lantern.default.ini");
+                        if (File.Exists(sourceShipped) && FreshSettings(ReadSettings(source), ReadSettings(sourceShipped)))
+                            continue;
+                        File.Copy(source, target, overwrite: true);
+                        return source;
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (ArgumentException) { }
+            return null;
+        }
+
+        private static bool FreshSettings(Dictionary<string, string> current, Dictionary<string, string> shipped)
+        {
+            if (SameSettings(current, shipped)) return true;
+            var launcher = IniFile.Defaults.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            foreach (var effect in Choices.Effects) launcher[effect.Key] = effect.Default ? "1" : "0";
+            var previous = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["model_lod"] = "0", ["effect_gtao"] = "0", ["effect_gi"] = "0", ["graphics_gi_probes"] = "0",
+                ["effect_ssr"] = "0", ["effect_modern_ssr"] = "0", ["effect_pom_cavity"] = "0",
+                ["effect_volumetric_light"] = "0", ["effect_point_fog"] = "0", ["skip_intro"] = "0",
+            };
+            return current.All(pair =>
+                shipped.TryGetValue(pair.Key, out var value) ? pair.Value == value
+                : launcher.TryGetValue(pair.Key, out value) && pair.Value == value ||
+                  previous.TryGetValue(pair.Key, out value) && pair.Value == value);
+        }
+
         /// <summary>An ini's key=value pairs (comments, blank lines and the order left out).</summary>
         private static Dictionary<string, string> ReadSettings(string path)
         {
